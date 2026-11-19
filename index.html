@@ -163,10 +163,11 @@ let trackAddress = null;
 const ddbCache = new Map();
 const aprsCache = new Map();
 const nameCache = new Map();
+const lastAltCache = new Map();
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmtAlt = v => v == null ? '—' : `${Math.round(v).toLocaleString()} m`;
+const fmtAlt = v => v == null ? '' : `${Math.round(v).toLocaleString()} m`;
 
 function setStatus(kind, text) { 
   $('statusDot').className = 'dot ' + kind; 
@@ -289,11 +290,14 @@ function parseAprsLine(line, timestampMs) {
   let course = null, speed = null, altitude = null, climb = null;
   
   const remainder = line.substring(baseMatch.index + baseMatch[0].length);
-  const csaMatch = remainder.match(/^(\d{3})\/(\d{3})\/A=(-?\d{6})/);
-  if (csaMatch) {
-      course = parseInt(csaMatch[1], 10);
-      speed = parseInt(csaMatch[2], 10) * 1.852;
-      altitude = parseInt(csaMatch[3], 10) * 0.3048;
+  const csMatch = remainder.match(/^(\d{3})\/(\d{3})/);
+  if (csMatch) {
+    course = parseInt(csMatch[1], 10);
+    speed = parseInt(csMatch[2], 10) * 1.852;
+  }
+  const altMatch = remainder.match(/\/A=(-?\d{6})/);
+  if (altMatch) {
+    altitude = parseInt(altMatch[1], 10) * 0.3048;
   }
 
   // Filter out corrupted RF noise / impossible telemetry
@@ -356,6 +360,13 @@ function typeName(a) {
   return 'Aircraft / Station';
 }
 
+function displayModel(a) {
+  const m = (a.model || '').trim();
+  const t = (typeName(a) || '').trim();
+  if (!m || m.toLowerCase() === t.toLowerCase()) return '';
+  return m;
+}
+
 function displayName(a) {
   if (!/([0-9A-F]{6})$/i.test(a.liveLabel)) return a.liveLabel;
   if (a.streamName) return a.streamName;
@@ -364,6 +375,20 @@ function displayName(a) {
   if (a.ddbId && a.ddbId.length === 6 && /^[0-9a-f]{6}$/i.test(a.ddbId)) return a.ddbId.toUpperCase();
   if (a.ognId) return a.ognId.toUpperCase();
   return a.liveLabel || 'Unknown';
+}
+
+function displayStreamName(a) {
+  const s = (a.streamName || '').trim();
+  const n = (displayName(a) || '').trim();
+  if (!s || s.toLowerCase() === n.toLowerCase()) return '';
+  return s;
+}
+
+function displayRegistration(a) {
+  const r = (a.registration || '').trim();
+  const n = (displayName(a) || '').trim();
+  if (!r || r.toLowerCase() === n.toLowerCase()) return '';
+  return r;
 }
 
 function rebuildAircraftArray() {
@@ -381,6 +406,15 @@ function rebuildAircraftArray() {
     if (a) {
       a.aprsPacket = cached.raw;
       a.aprsReceivedAt = cached.received_at;
+
+      if (a.altitude != null) {
+        lastAltCache.set(a.address, { lat: a.lat, lon: a.lon, alt: a.altitude });
+      } else {
+        const lastAlt = lastAltCache.get(a.address);
+        if (lastAlt && Math.abs(a.lat - lastAlt.lat) < 0.0005 && Math.abs(a.lon - lastAlt.lon) < 0.0005) {
+          a.altitude = lastAlt.alt;
+        }
+      }
       
       if (nameCache.has(a.ddbId)) {
         a.streamName = nameCache.get(a.ddbId);
@@ -456,7 +490,8 @@ function statusColor(status) {
 }
 
 function formatSnrHtml(snr) {
-  if (snr == null) return '—';
+  if (snr == null) return '';
+  if (snr === 0) return '0.0 dB';
   const cls = snr >= 25 ? 'snr-strong' : snr >= 12 ? 'snr-good' : 'snr-weak';
   const label = snr >= 25 ? 'Strong' : snr >= 12 ? 'Good' : 'Weak';
   return `${snr.toFixed(1)} dB <span class="snr-badge ${cls}">${label}</span>`;
@@ -480,41 +515,47 @@ function markerIcon(a) {
     `<div class="glider-wrap"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg></div>`});
 }
 
-function valueText(value) { return (value == null || value === '') ? '—' : String(value); }
-function popupRow(label, value) { return `<div class="popup-value"><span>${esc(label)}</span><br><b>${esc(valueText(value))}</b></div>`; }
-function popupRowHtml(label, html) { return `<div class="popup-value"><span>${esc(label)}</span><br><b>${html}</b></div>`; }
+function popupRow(label, value) {
+  if (value == null || String(value).trim() === '') return '';
+  return `<div class="popup-value"><span>${esc(label)}</span><br><b>${esc(String(value))}</b></div>`;
+}
+function popupRowHtml(label, html) {
+  if (!html) return '';
+  return `<div class="popup-value"><span>${esc(label)}</span><br><b>${html}</b></div>`;
+}
 
 function popup(a) {
   const latStr = a.lat.toFixed(6);
   const lonStr = a.lon.toFixed(6);
-  const altStr = a.altitude != null ? `${Math.round(a.altitude)}m` : '—';
+  const locText = a.altitude != null ? `${latStr},${lonStr},${Math.round(a.altitude)}m` : `${latStr},${lonStr}`;
+  const locLabel = a.altitude != null ? 'Location (Lat, Lon, Alt)' : 'Location (Lat, Lon)';
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
-  const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>Location (Lat, Lon, Alt)</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(`${latStr},${lonStr},${altStr}`)}</a></div>`;
+  const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>${locLabel}</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(locText)}</a></div>`;
   const fanetStatus = parseFanetStatus(a.aprsPacket);
   const fanetStatusHtml = fanetStatus
     ? `<span style="color:${statusColor(fanetStatus)}">${esc(fanetStatus)}</span>`
-    : '—';
+    : '';
+  const modelText = displayModel(a);
 
   const liveFields = [
-    ['Last report (Local)', a.time],
     ['Track / course (°)', a.course],
-    ['Ground speed', a.speed == null ? '—' : a.speed.toFixed(1) + ' km/h'],
+    ['Ground speed', a.speed != null ? a.speed.toFixed(1) + ' km/h' : null],
     ['Climb / sink (m/s)', a.climb],
     ['Receiver', a.receiver]
   ];
 
   const rawSection = a.aprsPacket
-    ? `<div class="popup-section">Raw Packet</div><div class="popup-raw">${esc(a.aprsPacket)}</div><div class="muted">Recv: ${esc(a.aprsReceivedAt || '—')}</div>`
+    ? `<div class="popup-section">Raw Packet</div><div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}`
     : '';
 
   return `<div class="popup-title">${esc(displayName(a))}</div>
     <div class="popup-section">Identification and Status</div>
     <div class="popup-grid">
-      ${popupRow('Over-the-air Name', a.streamName)}
+      ${popupRow('Over-the-air Name', displayStreamName(a))}
       ${popupRow('Callsign / CN', a.callsign)}
-      ${popupRow('Registration', a.registration)}
+      ${popupRow('Registration', displayRegistration(a))}
       ${popupRow('Aircraft type', typeName(a))}
-      ${popupRow('Aircraft model', a.model)}
+      ${popupRow('Aircraft model', modelText)}
       ${popupRowHtml('FANET Status', fanetStatusHtml)}
     </div>
     <div class="popup-section">Live APRS Data</div>
@@ -608,16 +649,18 @@ function render() {
   const alts = visible.map(a=>a.altitude).filter(v=>v!=null);
   $('highest').textContent = alts.length ? fmtAlt(Math.max(...alts)) : '—';
   
-  $('aircraftList').innerHTML = visible.length ? visible.slice().sort((a,b)=>(b.altitude??-1)-(a.altitude??-1)).map(a=> {
+  $('aircraftList').innerHTML = visible.length ? visible.slice().sort((a,b)=>displayName(a).localeCompare(displayName(b), undefined, {sensitivity:'base', numeric:true})).map(a=> {
     const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
     const isSelected = selectedAddress === a.address ? ' selected' : '';
     const rType = getResolvedType(a);
     const fanetStatus = parseFanetStatus(a.aprsPacket);
     const barColor = statusColor(fanetStatus);
     
-    const metricsHtml = rType === 15 
-        ? '' 
-        : `<br>${a.speed==null?'Speed —':a.speed.toFixed(1)+' km/h'} · ${a.climb==null?'Vz —':a.climb+' m/s'}`;
+    const metrics = rType === 15 ? [] : [
+      a.speed != null ? `${a.speed.toFixed(1)} km/h` : '',
+      a.climb != null ? `${a.climb} m/s` : ''
+    ].filter(Boolean);
+    const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
 
     const statusHtml = fanetStatus
         ? `<br><span style="color:${barColor};font-weight:600">${esc(fanetStatus)}</span>`
@@ -626,7 +669,7 @@ function render() {
     return `
     <div class="aircraft${isSelected}" data-key="${esc(a.address)}" tabindex="0">
       <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${esc(displayName(a))}</div>
-      <div class="meta">${esc([a.registration, a.model, typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}</div></div>
+      <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}</div></div>
       <div class="alt">${fmtAlt(a.altitude)}<div class="age">${ageSec}s ago</div></div>
     </div>`}).join('') : '<div class="empty">No aircraft match current filters.</div>';
     
