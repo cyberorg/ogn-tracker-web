@@ -12,7 +12,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 const RUN_SECONDS       = 55;
-const EXPIRE_SECONDS    = 900;   // 15 minutes
+const EXPIRE_SECONDS    = 86400; // 24 hours
 const FLUSH_INTERVAL    = 3.0;   // Batch-write to SQLite every 3 seconds
 const DDB_SYNC_INTERVAL = 21600; // Refresh full DDB every 6 hours
 
@@ -42,6 +42,16 @@ $pdo->exec('
     CREATE INDEX IF NOT EXISTS idx_aircraft_coords ON aircraft (lat, lon);
     CREATE INDEX IF NOT EXISTS idx_aircraft_ts ON aircraft (timestamp);
 
+    CREATE TABLE IF NOT EXISTS tracks (
+        id TEXT NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        alt REAL,
+        ts INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_tracks_id_ts ON tracks (id, ts);
+    CREATE INDEX IF NOT EXISTS idx_tracks_ts ON tracks (ts);
+
     CREATE TABLE IF NOT EXISTS names (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -67,7 +77,7 @@ $pdo->exec('
 $ddbUpdated = (int)$pdo->query('SELECT value FROM meta WHERE key = "ddb_updated"')->fetchColumn();
 if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
     try {
-        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.1']]);
+        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.2']]);
         $body = @file_get_contents('https://ddb.glidernet.org/download/?j=1&t=1', false, $ctx);
         if ($body !== false) {
             $data = json_decode($body, true);
@@ -122,6 +132,10 @@ $stmtUpsertPos = $pdo->prepare('
         raw = excluded.raw,
         timestamp = excluded.timestamp
 ');
+$stmtInsertTrack = $pdo->prepare('
+    INSERT INTO tracks (id, lat, lon, alt, ts)
+    VALUES (:id, :lat, :lon, :alt, :ts)
+');
 $stmtTouchPos = $pdo->prepare('UPDATE aircraft SET timestamp = :ts WHERE id = :id');
 $stmtUpsertName = $pdo->prepare('
     INSERT INTO names (id, name, updated)
@@ -136,10 +150,12 @@ $stmtMeta = $pdo->prepare('
 function flush_batch(
     PDO $pdo,
     PDOStatement $stmtUpsertPos,
+    PDOStatement $stmtInsertTrack,
     PDOStatement $stmtTouchPos,
     PDOStatement $stmtUpsertName,
     PDOStatement $stmtMeta,
     array &$posBatch,
+    array &$trackBatch,
     array &$touchBatch,
     array &$nameBatch,
     bool $prune = false
@@ -156,6 +172,15 @@ function flush_batch(
                 ':ts'  => $p['ts'],
             ]);
         }
+        foreach ($trackBatch as $t) {
+            $stmtInsertTrack->execute([
+                ':id'  => $t['id'],
+                ':lat' => $t['lat'],
+                ':lon' => $t['lon'],
+                ':alt' => $t['alt'],
+                ':ts'  => $t['ts'],
+            ]);
+        }
         foreach ($touchBatch as $id => $ts) {
             if (!isset($posBatch[$id])) {
                 $stmtTouchPos->execute([':id' => $id, ':ts' => $ts]);
@@ -165,16 +190,19 @@ function flush_batch(
             $stmtUpsertName->execute([':id' => $id, ':name' => $name, ':ts' => $now]);
         }
         if ($prune) {
-            $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . ($now - EXPIRE_SECONDS));
+            $cutoff = $now - EXPIRE_SECONDS;
+            $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . $cutoff);
+            $pdo->exec('DELETE FROM tracks WHERE ts < ' . $cutoff);
         }
         $stmtMeta->execute([':ts' => (string)$now]);
         $pdo->commit();
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
     }
-    $posBatch = [];
+    $posBatch   = [];
+    $trackBatch = [];
     $touchBatch = [];
-    $nameBatch = [];
+    $nameBatch  = [];
 }
 
 $errno = 0;
@@ -187,14 +215,16 @@ if (!$socket) {
 }
 
 stream_set_timeout($socket, 2);
-fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.1 filter a/90/-180/-90/180\r\n");
+fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.2 filter a/90/-180/-90/180\r\n");
 
 $deadline  = microtime(true) + RUN_SECONDS;
 $lastFlush = microtime(true);
 
-$posBatch   = [];
-$touchBatch = [];
-$nameBatch  = [];
+$posBatch      = [];
+$trackBatch    = [];
+$touchBatch    = [];
+$nameBatch     = [];
+$lastTrackPoint = [];
 
 while (microtime(true) < $deadline && !feof($socket)) {
     $line = fgets($socket, 1024);
@@ -231,6 +261,29 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         'raw' => $line,
                         'ts'  => $now,
                     ];
+
+                    // Skip fixed ground/weather stations from tracks table
+                    $sym = $bm[9];
+                    $isStation = ($sym === '_' || $sym === '&' || $sym === '#' || $sym === 'r');
+                    if (!$isStation && abs($lat) <= 90 && abs($lon) <= 180 && !($lat == 0.0 && $lon == 0.0)) {
+                        $alt = null;
+                        if (preg_match('/\/A=(-?\d{6})/', $line, $am)) {
+                            $alt = round((int)$am[1] * 0.3048, 1);
+                        }
+
+                        // Record track point if moved > ~10m or first point this run
+                        $prev = $lastTrackPoint[$id] ?? null;
+                        if ($prev === null || abs($lat - $prev['lat']) > 0.0001 || abs($lon - $prev['lon']) > 0.0001) {
+                            $trackBatch[] = [
+                                'id'  => $id,
+                                'lat' => $lat,
+                                'lon' => $lon,
+                                'alt' => $alt,
+                                'ts'  => $now,
+                            ];
+                            $lastTrackPoint[$id] = ['lat' => $lat, 'lon' => $lon];
+                        }
+                    }
                 } else {
                     $touchBatch[$id] = $now;
                 }
@@ -239,13 +292,13 @@ while (microtime(true) < $deadline && !feof($socket)) {
     }
 
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
-        flush_batch($pdo, $stmtUpsertPos, $stmtTouchPos, $stmtUpsertName, $stmtMeta, $posBatch, $touchBatch, $nameBatch, false);
+        flush_batch($pdo, $stmtUpsertPos, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtMeta, $posBatch, $trackBatch, $touchBatch, $nameBatch, false);
         $lastFlush = microtime(true);
     }
 }
 
 fclose($socket);
-flush_batch($pdo, $stmtUpsertPos, $stmtTouchPos, $stmtUpsertName, $stmtMeta, $posBatch, $touchBatch, $nameBatch, true);
+flush_batch($pdo, $stmtUpsertPos, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtMeta, $posBatch, $trackBatch, $touchBatch, $nameBatch, true);
 
 flock($lockFp, LOCK_UN);
 fclose($lockFp);

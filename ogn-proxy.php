@@ -1,16 +1,74 @@
 <?php
 /*
- * OGN Viewport Query API (SQLite + local DDB)
- *   ogn-proxy.php?live=1&north=...&south=...&east=...&west=...
+ * OGN Viewport & Track Query API (SQLite + local DDB)
+ *   Live viewport: ogn-proxy.php?live=1&north=...&south=...&east=...&west=...
+ *   Track:         ogn-proxy.php?track=1&id=<aircraft_id>&window=<seconds>
  */
 declare(strict_types=1);
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, max-age=0');
 
+$dbFile = __DIR__ . '/ogn-live.sqlite';
+
+// --- Track Endpoint (up to 24 hours) ---
+if (isset($_GET['track']) && $_GET['track'] === '1') {
+    $id = strtolower(trim((string)($_GET['id'] ?? '')));
+    if ($id === '' || !preg_match('/^[a-z0-9_-]{1,20}$/', $id)) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid aircraft id']);
+        exit;
+    }
+
+    $window = filter_input(INPUT_GET, 'window', FILTER_VALIDATE_INT);
+    if ($window === false || $window === null) {
+        $window = 3600; // Default 1 hour
+    }
+    $window = max(60, min(86400, $window));
+
+    if (!is_file($dbFile)) {
+        echo json_encode(['id' => $id, 'window' => $window, 'points' => []]);
+        exit;
+    }
+
+    try {
+        $pdo = new PDO('sqlite:' . $dbFile, null, null, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        ]);
+        $pdo->exec('PRAGMA busy_timeout=2000;');
+
+        $cutoff = time() - $window;
+        $stmt = $pdo->prepare('
+            SELECT lat, lon, alt, ts
+            FROM tracks
+            WHERE id = :id AND ts >= :cutoff
+            ORDER BY ts ASC
+            LIMIT 5000
+        ');
+        $stmt->execute([':id' => $id, ':cutoff' => $cutoff]);
+
+        $points = [];
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $points[] = [
+                (float)$row['lat'],
+                (float)$row['lon'],
+                $row['alt'] !== null ? (float)$row['alt'] : null,
+                (int)$row['ts'],
+            ];
+        }
+
+        echo json_encode(['id' => $id, 'window' => $window, 'points' => $points]);
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => 'Track read error']);
+    }
+    exit;
+}
+
+// --- Live Viewport Endpoint ---
 if (!isset($_GET['live']) || $_GET['live'] !== '1') {
     http_response_code(400);
-    echo json_encode(['error' => 'Missing live=1 parameter']);
+    echo json_encode(['error' => 'Missing live=1 or track=1 parameter']);
     exit;
 }
 
@@ -26,7 +84,9 @@ if ($north === false || $south === false || $east === false || $west === false |
     exit;
 }
 
-$dbFile = __DIR__ . '/ogn-live.sqlite';
+$south = max(-90.0, min(90.0, $south));
+$north = max(-90.0, min(90.0, $north));
+
 if (!is_file($dbFile)) {
     echo json_encode([
         'updated' => 0,
@@ -43,10 +103,25 @@ try {
     ]);
     $pdo->exec('PRAGMA busy_timeout=2000;');
 
-    $cutoff = time() - 900; // 15 minutes
-    $lonClause = ($west <= $east)
-        ? 'a.lon BETWEEN :west AND :east'
-        : '(a.lon >= :west OR a.lon <= :east)';
+    $cutoff = time() - 900; // Show aircraft active in the last 15 minutes
+    $params = [
+        ':south'  => $south,
+        ':north'  => $north,
+        ':cutoff' => $cutoff,
+    ];
+
+    if (($east - $west) >= 360.0) {
+        $lonClause = '1=1';
+    } else {
+        // Normalize longitude into [-180, 180]
+        $w = fmod(fmod($west + 180.0, 360.0) + 360.0, 360.0) - 180.0;
+        $e = fmod(fmod($east + 180.0, 360.0) + 360.0, 360.0) - 180.0;
+        $lonClause = ($w <= $e)
+            ? 'a.lon BETWEEN :west AND :east'
+            : '(a.lon >= :west OR a.lon <= :east)';
+        $params[':west'] = $w;
+        $params[':east'] = $e;
+    }
 
     $sql = "
         SELECT a.id, a.raw, a.timestamp, n.name,
@@ -58,17 +133,11 @@ try {
           AND {$lonClause}
           AND a.timestamp >= :cutoff
         ORDER BY a.timestamp DESC
-        LIMIT 500
+        LIMIT 3000
     ";
 
     $stmt = $pdo->prepare($sql);
-    $stmt->execute([
-        ':south'  => $south,
-        ':north'  => $north,
-        ':west'   => $west,
-        ':east'   => $east,
-        ':cutoff' => $cutoff,
-    ]);
+    $stmt->execute($params);
 
     $packets = [];
     $names   = [];

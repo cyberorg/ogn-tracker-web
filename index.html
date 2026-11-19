@@ -68,7 +68,18 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
   <div class="brand"><div class="logo">✈</div><div><h1>OGN Glider Tracker</h1><div class="sub">Live APRS-IS feed · Open Glider Network</div></div></div>
   <div class="toolbar">
     <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
-    <select id="type" aria-label="Aircraft filter"><option value="all">All aircraft</option><option value="glider">Gliders / motorgliders</option><option value="para">Paragliders</option><option value="other">Other aircraft / Stations</option></select>
+    <select id="type" aria-label="Aircraft filter">
+      <option value="all">All aircraft</option>
+      <option value="glider">Gliders / motorgliders</option>
+      <option value="para">Paragliders</option>
+      <option value="fanet">FANET</option>
+      <option value="other">Other aircraft / Stations</option>
+    </select>
+    <select id="trackWindow" aria-label="Track duration">
+      <option value="900">Track: 15 min</option>
+      <option value="3600" selected>Track: 1 hour</option>
+      <option value="21600">Track: 6 hours</option>
+    </select>
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="refresh" class="primary">↻ Refresh</button>
   </div>
@@ -84,10 +95,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
     </div>
     <div class="section-head"><h2>Aircraft in range</h2><span class="muted" id="listCount">0 aircraft</span></div>
     <div class="aircraft-list" id="aircraftList"><div class="empty">Waiting for live data...</div></div>
-    <div class="footer">
-  Data is collected from OGN APRS-IS. Updates every 3 seconds. Not for collision avoidance or in-flight separation. ·
-  <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a>
-</div>
+    <div class="footer">Data is collected from OGN APRS-IS. Updates every 3 seconds. Not for collision avoidance or in-flight separation. · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
 </main>
 </div>
@@ -149,6 +157,9 @@ let aircraft = [];
 let selectedAddress = null;
 let fetching = false;
 
+let trackLine = null;
+let trackAddress = null;
+
 const ddbCache = new Map();
 const aprsCache = new Map();
 const nameCache = new Map();
@@ -161,6 +172,46 @@ function setStatus(kind, text) {
   $('statusDot').className = 'dot ' + kind; 
   $('statusText').textContent = text; 
 }
+
+function clearTrack() {
+  if (trackLine) {
+    map.removeLayer(trackLine);
+    trackLine = null;
+  }
+  trackAddress = null;
+}
+
+async function loadTrack(address) {
+  clearTrack();
+  trackAddress = address;
+  const windowSec = $('trackWindow').value;
+  try {
+    const res = await fetch(`ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&window=${encodeURIComponent(windowSec)}`, {cache: 'no-store'});
+    if (!res.ok) return;
+    const data = await res.json();
+    if (trackAddress !== address) return; // Selection changed while fetching
+
+    const pts = Array.isArray(data.points)
+      ? data.points.map(p => [p[0], p[1]])
+      : [];
+
+    if (pts.length > 0) {
+      trackLine = L.polyline(pts, {
+        color: '#38bdf8',
+        weight: 3,
+        opacity: 0.9
+      }).addTo(map);
+    }
+  } catch (err) {
+    console.warn('Track fetch failed:', err);
+  }
+}
+
+map.on('click', () => {
+  selectedAddress = null;
+  clearTrack();
+  document.querySelectorAll('.aircraft.selected').forEach(el => el.classList.remove('selected'));
+});
 
 function parseAprsLine(line, timestampMs) {
   const baseMatch = line.match(/(\d{6})h(\d{2})(\d{2}\.\d+)([NS])(.)(\d{3})(\d{2}\.\d+)([EW])(.)/);
@@ -186,6 +237,8 @@ function parseAprsLine(line, timestampMs) {
     if (type !== 15 && parsedType > 0) {
       if (parsedType === 15 && (/\bFNT7[0-9a-f]\b/i.test(line) || /^FNT[0-9a-f]{6}$/i.test(liveLabel))) {
         type = 7; // FANET mobile tracker on the ground, not a ground station
+      } else if (parsedType === 7 && /^[^>]+>OGADSB\b/i.test(line)) {
+        type = 16; // ADS-B category B4 is almost always an ultralight, not a paraglider
       } else {
         type = parsedType;
       }
@@ -243,6 +296,13 @@ function parseAprsLine(line, timestampMs) {
       altitude = parseInt(csaMatch[3], 10) * 0.3048;
   }
 
+  // Filter out corrupted RF noise / impossible telemetry
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) return null;
+  if (altitude != null && (altitude < -500 || (type !== 11 && altitude > 18000))) return null;
+  if (speed != null && speed > 1300) return null;
+  if ([4, 6, 7, 13].includes(type) && ((altitude != null && altitude > 10000) || (speed != null && speed > 250))) return null;
+  if (type === 1 && ((altitude != null && altitude > 16000) || (speed != null && speed > 400))) return null;
+
   const fpmMatch = line.match(/\s([-+]\d+)fpm\b/);
   if (fpmMatch) climb = parseInt(fpmMatch[1], 10) * 0.00508;
 
@@ -260,7 +320,8 @@ function parseAprsLine(line, timestampMs) {
 
 const OGN_TYPES = {
   1:'Glider', 2:'Towplane', 3:'Helicopter', 4:'Parachutist', 5:'Drop plane', 6:'Hang glider',
-  7:'Paraglider', 8:'Powered', 9:'Jet', 10:'UFO', 11:'Balloon', 12:'Airship', 13:'Drone', 15:'Ground Station'
+  7:'Paraglider', 8:'Powered', 9:'Jet', 10:'UFO', 11:'Balloon', 12:'Airship', 13:'Drone',
+  15:'Ground Station', 16:'Ultralight'
 };
 
 const ICONS = {
@@ -279,6 +340,13 @@ function getResolvedType(a) {
     return Number(a.ddbAircraftType);
   }
   return 0;
+}
+
+function isFanet(a) {
+  const pkt = a.aprsPacket || '';
+  return /^[^>]+>OGNFNT\b/i.test(pkt) ||
+         /^FNT[0-9a-f]{6}$/i.test(a.liveLabel || '') ||
+         /\bFNT[17][0-9a-f]\b/i.test(pkt);
 }
 
 function typeName(a) {
@@ -400,7 +468,7 @@ function markerIcon(a) {
   
   let svgPath = ICONS.default;
   switch(type) {
-    case 2: case 5: case 8: case 9: case 13: svgPath = ICONS.airplane; break;
+    case 2: case 5: case 8: case 9: case 13: case 16: svgPath = ICONS.airplane; break;
     case 3: svgPath = ICONS.heli; break;
     case 4: case 7: svgPath = ICONS.para; break;
     case 6: svgPath = ICONS.hang; break;
@@ -428,6 +496,7 @@ function popup(a) {
     : '—';
 
   const liveFields = [
+    ['Last report (Local)', a.time],
     ['Track / course (°)', a.course],
     ['Ground speed', a.speed == null ? '—' : a.speed.toFixed(1) + ' km/h'],
     ['Climb / sink (m/s)', a.climb],
@@ -461,6 +530,7 @@ function filtered() {
     const typeMatch = t === 'all' || 
         (t === 'glider' && rType === 1) ||
         (t === 'para' && rType === 7) || 
+        (t === 'fanet' && isFanet(a) && rType !== 15) ||
         (t === 'other' && rType != null && rType !== 1 && rType !== 7);
     return matches && typeMatch;
   });
@@ -471,6 +541,7 @@ function selectAircraft(a) {
   const m = markers.get(a.address);
   document.querySelectorAll('.aircraft').forEach(el => el.classList.toggle('selected', el.dataset.key === a.address));
   if (window.innerWidth <= 800) $('map').scrollIntoView({behavior: 'smooth', block: 'start'});
+  loadTrack(a.address);
   if (m) {
     clusterGroup.zoomToShowLayer(m, () => m.openPopup());
   }
@@ -505,15 +576,20 @@ function render() {
       m.on('click', () => {
         selectedAddress = key;
         document.querySelectorAll('.aircraft').forEach(el => el.classList.toggle('selected', el.dataset.key === key));
+        loadTrack(key);
       });
       m.bindPopup(popup(a), {maxWidth: 360, autoPan: true, keepInView: true});
       markers.set(key, m);
       clusterGroup.addLayer(m);
     } else {
-      if (!isSpiderfied && (m._trueLat !== a.lat || m._trueLon !== a.lon)) {
+      const moved = m._trueLat !== a.lat || m._trueLon !== a.lon;
+      if (!isSpiderfied && moved) {
         m.setLatLng([a.lat, a.lon]);
         m._trueLat = a.lat;
         m._trueLon = a.lon;
+      }
+      if (moved && trackAddress === key && trackLine) {
+        trackLine.addLatLng([a.lat, a.lon]);
       }
       if (!isSpiderfied && m._iconSig !== iconSig) {
         m.setIcon(markerIcon(a));
@@ -628,8 +704,11 @@ map.on('moveend', () => {
 });
 
 $('refresh').addEventListener('click', fetchLive);
-$('search').addEventListener('input', () => { selectedAddress = null; render(); });
-$('type').addEventListener('change', () => { selectedAddress = null; render(); });
+$('search').addEventListener('input', () => { selectedAddress = null; clearTrack(); render(); });
+$('type').addEventListener('change', () => { selectedAddress = null; clearTrack(); render(); });
+$('trackWindow').addEventListener('change', () => {
+  if (trackAddress) loadTrack(trackAddress);
+});
 $('locate').addEventListener('click', () => {
   if (!navigator.geolocation) return alert('Location unavailable.');
   navigator.geolocation.getCurrentPosition(p=>map.setView([p.coords.latitude,p.coords.longitude],12));
