@@ -31,7 +31,8 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .aircraft-list{overflow:auto;min-height:0;flex:1}
 .aircraft{display:grid;grid-template-columns:7px 1fr auto;gap:10px;padding:11px 14px;border-top:1px solid #263744;cursor:pointer}
 .aircraft:hover,.aircraft.selected{background:#213341}.stripe{border-radius:8px;background:var(--accent)}
-.callsign{font-weight:700;font-size:13px}.meta{color:var(--muted);font-size:11px;margin-top:3px}.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600;margin-top:3px}
+.callsign{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px}.track-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px #101923}
+.meta{color:var(--muted);font-size:11px;margin-top:3px}.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600;margin-top:3px}
 .empty{padding:24px 16px;color:var(--muted);text-align:center}
 .footer{border-top:1px solid var(--line);padding:10px 13px;color:var(--muted);font-size:10px}
 .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#17232f;color:#edf4f8}.leaflet-popup-content{margin:12px;max-height: min(65vh,520px);overflow-y:auto;width: min(340px, calc(100vw - 70px))!important}.popup-title{font-weight:800;font-size:14px;margin-bottom:5px}.popup-section{font-size:11px;font-weight:800;color:#57d3b0;margin:12px 0 5px;border-bottom:1px solid #2b3d4c;padding-bottom:3px}.popup-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:11px}.popup-grid span{color:#9aabba}.popup-value{overflow-wrap:anywhere}.popup-raw{font-size:10px;color:#c7d4dc;overflow-wrap:anywhere;margin-top:4px}
@@ -57,7 +58,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
   .summary{padding:8px}
   .aircraft-list{display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow:visible}
   .aircraft{padding:9px}
-  .footer{display:none}
 }
 @media(max-width:480px){.aircraft-list{grid-template-columns:1fr}.search{min-width:130px}.toolbar button{padding:7px 8px}}
 </style>
@@ -75,10 +75,17 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
       <option value="fanet">FANET</option>
       <option value="other">Other aircraft / Stations</option>
     </select>
+    <select id="markerWindow" aria-label="Show aircraft active within">
+      <option value="900" selected>Show: 15 min</option>
+      <option value="3600">Show: 1 hour</option>
+      <option value="21600">Show: 6 hours</option>
+      <option value="86400">Show: 24 hours</option>
+    </select>
     <select id="trackWindow" aria-label="Track duration">
-      <option value="900">Track: 15 min</option>
-      <option value="3600" selected>Track: 1 hour</option>
+      <option value="900" selected>Track: 15 min</option>
+      <option value="3600">Track: 1 hour</option>
       <option value="21600">Track: 6 hours</option>
+      <option value="today">Track: Today</option>
     </select>
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="refresh" class="primary">↻ Refresh</button>
@@ -95,7 +102,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
     </div>
     <div class="section-head"><h2>Aircraft in range</h2><span class="muted" id="listCount">0 aircraft</span></div>
     <div class="aircraft-list" id="aircraftList"><div class="empty">Waiting for live data...</div></div>
-    <div class="footer">Data is collected from OGN APRS-IS. Updates every 3 seconds. Not for collision avoidance or in-flight separation. · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
+    <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
 </main>
 </div>
@@ -106,6 +113,11 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 (() => {
 'use strict';
 const BIR = [32.037, 76.708];
+
+const TRACK_COLORS = [
+  '#38bdf8', '#f97316', '#a855f7', '#22c55e', '#f43f5e',
+  '#eab308', '#ec4899', '#14b8a6', '#818cf8', '#84cc16'
+];
 
 const terrainLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
   maxNativeZoom: 17, maxZoom: 19,
@@ -154,11 +166,13 @@ clusterGroup.on('unspiderfied', () => {
 
 const markers = new Map();
 let aircraft = [];
-let selectedAddress = null;
 let fetching = false;
+let serverClockOffsetMs = 0;
 
-let trackLine = null;
-let trackAddress = null;
+// Multi-selection tracks: address -> { color, line, reqId }
+const selectedTracks = new Map();
+let trackReqSeq = 0;
+let colorSeq = 0;
 
 const ddbCache = new Map();
 const aprsCache = new Map();
@@ -168,37 +182,84 @@ const lastAltCache = new Map();
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtAlt = v => v == null ? '' : `${Math.round(v).toLocaleString()} m`;
+const serverNow = () => Date.now() + serverClockOffsetMs;
+
+function fmtAge(sec) {
+  if (sec < 60) return `${sec}s ago`;
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}h ${remM}m ago` : `${h}h ago`;
+}
 
 function setStatus(kind, text) { 
   $('statusDot').className = 'dot ' + kind; 
   $('statusText').textContent = text; 
 }
 
-function clearTrack() {
-  if (trackLine) {
-    map.removeLayer(trackLine);
-    trackLine = null;
+function pickTrackColor() {
+  const used = new Set();
+  for (const entry of selectedTracks.values()) used.add(entry.color);
+  for (const c of TRACK_COLORS) {
+    if (!used.has(c)) return c;
   }
-  trackAddress = null;
+  return TRACK_COLORS[colorSeq++ % TRACK_COLORS.length];
+}
+
+function removeTrack(address) {
+  const entry = selectedTracks.get(address);
+  if (entry) {
+    if (entry.line) map.removeLayer(entry.line);
+    selectedTracks.delete(address);
+  }
+}
+
+function clearAllTracks() {
+  for (const entry of selectedTracks.values()) {
+    if (entry.line) map.removeLayer(entry.line);
+  }
+  selectedTracks.clear();
+}
+
+function buildTrackQuery(address) {
+  const val = $('trackWindow').value;
+  if (val === 'today') {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const sinceSec = Math.floor(startOfDay.getTime() / 1000);
+    return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&since=${encodeURIComponent(sinceSec)}`;
+  }
+  return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&window=${encodeURIComponent(val)}`;
 }
 
 async function loadTrack(address) {
-  clearTrack();
-  trackAddress = address;
-  const windowSec = $('trackWindow').value;
+  const entry = selectedTracks.get(address);
+  if (!entry) return;
+
+  if (entry.line) {
+    map.removeLayer(entry.line);
+    entry.line = null;
+  }
+
+  const reqId = ++trackReqSeq;
+  entry.reqId = reqId;
+
   try {
-    const res = await fetch(`ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&window=${encodeURIComponent(windowSec)}`, {cache: 'no-store'});
+    const res = await fetch(buildTrackQuery(address));
     if (!res.ok) return;
     const data = await res.json();
-    if (trackAddress !== address) return; // Selection changed while fetching
+
+    const current = selectedTracks.get(address);
+    if (!current || current.reqId !== reqId) return; // Deselected or superseded
 
     const pts = Array.isArray(data.points)
       ? data.points.map(p => [p[0], p[1]])
       : [];
 
     if (pts.length > 0) {
-      trackLine = L.polyline(pts, {
-        color: '#38bdf8',
+      current.line = L.polyline(pts, {
+        color: current.color,
         weight: 3,
         opacity: 0.9
       }).addTo(map);
@@ -208,10 +269,26 @@ async function loadTrack(address) {
   }
 }
 
+function toggleSelection(address, openOnMap = false) {
+  if (selectedTracks.has(address)) {
+    removeTrack(address);
+  } else {
+    selectedTracks.set(address, { color: pickTrackColor(), line: null, reqId: 0 });
+    loadTrack(address);
+    if (openOnMap) {
+      if (window.innerWidth <= 800) $('map').scrollIntoView({behavior: 'smooth', block: 'start'});
+      const m = markers.get(address);
+      if (m) clusterGroup.zoomToShowLayer(m, () => m.openPopup());
+    }
+  }
+  render();
+}
+
 map.on('click', () => {
-  selectedAddress = null;
-  clearTrack();
-  document.querySelectorAll('.aircraft.selected').forEach(el => el.classList.remove('selected'));
+  if (selectedTracks.size > 0) {
+    clearAllTracks();
+    render();
+  }
 });
 
 function parseAprsLine(line, timestampMs) {
@@ -317,7 +394,7 @@ function parseAprsLine(line, timestampMs) {
     lat, lon, id: liveLabel, liveLabel, liveRegistration: '',
     registration: '', callsign: '', model: '', ddbAircraftType: '',
     altitude, time, speed, course, climb: climb ? Number(climb.toFixed(1)) : null,
-    snr, type, receiver, address: ddbId || liveLabel, ognId, ddbId, markerExtraId: '',
+    snr, type, receiver, address: liveLabel.toLowerCase(), ognId, ddbId, markerExtraId: '',
     receivedAtMs: timestampMs 
   };
 }
@@ -392,12 +469,13 @@ function displayRegistration(a) {
 }
 
 function rebuildAircraftArray() {
-  const now = Date.now();
+  const now = serverNow();
+  const maxAgeMs = (Number($('markerWindow').value) || 900) * 1000;
   aircraft = [];
   const seenStations = new Map(); 
   
   for (const [id, cached] of aprsCache.entries()) {
-    if (now - cached.timestamp > 15 * 60 * 1000) {
+    if (now - cached.timestamp > maxAgeMs) {
       aprsCache.delete(id); 
       continue;
     }
@@ -416,7 +494,9 @@ function rebuildAircraftArray() {
         }
       }
       
-      if (nameCache.has(a.ddbId)) {
+      if (nameCache.has(a.address)) {
+        a.streamName = nameCache.get(a.address);
+      } else if (nameCache.has(a.ddbId)) {
         a.streamName = nameCache.get(a.ddbId);
       }
       
@@ -426,7 +506,6 @@ function rebuildAircraftArray() {
         if (details.registration) a.registration = details.registration;
         if (details.model) a.model = details.model;
         if (details.ddbAircraftType !== '') a.ddbAircraftType = details.ddbAircraftType;
-        if (details.ddbRecord) a.ddbRecord = details.ddbRecord;
       }
       
       const rType = getResolvedType(a);
@@ -577,22 +656,11 @@ function filtered() {
   });
 }
 
-function selectAircraft(a) {
-  selectedAddress = a.address;
-  const m = markers.get(a.address);
-  document.querySelectorAll('.aircraft').forEach(el => el.classList.toggle('selected', el.dataset.key === a.address));
-  if (window.innerWidth <= 800) $('map').scrollIntoView({behavior: 'smooth', block: 'start'});
-  loadTrack(a.address);
-  if (m) {
-    clusterGroup.zoomToShowLayer(m, () => m.openPopup());
-  }
-}
-
 function render() {
   rebuildAircraftArray();
   const visible = filtered();
   const keep = new Set(visible.map(a=>a.address));
-  const now = Date.now();
+  const now = serverNow();
 
   if (!isSpiderfied) {
     for (const [key, m] of markers) {
@@ -615,9 +683,7 @@ function render() {
       m._trueLat = a.lat;
       m._trueLon = a.lon;
       m.on('click', () => {
-        selectedAddress = key;
-        document.querySelectorAll('.aircraft').forEach(el => el.classList.toggle('selected', el.dataset.key === key));
-        loadTrack(key);
+        toggleSelection(key, false);
       });
       m.bindPopup(popup(a), {maxWidth: 360, autoPan: true, keepInView: true});
       markers.set(key, m);
@@ -629,8 +695,11 @@ function render() {
         m._trueLat = a.lat;
         m._trueLon = a.lon;
       }
-      if (moved && trackAddress === key && trackLine) {
-        trackLine.addLatLng([a.lat, a.lon]);
+      if (moved) {
+        const trackEntry = selectedTracks.get(key);
+        if (trackEntry && trackEntry.line) {
+          trackEntry.line.addLatLng([a.lat, a.lon]);
+        }
       }
       if (!isSpiderfied && m._iconSig !== iconSig) {
         m.setIcon(markerIcon(a));
@@ -651,7 +720,8 @@ function render() {
   
   $('aircraftList').innerHTML = visible.length ? visible.slice().sort((a,b)=>displayName(a).localeCompare(displayName(b), undefined, {sensitivity:'base', numeric:true})).map(a=> {
     const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
-    const isSelected = selectedAddress === a.address ? ' selected' : '';
+    const trackEntry = selectedTracks.get(a.address);
+    const isSelected = trackEntry ? ' selected' : '';
     const rType = getResolvedType(a);
     const fanetStatus = parseFanetStatus(a.aprsPacket);
     const barColor = statusColor(fanetStatus);
@@ -666,35 +736,46 @@ function render() {
         ? `<br><span style="color:${barColor};font-weight:600">${esc(fanetStatus)}</span>`
         : '';
 
+    const trackDotHtml = trackEntry
+        ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>`
+        : '';
+
     return `
     <div class="aircraft${isSelected}" data-key="${esc(a.address)}" tabindex="0">
-      <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${esc(displayName(a))}</div>
+      <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}</div>
       <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}</div></div>
-      <div class="alt">${fmtAlt(a.altitude)}<div class="age">${ageSec}s ago</div></div>
+      <div class="alt">${fmtAlt(a.altitude)}<div class="age">${fmtAge(ageSec)}</div></div>
     </div>`}).join('') : '<div class="empty">No aircraft match current filters.</div>';
     
   document.querySelectorAll('.aircraft').forEach(el=>{
-    const a=visible.find(x=>x.address===el.dataset.key);
-    el.addEventListener('click',()=>selectAircraft(a));
+    const key = el.dataset.key;
+    el.addEventListener('click', () => toggleSelection(key, true));
   });
 }
 
-async function fetchLive() {
-  if (fetching) return;
+async function fetchLive(force = false) {
+  if (fetching || (document.hidden && !force)) return;
   fetching = true;
   try {
     const b = map.getBounds();
+    const south = (Math.floor(b.getSouth() * 10) / 10).toFixed(1);
+    const north = (Math.ceil(b.getNorth() * 10) / 10).toFixed(1);
+    const west  = (Math.floor(b.getWest() * 10) / 10).toFixed(1);
+    const east  = (Math.ceil(b.getEast() * 10) / 10).toFixed(1);
+
     const params = new URLSearchParams({
       live: '1',
-      north: b.getNorth().toFixed(4),
-      south: b.getSouth().toFixed(4),
-      east:  b.getEast().toFixed(4),
-      west:  b.getWest().toFixed(4)
+      north, south, east, west,
+      window: $('markerWindow').value
     });
 
-    const response = await fetch(`ogn-proxy.php?${params}`, {cache: 'no-store'});
+    const response = await fetch(`ogn-proxy.php?${params}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
+
+    if (payload.server_time) {
+      serverClockOffsetMs = (Number(payload.server_time) * 1000) - Date.now();
+    }
 
     if (payload.names && typeof payload.names === 'object') {
       for (const [id, name] of Object.entries(payload.names)) {
@@ -725,7 +806,7 @@ async function fetchLive() {
       ? new Date(updatedMs).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})
       : '—';
 
-    const stale = !updatedMs || (Date.now() - updatedMs) > 120000;
+    const stale = !updatedMs || (serverNow() - updatedMs) > 120000;
     if (stale) {
       setStatus('error', 'Collector paused (>2m old)');
     } else {
@@ -743,23 +824,30 @@ async function fetchLive() {
 let moveTimer = null;
 map.on('moveend', () => {
   clearTimeout(moveTimer);
-  moveTimer = setTimeout(fetchLive, 300);
+  moveTimer = setTimeout(() => fetchLive(true), 300);
 });
 
-$('refresh').addEventListener('click', fetchLive);
-$('search').addEventListener('input', () => { selectedAddress = null; clearTrack(); render(); });
-$('type').addEventListener('change', () => { selectedAddress = null; clearTrack(); render(); });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) fetchLive(true);
+});
+
+$('refresh').addEventListener('click', () => fetchLive(true));
+$('search').addEventListener('input', () => { clearAllTracks(); render(); });
+$('type').addEventListener('change', () => { clearAllTracks(); render(); });
+$('markerWindow').addEventListener('change', () => { clearAllTracks(); fetchLive(true); });
 $('trackWindow').addEventListener('change', () => {
-  if (trackAddress) loadTrack(trackAddress);
+  for (const address of selectedTracks.keys()) {
+    loadTrack(address);
+  }
 });
 $('locate').addEventListener('click', () => {
   if (!navigator.geolocation) return alert('Location unavailable.');
   navigator.geolocation.getCurrentPosition(p=>map.setView([p.coords.latitude,p.coords.longitude],12));
 });
 
-fetchLive();
-setInterval(fetchLive, 3000);
-setInterval(render, 1000);
+fetchLive(true);
+setInterval(() => fetchLive(false), 5000);
+setInterval(() => { if (!document.hidden) render(); }, 1000);
 })();
 </script>
 </body>
