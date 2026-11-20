@@ -82,7 +82,7 @@ function parse_bounds(): ?array {
     return [$south, $north, $w, $e, $fullWorld];
 }
 
-// --- 1. Track Endpoint (up to 24 hours, with server-side decimation) ---
+// --- 1. Track Endpoint ---
 if (isset($_GET['track']) && $_GET['track'] === '1') {
     $id = strtolower(trim((string)($_GET['id'] ?? '')));
     if ($id === '' || !preg_match('/^[a-z0-9_-]{1,20}$/', $id)) {
@@ -244,7 +244,7 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
     exit;
 }
 
-// --- 3. 24-Hour Time-Lapse Replay Endpoint (optimized subquery) ---
+// --- 3. 24-Hour Time-Lapse Replay Endpoint ---
 if (isset($_GET['replay']) && $_GET['replay'] === '1') {
     $bounds = parse_bounds();
     $ts = filter_input(INPUT_GET, 'ts', FILTER_VALIDATE_INT);
@@ -360,12 +360,14 @@ if (($cached = cache_get($cacheDir, $cacheKey, 3)) !== null) {
 
 if (!is_file($dbFile)) {
     echo json_encode([
-        'server_time'   => time(),
-        'updated'       => 0,
-        'packets'       => new stdClass(),
-        'names'         => new stdClass(),
-        'ddb'           => new stdClass(),
-        'station_stats' => new stdClass(),
+        'server_time'    => time(),
+        'updated'        => 0,
+        'packets'        => new stdClass(),
+        'telemetry'      => new stdClass(),
+        'station_weather'=> new stdClass(),
+        'names'          => new stdClass(),
+        'ddb'            => new stdClass(),
+        'station_stats'  => new stdClass(),
     ]);
     exit;
 }
@@ -374,6 +376,7 @@ try {
     $pdo = open_db($dbFile);
     $now = time();
     $cutoff = $now - $window;
+    $wxCutoff = $now - max($window, 1800);
     $params = [':south' => $south, ':north' => $north, ':cutoff' => $cutoff];
 
     if ($fullWorld) {
@@ -443,7 +446,7 @@ try {
         $collectRow($row);
     }
 
-    // Global emergency aircraft (O(1) partial index lookup + shared global cache)
+    // Global emergency aircraft
     $emergCacheKey = 'emerg_' . $window;
     $emergCached   = cache_get($cacheDir, $emergCacheKey, 3);
     if ($emergCached !== null) {
@@ -474,6 +477,49 @@ try {
         if ($emergJson !== false) {
             cache_set($cacheDir, $emergCacheKey, $emergJson);
         }
+    }
+
+    // Telemetry / status packets
+    $telemetry = [];
+    try {
+        $stmtTel = $pdo->prepare('
+            SELECT id, raw, timestamp
+            FROM telemetry
+            WHERE timestamp >= :cutoff
+            ORDER BY timestamp DESC
+            LIMIT 1000
+        ');
+        $stmtTel->execute([':cutoff' => $cutoff]);
+        while ($tr = $stmtTel->fetch(PDO::FETCH_ASSOC)) {
+            $telemetry[$tr['id']] = [
+                'raw'       => $tr['raw'],
+                'timestamp' => (int)$tr['timestamp'],
+            ];
+        }
+    } catch (Throwable $e) {
+    }
+
+    // Persisted station weather cache across reloads and multi-minute intervals
+    $stationWeather = [];
+    try {
+        $stmtWx = $pdo->prepare('
+            SELECT id, wx_json, updated
+            FROM station_weather
+            WHERE updated >= :cutoff
+            ORDER BY updated DESC
+            LIMIT 1000
+        ');
+        $stmtWx->execute([':cutoff' => $wxCutoff]);
+        while ($wr = $stmtWx->fetch(PDO::FETCH_ASSOC)) {
+            $decodedWx = json_decode((string)$wr['wx_json'], true);
+            if (is_array($decodedWx)) {
+                $stationWeather[$wr['id']] = [
+                    'wx'        => $decodedWx,
+                    'timestamp' => (int)$wr['updated'],
+                ];
+            }
+        }
+    } catch (Throwable $e) {
     }
 
     // 24-hour farthest aircraft heard per ground station in viewport
@@ -507,16 +553,17 @@ try {
             ];
         }
     } catch (Throwable $e) {
-        // Non-fatal if stations table hasn't been created by collector yet
     }
 
     $updated = (int)$pdo->query('SELECT value FROM meta WHERE key = "updated"')->fetchColumn();
 
     $out = [
-        'server_time'   => $now,
-        'updated'       => $updated,
-        'packets'       => $packets ?: new stdClass(),
-        'station_stats' => $stationStats ?: new stdClass(),
+        'server_time'     => $now,
+        'updated'         => $updated,
+        'packets'         => $packets ?: new stdClass(),
+        'telemetry'       => $telemetry ?: new stdClass(),
+        'station_weather' => $stationWeather ?: new stdClass(),
+        'station_stats'   => $stationStats ?: new stdClass(),
     ];
     if ($includeMeta) {
         $out['names'] = $names ?: new stdClass();

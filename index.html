@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#101923">
 <title>OGN Glider Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.css">
 <style>
 :root{color-scheme:dark;--bg:#101923;--panel:#17232f;--panel2:#1d2c39;--line:#2b3d4c;--muted:#9aabba;--text:#edf4f8;--accent:#57d3b0;--yellow:#f5c451;--red:#f07878}
 *{box-sizing:border-box}html,body{height:100%;margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
@@ -43,7 +43,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .section-head{padding:11px 14px 7px;display:flex;justify-content:space-between;align-items:center}
 .section-head h2{font-size:13px;margin:0}.muted{color:var(--muted)}
 .aircraft-list{overflow:auto;min-height:0;flex:1}
-.aircraft{display:grid;grid-template-columns:7px 1fr auto;gap:10px;padding:10px 14px;border-top:1px solid #263744;cursor:pointer}
+.aircraft{display:grid;grid-template-columns:7px minmax(0,1fr) auto;gap:10px;padding:10px 14px;border-top:1px solid #263744;cursor:pointer}
 .aircraft:hover,.aircraft.selected{background:#213341}
 .aircraft.pinned{background:#1b2c38}.aircraft.pinned:hover,.aircraft.pinned.selected{background:#233948}
 .aircraft.emergency{background:#2b151a}.aircraft.emergency:hover,.aircraft.emergency.selected{background:#3a1c23}
@@ -53,7 +53,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .aircraft:hover .pin-btn,.pin-btn.pinned{opacity:1}
 .pin-btn:hover{background:#2b3d4c;color:var(--text)}
 .pin-btn.pinned{color:var(--yellow)}
-.meta{color:var(--muted);font-size:11px;margin-top:3px}.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600}
+.meta{color:var(--muted);font-size:11px;margin-top:3px;min-width:0}
+.wx-line{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;color:#c7d4dc}
+.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600}
 .age-row{display:flex;align-items:center;justify-content:flex-end;gap:5px;margin-top:3px}
 .sig-bars{display:inline-flex;align-items:flex-end;gap:1.5px;height:12px}
 .sig-bars i{display:block;width:2.5px;border-radius:1px;background:#2b3d4c}
@@ -73,19 +75,24 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .ogn-cluster{background:transparent;border:0}.ogn-cluster div{width:34px;height:34px;border-radius:50%;background:#10212dee;border:2px solid #f5c451;color:#edf4f8;font:700 13px/30px system-ui,sans-serif;text-align:center;box-shadow:0 2px 10px #000a}
 .leaflet-control-attribution{font-size:10px!important}
 .leaflet-control-layers{background:#17232f!important;color:#edf4f8!important;border:1px solid #2b3d4c!important;border-radius:8px!important}
-/* Map filter menu: visually follows the native Leaflet Layers control. */
 .map-filter-control{position:absolute;top:10px;left:10px;z-index:650;color:#edf4f8}
 .map-filter-toggle{width:36px;height:36px;padding:0;display:grid;place-items:center;background:#17232f;border:1px solid #2b3d4c;border-radius:8px;color:#edf4f8;font-size:19px;line-height:1;box-shadow:0 1px 5px #0005}
 .map-filter-toggle:hover,.map-filter-toggle[aria-expanded="true"]{background:#263b4b;border-color:#57d3b0}
-.map-filter-panel{position:absolute;top:0;left:42px;width:230px;padding:10px;background:#17232f;color:#edf4f8;border:1px solid #2b3d4c;border-radius:8px;box-shadow:0 1px 8px #0007}
+.map-filter-panel{position:absolute;top:0;left:42px;width:244px;max-height:calc(100vh - 80px);overflow-y:auto;padding:10px;background:#17232f;color:#edf4f8;border:1px solid #2b3d4c;border-radius:8px;box-shadow:0 1px 8px #0007}
 .map-filter-panel[hidden]{display:none}
-.map-filter-panel label.group-label{display:block;margin:0 0 4px;color:#9aabba;font-size:11px;font-weight:600}
+.map-filter-panel label.group-label,.map-filter-panel span.group-label{display:block;margin:0 0 4px;color:#9aabba;font-size:11px;font-weight:600}
 .type-checklist{display:flex;flex-direction:column;gap:4px;margin:0 0 9px;padding:6px 8px;background:#1d2c39;border:1px solid #2b3d4c;border-radius:6px}
 .type-option{display:flex;align-items:center;gap:7px;margin:0;padding:2px 0;color:#edf4f8;font-size:12px;cursor:pointer;user-select:none}
 .type-option input[type=checkbox]{width:14px;height:14px;margin:0;padding:0;accent-color:#57d3b0;cursor:pointer;flex:none}
 .map-filter-panel select{display:block;width:100%;height:34px;margin:0 0 9px;padding:6px 8px;background:#1d2c39;border:1px solid #2b3d4c;border-radius:6px;color:#edf4f8;font-size:12px}
-.map-filter-panel select:last-child{margin-bottom:0}
-@media(max-width:800px){.map-filter-control{top:8px;left:8px}.map-filter-toggle{width:38px;height:38px}.map-filter-panel{left:44px;width:min(230px,calc(100vw - 68px))}.map-filter-panel select{height:38px;font-size:16px}.type-option{font-size:14px;padding:3px 0}}
+.preset-row{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:0 0 5px}
+.unit-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:0 0 9px}
+.unit-btn{padding:6px 6px;font-size:11px;border-radius:6px;background:#1d2c39;border:1px solid #2b3d4c;color:#edf4f8;text-align:center;white-space:nowrap}
+.unit-btn.active{background:#23465c;border-color:#38bdf8;color:#fff;font-weight:600}
+.menu-full-btn{display:block;width:100%;padding:6px 8px;margin:0 0 9px;font-size:12px;border-radius:6px;background:#1d2c39;border:1px solid #2b3d4c;color:#edf4f8;text-align:center}
+.menu-full-btn.active{background:#23465c;border-color:#38bdf8;color:#fff;font-weight:600}
+.map-filter-panel select:last-child,.menu-full-btn:last-child{margin-bottom:0}
+@media(max-width:800px){.map-filter-control{top:8px;left:8px}.map-filter-toggle{width:38px;height:38px}.map-filter-panel{left:44px;width:min(244px,calc(100vw - 68px))}.map-filter-panel select{height:38px;font-size:16px}.type-option{font-size:14px;padding:3px 0}}
 @media(max-width:800px){
   html,body{height:auto;min-height:100%}
   .app{height:auto;min-height:100%;display:block}
@@ -111,7 +118,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="refresh" class="primary">↻ Refresh</button>
     <button id="btnReplay" title="24-hour time-lapse replay">▶ Replay</button>
-    <button id="btnNotify" title="Toggle notifications for pinned aircraft">🔔 Alerts</button>
     <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
     <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
@@ -131,6 +137,19 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
           <label class="type-option"><input type="checkbox" value="other"><span>Other aircrafts</span></label>
           <label class="type-option"><input type="checkbox" value="station"><span>Stations</span></label>
         </div>
+        <span class="group-label">Units</span>
+        <div class="preset-row" role="group" aria-label="Unit system preset">
+          <button type="button" class="unit-btn" id="presetMetricBtn" title="Set Metric: km/h, m, °C, m/s">Metric</button>
+          <button type="button" class="unit-btn" id="presetImperialBtn" title="Set Imperial: kt, ft, °F, fps">Imperial</button>
+        </div>
+        <div class="unit-grid" role="group" aria-label="Measurement units">
+          <button type="button" class="unit-btn active" id="unitAltBtn" title="Toggle altitude unit">Alt: m</button>
+          <button type="button" class="unit-btn active" id="unitSpeedBtn" title="Toggle wind speed unit">Wind: km/h</button>
+          <button type="button" class="unit-btn active" id="unitTempBtn" title="Toggle temperature unit">Temp: °C</button>
+          <button type="button" class="unit-btn active" id="unitClimbBtn" title="Toggle climb rate unit">Climb: m/s</button>
+        </div>
+        <span class="group-label">Notifications</span>
+        <button type="button" class="menu-full-btn" id="btnNotify" title="Toggle notifications for pinned aircraft">🔔 Alerts: OFF</button>
         <label class="group-label" for="markerWindow">Aircraft time window</label>
         <select id="markerWindow" aria-label="Show aircraft active within">
           <option value="900" selected>Show: 15 min</option>
@@ -194,11 +213,90 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 'use strict';
 const BIR = [32.037, 76.708];
 const PINNED_STORAGE_KEY = 'ogn_pinned_aircraft';
+const UNITS_STORAGE_KEY = 'ogn_weather_units';
+const WX_CACHE_TTL_MS = 30 * 60 * 1000; // Cache station weather across multi-minute intervals
 const TRACK_COLORS = ['#38bdf8','#f97316','#a855f7','#22c55e','#f43f5e','#eab308','#ec4899','#14b8a6','#818cf8','#84cc16'];
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmtAlt = v => v == null ? '' : `${Math.round(v).toLocaleString()} m`;
+
+// Measurement units state ('m' | 'ft', 'kmh' | 'kt', 'c' | 'f', 'mps' | 'fps')
+let altUnit = 'm';
+let speedUnit = 'kmh';
+let tempUnit = 'c';
+let climbUnit = 'mps';
+try {
+  const savedUnits = JSON.parse(localStorage.getItem(UNITS_STORAGE_KEY) || '{}');
+  if (savedUnits.altUnit === 'ft') altUnit = 'ft';
+  if (savedUnits.speedUnit === 'kt') speedUnit = 'kt';
+  if (savedUnits.tempUnit === 'f') tempUnit = 'f';
+  if (savedUnits.climbUnit === 'fps') climbUnit = 'fps';
+} catch (e) {}
+
+function saveUnits() {
+  try { localStorage.setItem(UNITS_STORAGE_KEY, JSON.stringify({ altUnit, speedUnit, tempUnit, climbUnit })); } catch (e) {}
+}
+
+function isMetricPreset() {
+  return altUnit === 'm' && speedUnit === 'kmh' && tempUnit === 'c' && climbUnit === 'mps';
+}
+
+function isImperialPreset() {
+  return altUnit === 'ft' && speedUnit === 'kt' && tempUnit === 'f' && climbUnit === 'fps';
+}
+
+function syncUnitButtons() {
+  $('presetMetricBtn').classList.toggle('active', isMetricPreset());
+  $('presetImperialBtn').classList.toggle('active', isImperialPreset());
+  $('unitAltBtn').textContent = `Alt: ${altUnit === 'ft' ? 'ft' : 'm'}`;
+  $('unitSpeedBtn').textContent = `Wind: ${speedUnit === 'kt' ? 'kt' : 'km/h'}`;
+  $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
+  $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : 'm/s'}`;
+}
+
+function applyUnitPreset(mode) {
+  if (mode === 'imperial') {
+    altUnit = 'ft';
+    speedUnit = 'kt';
+    tempUnit = 'f';
+    climbUnit = 'fps';
+  } else {
+    altUnit = 'm';
+    speedUnit = 'kmh';
+    tempUnit = 'c';
+    climbUnit = 'mps';
+  }
+  saveUnits();
+  syncUnitButtons();
+  render();
+  if (activeBaroAddress) renderBarogram(activeBaroAddress);
+}
+
+function fmtAltValue(meters) {
+  if (meters == null) return '';
+  if (altUnit === 'ft') return `${Math.round(meters * 3.28084).toLocaleString()} ft`;
+  return `${Math.round(meters).toLocaleString()} m`;
+}
+
+const fmtAlt = v => fmtAltValue(v);
+
+function fmtWindSpeed(kmh) {
+  if (kmh == null) return '';
+  if (speedUnit === 'kt') return `${Math.round(kmh * 0.539957)} kt`;
+  return `${Math.round(kmh)} km/h`;
+}
+
+function fmtTemp(c) {
+  if (c == null) return '';
+  if (tempUnit === 'f') return `${Math.round((c * 9 / 5) + 32)}°F`;
+  return `${Math.round(c)}°C`;
+}
+
+function fmtClimb(mps) {
+  if (mps == null) return '';
+  if (climbUnit === 'fps') return `${(mps * 3.28084).toFixed(1)} fps`;
+  return `${Number(mps).toFixed(1)} m/s`;
+}
 
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371, toRad = d => d * Math.PI / 180;
@@ -300,8 +398,10 @@ let trackReqSeq = 0, colorSeq = 0;
 
 const ddbCache = new Map();
 const aprsCache = new Map();
+const telemetryCache = new Map();
 const nameCache = new Map();
 const lastAltCache = new Map();
+const wxCache = new Map(); // Per-key cached weather (wxCacheKey -> { wx, ts })
 const stationStatsCache = new Map();
 
 const serverNow = () => Date.now() + serverClockOffsetMs;
@@ -391,11 +491,11 @@ function renderBarogram(address) {
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
 
-  $('baroTitle').textContent = `${a ? displayName(a) : address.toUpperCase()} · Min ${Math.round(minAlt)}m / Max ${Math.round(maxAlt)}m`;
+  $('baroTitle').textContent = `${a ? displayName(a) : address.toUpperCase()} · Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}`;
   $('baroSvg').innerHTML = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
-    <text x="4" y="12" fill="#9aabba" font-size="10">${Math.round(maxAlt)} m</text>
-    <text x="4" y="66" fill="#9aabba" font-size="10">${Math.round(minAlt)} m</text>
+    <text x="4" y="12" fill="#9aabba" font-size="10">${esc(fmtAlt(maxAlt))}</text>
+    <text x="4" y="66" fill="#9aabba" font-size="10">${esc(fmtAlt(minAlt))}</text>
   `;
   $('barogram').classList.add('show');
   updateUrlHash();
@@ -527,18 +627,70 @@ map.on('click', () => {
 map.on('dragstart', () => { followedAddress = null; });
 
 function parseAprsWeather(line) {
-  const m = line.match(/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?/);
-  if (!m) return null;
-  const dir = parseInt(m[1], 10);
-  const spdKmh = Math.round(parseInt(m[2], 10) * 1.60934);
-  const gustKmh = m[3] ? Math.round(parseInt(m[3], 10) * 1.60934) : null;
-  const tempC = m[4] ? Math.round((parseInt(m[4], 10) - 32) * 5 / 9) : null;
-  return { dir, spdKmh, gustKmh, tempC };
+  const colonIdx = line.indexOf(':');
+  const payload = colonIdx !== -1 ? line.slice(colonIdx + 1) : line;
+
+  const m = payload.match(/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?/);
+  const wxHumMatch = payload.match(/_(?:\d{3}\/\d{3})(?:g\d{3})?(?:t-?\d{3})?h(\d{2,3})/);
+  const wxPressMatch = payload.match(/_(?:\d{3}\/\d{3})(?:g\d{3})?(?:t-?\d{3})?(?:h\d{2,3})?b(\d{4,5})/);
+
+  const hpaMatch = payload.match(/(?:^|[\s,(])(\d{3,4}(?:\.\d+)?)\s*(?:hpa|mbar)(?=$|[\s,;)/])/i);
+  const bLooseMatch = !m ? payload.match(/(?:^|[\s,(])b(\d{4,5})(?=$|[\s,;)/])/) : null;
+
+  let pressureHpa = null;
+  if (hpaMatch) {
+    pressureHpa = Number(parseFloat(hpaMatch[1]).toFixed(1));
+  } else if (wxPressMatch) {
+    pressureHpa = Number((parseInt(wxPressMatch[1], 10) / 10).toFixed(1));
+  } else if (bLooseMatch) {
+    pressureHpa = Number((parseInt(bLooseMatch[1], 10) / 10).toFixed(1));
+  }
+  const validPressure = (pressureHpa != null && pressureHpa >= 850 && pressureHpa <= 1085) ? pressureHpa : null;
+
+  const pctMatch = payload.match(/(?:^|[\s,(])(?:rh\s*[:=]?\s*|hum(?:idity)?\s*[:=]?\s*)?(\d{1,3})\s*%(?=$|[\s,;)/])/i);
+  let humidityPct = null;
+  if (wxHumMatch) {
+    const rawH = parseInt(wxHumMatch[1], 10);
+    humidityPct = rawH === 0 ? 100 : Math.min(100, Math.max(0, rawH));
+  } else if (pctMatch) {
+    const rawPct = parseInt(pctMatch[1], 10);
+    if (rawPct >= 0 && rawPct <= 100) humidityPct = rawPct;
+  }
+
+  const cMatch = payload.match(/(?:^|[\s,(])([+-]?\d+(?:\.\d+)?)\s*°?C(?=$|[\s,;)/])/);
+  const dir = m ? parseInt(m[1], 10) : null;
+  const spdKmh = m ? Math.round(parseInt(m[2], 10) * 1.60934) : null;
+  const gustKmh = (m && m[3]) ? Math.round(parseInt(m[3], 10) * 1.60934) : null;
+
+  let tempC = null;
+  if (cMatch) {
+    tempC = Math.round(parseFloat(cMatch[1]));
+  } else if (m && m[4]) {
+    tempC = Math.round((parseInt(m[4], 10) - 32) * 5 / 9);
+  }
+
+  if (spdKmh == null && tempC == null && validPressure == null && humidityPct == null) return null;
+  return { dir, spdKmh, gustKmh, tempC, pressureHpa: validPressure, humidityPct };
 }
 
 function parseAprsLine(line, timestampMs) {
   const baseMatch = line.match(/(\d{6})h(\d{2})(\d{2}\.\d+)([NS])(.)(\d{3})(\d{2}\.\d+)([EW])(.)/);
-  if (!baseMatch) return null;
+  if (!baseMatch) {
+    const callsignMatch = line.match(/^([^>]+)>/);
+    const liveLabel = callsignMatch ? callsignMatch[1].trim() : '';
+    const weather = parseAprsWeather(line);
+    if (!liveLabel || !weather) return null;
+    const rxMatch = line.match(/q[A-Z]{2},([^:,]+)[:\,]/);
+    return {
+      __telemetryOnly: true,
+      id: liveLabel,
+      liveLabel,
+      address: liveLabel.toLowerCase(),
+      receiver: rxMatch ? rxMatch[1] : '',
+      weather,
+      receivedAtMs: timestampMs
+    };
+  }
 
   const callsignMatch = line.match(/^([^>]+)>/);
   const liveLabel = callsignMatch ? callsignMatch[1] : 'Unknown';
@@ -598,7 +750,7 @@ function parseAprsLine(line, timestampMs) {
   if (fpmMatch) climb = parseInt(fpmMatch[1], 10) * 0.00508;
   const snrMatch = line.match(/\b(\d+(?:\.\d+)?)dB\b/i);
   const snr = snrMatch ? parseFloat(snrMatch[1]) : null;
-  const weather = type === 15 ? parseAprsWeather(line) : null;
+  const weather = parseAprsWeather(line);
 
   return {
     lat, lon, id: liveLabel, liveLabel, registration: '', callsign: '', model: '', ddbAircraftType: '',
@@ -694,6 +846,32 @@ function statusColor(a, status) {
   return 'var(--accent)';
 }
 
+function formatWeatherHtml(wx, compact = false) {
+  if (!wx) return '';
+  const parts = [];
+  if (wx.spdKmh != null) {
+    const arrow = wx.dir != null
+      ? `<span style="display:inline-block;font-size:${compact ? '12px' : '19px'};line-height:1;vertical-align:-2px;transform:rotate(${Number(wx.dir) || 0}deg);margin-right:2px" aria-label="Wind direction">↑</span>`
+      : '';
+    const gustStr = wx.gustKmh != null ? ` (G ${fmtWindSpeed(wx.gustKmh)})` : '';
+    parts.push(`${arrow}${fmtWindSpeed(wx.spdKmh)}${gustStr}`);
+  }
+  if (wx.tempC != null) parts.push(fmtTemp(wx.tempC));
+  if (wx.humidityPct != null) parts.push(`${wx.humidityPct}% RH`);
+  if (wx.pressureHpa != null) parts.push(`${wx.pressureHpa.toFixed(1)} hPa`);
+  return parts.join(' · ');
+}
+
+function mergeWeather(existing, incoming) {
+  if (!existing) return incoming ? { ...incoming } : null;
+  if (!incoming) return { ...existing };
+  const merged = { ...existing };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (v != null) merged[k] = v;
+  }
+  return merged;
+}
+
 function playBeep() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -721,16 +899,57 @@ function checkPinnedNotifications() {
   }
 }
 
+function getStationKeys(station) {
+  return new Set(
+    [station.id, station.address, station.liveLabel, station.streamName, station.callsign, displayName(station)]
+      .filter(Boolean)
+      .map(s => String(s).trim().toLowerCase())
+  );
+}
+
+function updateWeatherCache(keys, wx, tsMs) {
+  if (!wx) return;
+  for (const rawKey of keys) {
+    const k = String(rawKey || '').trim().toLowerCase();
+    if (!k) continue;
+    const prev = wxCache.get(k);
+    const merged = mergeWeather(prev ? prev.wx : null, wx);
+    wxCache.set(k, { wx: merged, ts: Math.max(tsMs || 0, prev ? prev.ts : 0) });
+  }
+}
+
+function readCachedWeather(keys, nowMs, ttlMs) {
+  let combined = null;
+  for (const rawKey of keys) {
+    const k = String(rawKey || '').trim().toLowerCase();
+    if (!k) continue;
+    const entry = wxCache.get(k);
+    if (!entry) continue;
+    if ((nowMs - entry.ts) > ttlMs) {
+      wxCache.delete(k);
+      continue;
+    }
+    combined = mergeWeather(combined, entry.wx);
+  }
+  return combined;
+}
+
 function rebuildAircraftArray() {
   const now = serverNow();
   const maxAgeMs = (Number($('markerWindow').value) || 900) * 1000;
+  const wxTtlMs = Math.max(maxAgeMs, WX_CACHE_TTL_MS);
   aircraft = [];
+  const telemetryOnly = [];
   const seenStations = new Map();
 
   for (const [id, cached] of aprsCache.entries()) {
     if (now - cached.timestamp > maxAgeMs) { aprsCache.delete(id); continue; }
     const a = parseAprsLine(cached.raw, cached.timestamp);
     if (!a) continue;
+    if (a.__telemetryOnly) {
+      telemetryOnly.push(a);
+      continue;
+    }
     a.aprsPacket = cached.raw;
     a.aprsReceivedAt = cached.received_at;
 
@@ -756,9 +975,12 @@ function rebuildAircraftArray() {
       if (seenStations.has(dispName) || seenStations.has(coordKey)) {
         const existing = seenStations.get(dispName) || seenStations.get(coordKey);
         if (/^[0-9a-f]{6}$/.test(a.ddbId) && !/^[0-9a-f]{6}$/.test(existing.ddbId)) {
+          a.weather = mergeWeather(existing.weather, a.weather);
           const idx = aircraft.indexOf(existing);
           if (idx > -1) aircraft[idx] = a;
           seenStations.set(dispName, a); seenStations.set(coordKey, a);
+        } else {
+          existing.weather = mergeWeather(existing.weather, a.weather);
         }
         continue;
       }
@@ -766,15 +988,51 @@ function rebuildAircraftArray() {
     }
     aircraft.push(a);
   }
-  checkPinnedNotifications();
-}
 
-function getStationKeys(station) {
-  return new Set(
-    [station.liveLabel, station.streamName, station.callsign, displayName(station)]
-      .filter(Boolean)
-      .map(s => s.trim().toLowerCase())
-  );
+  for (const [id, cached] of telemetryCache.entries()) {
+    if (now - cached.timestamp > wxTtlMs) { telemetryCache.delete(id); continue; }
+    const tel = parseAprsLine(cached.raw, cached.timestamp);
+    if (tel && tel.__telemetryOnly) telemetryOnly.push(tel);
+  }
+
+  for (const tel of telemetryOnly) {
+    if (tel.weather) {
+      updateWeatherCache([tel.id, tel.address, tel.liveLabel], tel.weather, tel.receivedAtMs);
+    }
+    const target = aircraft.find(a => getStationKeys(a).has(tel.address));
+    if (target) {
+      target.weather = mergeWeather(target.weather, tel.weather);
+      updateWeatherCache(getStationKeys(target), target.weather, tel.receivedAtMs);
+    }
+  }
+
+  // Share weather only between co-located beacons (< 200 m) at the exact same physical site
+  const stations = aircraft.filter(a => getResolvedType(a) === 15);
+  for (let i = 0; i < stations.length; i++) {
+    for (let j = i + 1; j < stations.length; j++) {
+      const s1 = stations[i], s2 = stations[j];
+      if ((s1.weather || s2.weather) && haversineKm(s1.lat, s1.lon, s2.lat, s2.lon) < 0.2) {
+        const combined = mergeWeather(s1.weather, s2.weather);
+        s1.weather = { ...combined };
+        s2.weather = { ...combined };
+        updateWeatherCache(getStationKeys(s1), combined, Math.max(s1.receivedAtMs, s2.receivedAtMs));
+        updateWeatherCache(getStationKeys(s2), combined, Math.max(s1.receivedAtMs, s2.receivedAtMs));
+      }
+    }
+  }
+
+  for (const a of aircraft) {
+    const keys = getStationKeys(a);
+    if (a.weather) {
+      updateWeatherCache(keys, a.weather, a.receivedAtMs);
+    }
+    const cachedWx = readCachedWeather(keys, now, wxTtlMs);
+    if (cachedWx) {
+      a.weather = mergeWeather(cachedWx, a.weather);
+    }
+  }
+
+  checkPinnedNotifications();
 }
 
 function getStationReceptionStats(station) {
@@ -848,21 +1106,21 @@ function popupRowHtml(label, html) {
 
 function popup(a) {
   const latStr = a.lat.toFixed(6), lonStr = a.lon.toFixed(6);
-  const locText = a.altitude != null ? `${latStr},${lonStr},${Math.round(a.altitude)}m` : `${latStr},${lonStr}`;
+  const locText = a.altitude != null ? `${latStr},${lonStr},${fmtAlt(a.altitude)}` : `${latStr},${lonStr}`;
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
   const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>Location</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(locText)}</a></div>`;
   const statusText = getDisplayStatus(a);
   const statusHtml = statusText ? `<span style="color:${statusColor(a, statusText)}">${esc(statusText)}</span>` : '';
-  const wxText = a.weather
-    ? `<span style="display:inline-block;font-size:19px;line-height:1;vertical-align:-2px;transform:rotate(${Number(a.weather.dir) || 0}deg);margin-right:5px" aria-label="Wind direction">↑</span>${a.weather.spdKmh} km/h${a.weather.gustKmh != null ? ` (G ${a.weather.gustKmh})` : ''}${a.weather.tempC != null ? ` · ${a.weather.tempC}°C` : ''}`
+  const wxText = formatWeatherHtml(a.weather, false);
+  const weatherRow = wxText
+    ? `<div class="popup-value" style="grid-column:1/-1"><span>Weather</span><br><b>${wxText}</b></div>`
     : '';
 
   const liveFields = [
     ['Track (°)', a.course],
-    ['Ground speed', a.speed != null ? a.speed.toFixed(1) + ' km/h' : null],
-    ['Climb (m/s)', a.climb],
-    ['Receiver', a.receiver],
-    ['Weather', wxText]
+    ['Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null],
+    ['Climb', a.climb != null ? fmtClimb(a.climb) : null],
+    ['Receiver', a.receiver]
   ];
 
   if (getResolvedType(a) === 15) {
@@ -893,7 +1151,7 @@ function popup(a) {
       ${popupRowHtml('Status / Alert', statusHtml)}
     </div>
     <div class="popup-section">Live APRS Data</div>
-    <div class="popup-grid">${locationRow}${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}${liveFields.map(([l,v]) => l === 'Weather' ? popupRowHtml(l,v) : popupRow(l,v)).join('')}</div>
+    <div class="popup-grid">${locationRow}${weatherRow}${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}${liveFields.map(([l,v]) => popupRow(l,v)).join('')}</div>
     <div class="popup-actions">
       <button type="button" data-act="follow" data-addr="${esc(a.address)}">${isFol ? 'Unfollow' : '◎ Follow'}</button>
       <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 Copy SAR</button>
@@ -962,7 +1220,6 @@ function render() {
   const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
 
-  // Emergency banner
   const emergencies = visible.filter(isEmergency);
   if (emergencies.length > 0) {
     const first = emergencies[0];
@@ -1055,9 +1312,11 @@ function render() {
     const statusText = getDisplayStatus(a);
     const barColor = statusColor(a, statusText);
 
+    const wxCompactHtml = a.weather ? formatWeatherHtml(a.weather, true) : '';
     const metrics = rType === 15
-      ? (a.weather ? [`💨 ${a.weather.dir}° ${a.weather.spdKmh} km/h`] : [])
-      : [a.speed != null ? `${a.speed.toFixed(1)} km/h` : '', a.climb != null ? `${a.climb} m/s` : ''].filter(Boolean);
+      ? []
+      : [a.speed != null ? fmtWindSpeed(a.speed) : '', a.climb != null ? fmtClimb(a.climb) : ''].filter(Boolean);
+    const wxListHtml = wxCompactHtml ? `<span class="wx-line">💨 ${wxCompactHtml}</span>` : '';
     const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
     const statusHtml = statusText ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>` : '';
     const trackDotHtml = trackEntry ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>` : '';
@@ -1065,7 +1324,7 @@ function render() {
     return `
     <div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
       <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'}">📌</button></div>
-      <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}</div></div>
+      <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
       <div class="alt">${fmtAlt(a.altitude)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div></div>
     </div>`;
   }).join('') : '<div class="empty">No aircraft match current filters.</div>';
@@ -1077,7 +1336,6 @@ function render() {
   }
 }
 
-// Single delegated click listener for the aircraft list
 $('aircraftList').addEventListener('click', e => {
   const pinBtn = e.target.closest('.pin-btn');
   if (pinBtn) {
@@ -1089,7 +1347,6 @@ $('aircraftList').addEventListener('click', e => {
   if (row) toggleSelection(row.dataset.key, true);
 });
 
-// Delegated click listener for popup action buttons
 document.addEventListener('click', e => {
   const btn = e.target.closest('.popup-actions button');
   if (!btn) return;
@@ -1105,7 +1362,7 @@ document.addEventListener('click', e => {
       `SAR Info: ${displayName(a)}`,
       `Status: ${getDisplayStatus(a) || 'Unknown'}`,
       `Coords: ${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
-      `Alt: ${a.altitude != null ? Math.round(a.altitude) + ' m' : 'N/A'}`,
+      `Alt: ${a.altitude != null ? fmtAlt(a.altitude) : 'N/A'}`,
       `Last heard: ${fmtAge(ageSec)}`,
       `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`
     ].join('\n');
@@ -1185,6 +1442,25 @@ async function fetchLive(force = false) {
         timestamp: tsMs
       });
     }
+
+    const incomingTel = payload.telemetry && typeof payload.telemetry === 'object' ? payload.telemetry : {};
+    telemetryCache.clear();
+    for (const [id, pkt] of Object.entries(incomingTel)) {
+      const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
+      telemetryCache.set(id, {
+        raw: pkt.raw || '',
+        timestamp: tsMs
+      });
+    }
+
+    const incomingWx = payload.station_weather && typeof payload.station_weather === 'object' ? payload.station_weather : {};
+    for (const [id, entry] of Object.entries(incomingWx)) {
+      if (entry && entry.wx && typeof entry.wx === 'object') {
+        const tsMs = (Number(entry.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
+        updateWeatherCache([id], entry.wx, tsMs);
+      }
+    }
+
     needMeta = sawUnknown;
 
     rebuildAircraftArray();
@@ -1223,7 +1499,7 @@ async function loadReplaySlice() {
     replayGroup.clearLayers();
     (data.aircraft || []).forEach(p => {
       L.circleMarker([p.lat, p.lon], { radius: 6, color: '#38bdf8', fillColor: '#57d3b0', fillOpacity: 0.9, weight: 2 })
-        .bindTooltip(`${p.label}${p.alt != null ? ' · ' + p.alt + 'm' : ''}`)
+        .bindTooltip(`${p.label}${p.alt != null ? ' · ' + fmtAlt(p.alt) : ''}`)
         .addTo(replayGroup);
     });
   } catch (e) {}
@@ -1309,10 +1585,38 @@ $('type').addEventListener('change', e => {
   render();
 });
 
+syncUnitButtons();
+$('presetMetricBtn').addEventListener('click', () => applyUnitPreset('metric'));
+$('presetImperialBtn').addEventListener('click', () => applyUnitPreset('imperial'));
+$('unitAltBtn').addEventListener('click', () => {
+  altUnit = altUnit === 'm' ? 'ft' : 'm';
+  saveUnits();
+  syncUnitButtons();
+  render();
+  if (activeBaroAddress) renderBarogram(activeBaroAddress);
+});
+$('unitSpeedBtn').addEventListener('click', () => {
+  speedUnit = speedUnit === 'kmh' ? 'kt' : 'kmh';
+  saveUnits();
+  syncUnitButtons();
+  render();
+});
+$('unitTempBtn').addEventListener('click', () => {
+  tempUnit = tempUnit === 'c' ? 'f' : 'c';
+  saveUnits();
+  syncUnitButtons();
+  render();
+});
+$('unitClimbBtn').addEventListener('click', () => {
+  climbUnit = climbUnit === 'mps' ? 'fps' : 'mps';
+  saveUnits();
+  syncUnitButtons();
+  render();
+});
+
 $('markerWindow').addEventListener('change', () => { clearAllTracks(); needMeta = true; fetchLive(true); });
 $('trackWindow').addEventListener('change', () => { for (const addr of selectedTracks.keys()) loadTrack(addr); });
 
-// Toggle the aircraft filter menu, matching the Leaflet Layers control behaviour.
 const mapFilterControl = $('mapFilterControl');
 const mapFilterToggle = $('mapFilterToggle');
 const mapFilterPanel = $('mapFilterPanel');
@@ -1433,7 +1737,6 @@ $('locate').addEventListener('click', () => {
 fetchLive(true);
 setInterval(() => fetchLive(false), 5000);
 
-// Lightweight 1-second timer: updates only packet age labels, no APRS re-parse or DOM rebuild
 setInterval(() => {
   if (document.hidden || replayActive) return;
   const now = serverNow();
