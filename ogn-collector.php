@@ -41,7 +41,8 @@ $pdo->exec('
         lat REAL NOT NULL,
         lon REAL NOT NULL,
         raw TEXT NOT NULL,
-        timestamp INTEGER NOT NULL
+        timestamp INTEGER NOT NULL,
+        is_emergency INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_aircraft_coords ON aircraft (lat, lon);
     CREATE INDEX IF NOT EXISTS idx_aircraft_ts ON aircraft (timestamp);
@@ -77,11 +78,29 @@ $pdo->exec('
     );
 ');
 
+// Auto-migrate existing databases to add is_emergency column + partial index
+$cols = array_column($pdo->query('PRAGMA table_info(aircraft)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+if (!in_array('is_emergency', $cols, true)) {
+    $pdo->exec('ALTER TABLE aircraft ADD COLUMN is_emergency INTEGER NOT NULL DEFAULT 0;');
+}
+$pdo->exec('CREATE INDEX IF NOT EXISTS idx_aircraft_emerg ON aircraft (timestamp) WHERE is_emergency = 1;');
+
+function is_emergency_packet(string $line): int {
+    if (preg_match('/\bFNT7[def]\b/i', $line)) return 1;
+    if (preg_match('/\bsq(7700|7600|7500)\b/i', $line)) return 1;
+    if (preg_match('/^[^>]+>EMERGENCY[,:]/i', $line)) return 1;
+    $colonPos = strpos($line, ':');
+    if ($colonPos !== false && preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', substr($line, $colonPos + 1))) {
+        return 1;
+    }
+    return 0;
+}
+
 // --- Sync full OGN DDB once every 6 hours ---
 $ddbUpdated = (int)$pdo->query('SELECT value FROM meta WHERE key = "ddb_updated"')->fetchColumn();
 if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
     try {
-        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.6']]);
+        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.7']]);
         $body = @file_get_contents('https://ddb.glidernet.org/download/?j=1&t=1', false, $ctx);
         if ($body !== false) {
             $data = json_decode($body, true);
@@ -128,14 +147,15 @@ if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
 }
 
 $stmtUpsertPos = $pdo->prepare('
-    INSERT INTO aircraft (id, ddb_id, lat, lon, raw, timestamp)
-    VALUES (:id, :ddb_id, :lat, :lon, :raw, :ts)
+    INSERT INTO aircraft (id, ddb_id, lat, lon, raw, timestamp, is_emergency)
+    VALUES (:id, :ddb_id, :lat, :lon, :raw, :ts, :emerg)
     ON CONFLICT(id) DO UPDATE SET
         ddb_id = excluded.ddb_id,
         lat = excluded.lat,
         lon = excluded.lon,
         raw = excluded.raw,
-        timestamp = excluded.timestamp
+        timestamp = excluded.timestamp,
+        is_emergency = excluded.is_emergency
 ');
 $stmtInsertTrack = $pdo->prepare('
     INSERT OR IGNORE INTO tracks (id, ts, lat, lon, alt)
@@ -176,6 +196,7 @@ function flush_batch(
                 ':lon'    => $p['lon'],
                 ':raw'    => $p['raw'],
                 ':ts'     => $p['ts'],
+                ':emerg'  => $p['is_emergency'],
             ]);
         }
         foreach ($trackBatch as $t) {
@@ -220,7 +241,7 @@ if (!$socket) {
 }
 
 stream_set_timeout($socket, 2);
-fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.6 filter a/90/-180/-90/180\r\n");
+fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.7 filter a/90/-180/-90/180\r\n");
 
 $deadline  = microtime(true) + RUN_SECONDS;
 $lastFlush = microtime(true);
@@ -319,11 +340,12 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 }
 
                 $posBatch[$id] = [
-                    'ddb_id' => $ddbId,
-                    'lat'    => $lat,
-                    'lon'    => $lon,
-                    'raw'    => $line,
-                    'ts'     => $now,
+                    'ddb_id'       => $ddbId,
+                    'lat'          => $lat,
+                    'lon'          => $lon,
+                    'raw'          => $line,
+                    'ts'           => $now,
+                    'is_emergency' => is_emergency_packet($line),
                 ];
 
                 // Log tracks (skip fixed ground/weather stations; log all points for paragliders)

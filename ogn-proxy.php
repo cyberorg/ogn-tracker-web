@@ -204,27 +204,11 @@ try {
         $params[':east'] = $e;
     }
 
-    $sql = "
-        SELECT a.id, a.ddb_id, a.raw, a.timestamp, n.name,
-               d.callsign, d.registration, d.model, d.aircraft_type
-        FROM aircraft a
-        LEFT JOIN names n ON a.id = n.id
-        LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
-        WHERE a.lat BETWEEN :south AND :north
-          AND {$lonClause}
-          AND a.timestamp >= :cutoff
-        ORDER BY a.timestamp DESC
-        LIMIT 3000
-    ";
-
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute($params);
-
     $packets = [];
     $names   = [];
     $ddb     = [];
 
-    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+    $collectRow = static function (array $row) use (&$packets, &$names, &$ddb): void {
         $id    = $row['id'];
         $ddbId = $row['ddb_id'];
         $packets[$id] = [
@@ -241,6 +225,58 @@ try {
                 'model'           => (string)$row['model'],
                 'ddbAircraftType' => (string)$row['aircraft_type'],
             ];
+        }
+    };
+
+    // 1. Viewport aircraft
+    $sql = "
+        SELECT a.id, a.ddb_id, a.raw, a.timestamp, n.name,
+               d.callsign, d.registration, d.model, d.aircraft_type
+        FROM aircraft a
+        LEFT JOIN names n ON a.id = n.id
+        LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+        WHERE a.lat BETWEEN :south AND :north
+          AND {$lonClause}
+          AND a.timestamp >= :cutoff
+        ORDER BY a.timestamp DESC
+        LIMIT 3000
+    ";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute($params);
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        $collectRow($row);
+    }
+
+    // 2. Global emergency aircraft (O(1) partial index lookup + shared global cache)
+    $emergCacheKey = 'emerg_' . $window;
+    $emergCached   = cache_get($cacheDir, $emergCacheKey, 3);
+    if ($emergCached !== null) {
+        $emergRows = json_decode($emergCached, true);
+        if (is_array($emergRows)) {
+            foreach ($emergRows as $row) {
+                $collectRow($row);
+            }
+        }
+    } else {
+        $stmtEmerg = $pdo->prepare("
+            SELECT a.id, a.ddb_id, a.raw, a.timestamp, n.name,
+                   d.callsign, d.registration, d.model, d.aircraft_type
+            FROM aircraft a
+            LEFT JOIN names n ON a.id = n.id
+            LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+            WHERE a.is_emergency = 1
+              AND a.timestamp >= :cutoff
+            ORDER BY a.timestamp DESC
+            LIMIT 100
+        ");
+        $stmtEmerg->execute([':cutoff' => $cutoff]);
+        $emergRows = $stmtEmerg->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($emergRows as $row) {
+            $collectRow($row);
+        }
+        $emergJson = json_encode($emergRows, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($emergJson !== false) {
+            cache_set($cacheDir, $emergCacheKey, $emergJson);
         }
     }
 

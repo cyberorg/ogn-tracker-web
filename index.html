@@ -5,9 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#101923">
 <title>OGN Glider Tracker</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
- integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <style>
 :root{color-scheme:dark;--bg:#101923;--panel:#17232f;--panel2:#1d2c39;--line:#2b3d4c;--muted:#9aabba;--text:#edf4f8;--accent:#57d3b0;--yellow:#f5c451;--red:#f07878}
 *{box-sizing:border-box}html,body{height:100%;margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
@@ -30,7 +29,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .section-head h2{font-size:13px;margin:0}.muted{color:var(--muted)}
 .aircraft-list{overflow:auto;min-height:0;flex:1}
 .aircraft{display:grid;grid-template-columns:7px 1fr auto;gap:10px;padding:11px 14px;border-top:1px solid #263744;cursor:pointer}
-.aircraft:hover,.aircraft.selected{background:#213341}.stripe{border-radius:8px;background:var(--accent)}
+.aircraft:hover,.aircraft.selected{background:#213341}
+.aircraft.emergency{background:#2b151a}.aircraft.emergency:hover,.aircraft.emergency.selected{background:#3a1c23}
+.stripe{border-radius:8px;background:var(--accent)}
 .callsign{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px}.track-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px #101923}
 .meta{color:var(--muted);font-size:11px;margin-top:3px}.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600;margin-top:3px}
 .empty{padding:24px 16px;color:var(--muted);text-align:center}
@@ -41,6 +42,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .snr-good{background:#4a3d1a;color:#f5c451;border:1px solid #7d672a}
 .snr-weak{background:#4d2024;color:#f07878;border:1px solid #80333a}
 .glider-icon{background:transparent;border:0}.glider-wrap{width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid #57d3b0;display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000); fill:#57d3b0; stroke:#d9fff4; stroke-width:0.7}
+.glider-wrap.emergency{background:#3d1118ee;border:2px solid var(--red);animation:emergency-pulse 1.4s ease-out infinite}
+.glider-wrap.emergency svg{fill:#ff6b6b;stroke:#ffe0e0}
+@keyframes emergency-pulse{0%{box-shadow:0 0 0 0 rgba(240,120,120,.85)}70%{box-shadow:0 0 0 14px rgba(240,120,120,0)}100%{box-shadow:0 0 0 0 rgba(240,120,120,0)}}
 .ogn-cluster{background:transparent;border:0}
 .ogn-cluster div{width:34px;height:34px;border-radius:50%;background:#10212dee;border:2px solid #f5c451;color:#edf4f8;font:700 13px/30px system-ui,sans-serif;text-align:center;box-shadow:0 2px 10px #000a}
 .leaflet-control-attribution{font-size:10px!important}
@@ -106,9 +110,8 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
   </aside>
 </main>
 </div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
- integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script>
 (() => {
 'use strict';
@@ -143,7 +146,7 @@ const baseMaps = {
 };
 L.control.layers(baseMaps, null, {position: 'topright'}).addTo(map);
 
-// Marker cluster group for overlapping aircraft
+// Marker cluster group for normal aircraft
 const clusterGroup = L.markerClusterGroup({
   maxClusterRadius: 35,
   spiderfyOnMaxZoom: true,
@@ -157,6 +160,9 @@ const clusterGroup = L.markerClusterGroup({
   })
 }).addTo(map);
 
+// Dedicated unclustered layer so emergency aircraft always stay visible on top
+const emergencyGroup = L.layerGroup().addTo(map);
+
 let isSpiderfied = false;
 clusterGroup.on('spiderfied', () => { isSpiderfied = true; });
 clusterGroup.on('unspiderfied', () => {
@@ -168,6 +174,7 @@ const markers = new Map();
 let aircraft = [];
 let fetching = false;
 let serverClockOffsetMs = 0;
+let userLocationMarker = null;
 
 // Multi-selection tracks: address -> { color, line, reqId }
 const selectedTracks = new Map();
@@ -278,7 +285,14 @@ function toggleSelection(address, openOnMap = false) {
     if (openOnMap) {
       if (window.innerWidth <= 800) $('map').scrollIntoView({behavior: 'smooth', block: 'start'});
       const m = markers.get(address);
-      if (m) clusterGroup.zoomToShowLayer(m, () => m.openPopup());
+      if (m) {
+        if (m._isEmergency) {
+          map.setView(m.getLatLng(), Math.max(map.getZoom(), 12));
+          m.openPopup();
+        } else {
+          clusterGroup.zoomToShowLayer(m, () => m.openPopup());
+        }
+      }
     }
   }
   render();
@@ -549,6 +563,12 @@ const FANET_STATUS = {
   15: 'Distress call automatically'
 };
 
+const SQUAWK_ALERTS = {
+  '7700': 'Squawk 7700 (Emergency)',
+  '7600': 'Squawk 7600 (Radio Failure)',
+  '7500': 'Squawk 7500 (Hijack)'
+};
+
 function parseFanetStatus(packet) {
   if (!packet) return '';
   const match = packet.match(/\bFNT([17])([0-9a-f])\b/i);
@@ -558,10 +578,34 @@ function parseFanetStatus(packet) {
   return FANET_STATUS[code] || '';
 }
 
-function statusColor(status) {
-  if (status === 'Distress call' || status === 'Distress call automatically' || status === 'Need medical help') {
-    return 'var(--red)';
+function parseEmergencyStatus(packet) {
+  if (!packet) return '';
+  const fnt = parseFanetStatus(packet);
+  if (fnt === 'Distress call' || fnt === 'Distress call automatically' || fnt === 'Need medical help') {
+    return fnt;
   }
+  const sqMatch = packet.match(/\bsq(7700|7600|7500)\b/i);
+  if (sqMatch) return SQUAWK_ALERTS[sqMatch[1]];
+  if (/^[^>]+>EMERGENCY[,:]/i.test(packet)) return 'APRS Emergency';
+  const colonIdx = packet.indexOf(':');
+  if (colonIdx !== -1) {
+    const payload = packet.slice(colonIdx + 1);
+    const kwMatch = payload.match(/\b(MAYDAY|SOS|EMERGENCY)\b/i);
+    if (kwMatch) return `Alert (${kwMatch[1].toUpperCase()})`;
+  }
+  return '';
+}
+
+function isEmergency(a) {
+  return Boolean(parseEmergencyStatus(a.aprsPacket));
+}
+
+function getDisplayStatus(a) {
+  return parseEmergencyStatus(a.aprsPacket) || parseFanetStatus(a.aprsPacket);
+}
+
+function statusColor(a, status) {
+  if (isEmergency(a)) return 'var(--red)';
   if (status === 'Need technical support' || status === 'Need a ride') {
     return 'var(--yellow)';
   }
@@ -579,6 +623,7 @@ function formatSnrHtml(snr) {
 function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
+  const emergClass = isEmergency(a) ? ' emergency' : '';
   
   let svgPath = ICONS.default;
   switch(type) {
@@ -591,7 +636,7 @@ function markerIcon(a) {
   }
 
   return L.divIcon({className:'glider-icon',iconSize:[30,30],iconAnchor:[15,15],html:
-    `<div class="glider-wrap"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg></div>`});
+    `<div class="glider-wrap${emergClass}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg></div>`});
 }
 
 function popupRow(label, value) {
@@ -610,9 +655,9 @@ function popup(a) {
   const locLabel = a.altitude != null ? 'Location (Lat, Lon, Alt)' : 'Location (Lat, Lon)';
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
   const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>${locLabel}</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(locText)}</a></div>`;
-  const fanetStatus = parseFanetStatus(a.aprsPacket);
-  const fanetStatusHtml = fanetStatus
-    ? `<span style="color:${statusColor(fanetStatus)}">${esc(fanetStatus)}</span>`
+  const statusText = getDisplayStatus(a);
+  const statusHtml = statusText
+    ? `<span style="color:${statusColor(a, statusText)}">${esc(statusText)}</span>`
     : '';
   const modelText = displayModel(a);
 
@@ -635,7 +680,7 @@ function popup(a) {
       ${popupRow('Registration', displayRegistration(a))}
       ${popupRow('Aircraft type', typeName(a))}
       ${popupRow('Aircraft model', modelText)}
-      ${popupRowHtml('FANET Status', fanetStatusHtml)}
+      ${popupRowHtml('Status / Alert', statusHtml)}
     </div>
     <div class="popup-section">Live APRS Data</div>
     <div class="popup-grid">${locationRow}${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}${liveFields.map(([label,value])=>popupRow(label,value)).join('')}</div>
@@ -646,6 +691,7 @@ function filtered() {
   const q = $('search').value.trim().toLowerCase(), t = $('type').value;
   return aircraft.filter(a => {
     const matches = !q || `${displayName(a)} ${a.id} ${a.callsign} ${a.registration} ${a.model} ${a.ognId} ${a.address}`.toLowerCase().includes(q);
+    if (isEmergency(a)) return matches;
     const rType = getResolvedType(a);
     const typeMatch = t === 'all' || 
         (t === 'glider' && rType === 1) ||
@@ -665,7 +711,11 @@ function render() {
   if (!isSpiderfied) {
     for (const [key, m] of markers) {
       if (!keep.has(key)) {
-        clusterGroup.removeLayer(m);
+        if (m._isEmergency) {
+          emergencyGroup.removeLayer(m);
+        } else {
+          clusterGroup.removeLayer(m);
+        }
         markers.delete(key);
       }
     }
@@ -673,13 +723,15 @@ function render() {
 
   visible.forEach(a => {
     const key = a.address;
-    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}`;
+    const emerg = isEmergency(a);
+    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}_${emerg ? 1 : 0}`;
     let m = markers.get(key);
 
     if (!m) {
-      if (isSpiderfied) return;
-      m = L.marker([a.lat, a.lon], {icon: markerIcon(a)});
+      if (isSpiderfied && !emerg) return;
+      m = L.marker([a.lat, a.lon], {icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0});
       m._iconSig = iconSig;
+      m._isEmergency = emerg;
       m._trueLat = a.lat;
       m._trueLon = a.lon;
       m.on('click', () => {
@@ -687,10 +739,14 @@ function render() {
       });
       m.bindPopup(popup(a), {maxWidth: 360, autoPan: true, keepInView: true});
       markers.set(key, m);
-      clusterGroup.addLayer(m);
+      if (emerg) {
+        emergencyGroup.addLayer(m);
+      } else {
+        clusterGroup.addLayer(m);
+      }
     } else {
       const moved = m._trueLat !== a.lat || m._trueLon !== a.lon;
-      if (!isSpiderfied && moved) {
+      if ((!isSpiderfied || m._isEmergency) && moved) {
         m.setLatLng([a.lat, a.lon]);
         m._trueLat = a.lat;
         m._trueLon = a.lon;
@@ -701,8 +757,19 @@ function render() {
           trackEntry.line.addLatLng([a.lat, a.lon]);
         }
       }
-      if (!isSpiderfied && m._iconSig !== iconSig) {
+      if (!isSpiderfied && m._isEmergency !== emerg) {
+        if (m._isEmergency) {
+          emergencyGroup.removeLayer(m);
+          clusterGroup.addLayer(m);
+        } else {
+          clusterGroup.removeLayer(m);
+          emergencyGroup.addLayer(m);
+        }
+        m._isEmergency = emerg;
+      }
+      if ((!isSpiderfied || m._isEmergency) && m._iconSig !== iconSig) {
         m.setIcon(markerIcon(a));
+        m.setZIndexOffset(emerg ? 1000 : 0);
         m._iconSig = iconSig;
       }
       if (m.isPopupOpen()) {
@@ -717,14 +784,22 @@ function render() {
   $('listCount').textContent = `${visible.length} aircraft`;
   const alts = visible.map(a=>a.altitude).filter(v=>v!=null);
   $('highest').textContent = alts.length ? fmtAlt(Math.max(...alts)) : '—';
-  
-  $('aircraftList').innerHTML = visible.length ? visible.slice().sort((a,b)=>displayName(a).localeCompare(displayName(b), undefined, {sensitivity:'base', numeric:true})).map(a=> {
+
+  const sorted = visible.slice().sort((a, b) => {
+    const ea = isEmergency(a) ? 1 : 0;
+    const eb = isEmergency(b) ? 1 : 0;
+    if (ea !== eb) return eb - ea;
+    return displayName(a).localeCompare(displayName(b), undefined, {sensitivity:'base', numeric:true});
+  });
+
+  $('aircraftList').innerHTML = sorted.length ? sorted.map(a=> {
     const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
     const trackEntry = selectedTracks.get(a.address);
     const isSelected = trackEntry ? ' selected' : '';
+    const emergClass = isEmergency(a) ? ' emergency' : '';
     const rType = getResolvedType(a);
-    const fanetStatus = parseFanetStatus(a.aprsPacket);
-    const barColor = statusColor(fanetStatus);
+    const statusText = getDisplayStatus(a);
+    const barColor = statusColor(a, statusText);
     
     const metrics = rType === 15 ? [] : [
       a.speed != null ? `${a.speed.toFixed(1)} km/h` : '',
@@ -732,8 +807,8 @@ function render() {
     ].filter(Boolean);
     const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
 
-    const statusHtml = fanetStatus
-        ? `<br><span style="color:${barColor};font-weight:600">${esc(fanetStatus)}</span>`
+    const statusHtml = statusText
+        ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>`
         : '';
 
     const trackDotHtml = trackEntry
@@ -741,7 +816,7 @@ function render() {
         : '';
 
     return `
-    <div class="aircraft${isSelected}" data-key="${esc(a.address)}" tabindex="0">
+    <div class="aircraft${emergClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
       <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}</div>
       <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}</div></div>
       <div class="alt">${fmtAlt(a.altitude)}<div class="age">${fmtAge(ageSec)}</div></div>
@@ -841,8 +916,76 @@ $('trackWindow').addEventListener('change', () => {
   }
 });
 $('locate').addEventListener('click', () => {
-  if (!navigator.geolocation) return alert('Location unavailable.');
-  navigator.geolocation.getCurrentPosition(p=>map.setView([p.coords.latitude,p.coords.longitude],12));
+  const btn = $('locate');
+  btn.disabled = true;
+  btn.textContent = '◎ Locating…';
+
+  const resetBtn = () => {
+    btn.disabled = false;
+    btn.textContent = '◎ Locate';
+  };
+
+  const showLocation = (lat, lon, zoom, label) => {
+    resetBtn();
+    const pos = [lat, lon];
+    map.setView(pos, Math.max(map.getZoom(), zoom));
+    if (userLocationMarker) {
+      userLocationMarker.setLatLng(pos).setPopupContent(label);
+    } else {
+      userLocationMarker = L.circleMarker(pos, {
+        radius: 7,
+        color: '#ffffff',
+        weight: 2,
+        fillColor: '#38bdf8',
+        fillOpacity: 1
+      }).bindPopup(label).addTo(map);
+    }
+    fetchLive(true);
+  };
+
+  const fallbackToIp = async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    try {
+      const res = await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error('IP lookup failed');
+      const data = await res.json();
+      const lat = parseFloat(data.latitude);
+      const lon = parseFloat(data.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('Invalid IP coordinates');
+      const place = [data.city, data.country].filter(Boolean).join(', ');
+      showLocation(lat, lon, 10, place ? `Approximate location (IP: ${place})` : 'Approximate location (IP)');
+    } catch (e) {
+      clearTimeout(timer);
+      resetBtn();
+      alert('Could not determine your location. Please check GPS/location services or try again.');
+    }
+  };
+
+  if (!window.isSecureContext || !navigator.geolocation) {
+    fallbackToIp();
+    return;
+  }
+
+  const onSuccess = p => showLocation(p.coords.latitude, p.coords.longitude, 12, 'Your location');
+
+  navigator.geolocation.getCurrentPosition(
+    onSuccess,
+    err => {
+      if (err.code === 1) {
+        resetBtn();
+        alert('Location permission denied. Please allow location access in your browser settings.');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        onSuccess,
+        () => fallbackToIp(),
+        { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
+      );
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+  );
 });
 
 fetchLive(true);
