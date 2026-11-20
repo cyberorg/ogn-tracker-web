@@ -11,59 +11,83 @@
 :root{color-scheme:dark;--bg:#101923;--panel:#17232f;--panel2:#1d2c39;--line:#2b3d4c;--muted:#9aabba;--text:#edf4f8;--accent:#57d3b0;--yellow:#f5c451;--red:#f07878}
 *{box-sizing:border-box}html,body{height:100%;margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
 .app{height:100%;display:grid;grid-template-rows:auto 1fr;min-height:0}
-header{display:flex;align-items:center;gap:18px;padding:12px 18px;background:#111d28;border-bottom:1px solid var(--line);z-index:500}
-.brand{display:flex;align-items:center;gap:11px;min-width:210px}.logo{width:36px;height:36px;border-radius:11px;background:linear-gradient(135deg,#57d3b0,#2387a6);display:grid;place-items:center;color:#09202a;font-size:20px;font-weight:900}
-h1{font-size:16px;margin:0;letter-spacing:.2px}.sub{font-size:11px;color:var(--muted)}
-.toolbar{display:flex;align-items:center;gap:8px;flex:1;flex-wrap:wrap}
-button,input,select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
-button{cursor:pointer}button:hover{border-color:var(--accent)}button.primary{background:#1d5c55;border-color:#2a8b7b}
-.search{min-width:180px;max-width:280px;flex:1}
+header{display:flex;align-items:center;gap:12px;padding:10px 16px;background:#111d28;border-bottom:1px solid var(--line);z-index:500}
+.brand{display:flex;align-items:center;gap:10px;min-width:190px}.logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#57d3b0,#2387a6);display:grid;place-items:center;color:#09202a;font-size:19px;font-weight:900}
+h1{font-size:15px;margin:0;letter-spacing:.2px}.sub{font-size:11px;color:var(--muted)}
+.toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+button,input,select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 9px}
+button{cursor:pointer;font-size:13px}button:hover{border-color:var(--accent)}button.primary{background:#1d5c55;border-color:#2a8b7b}button.active{background:#23465c;border-color:#38bdf8;color:#fff}
 .status{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--muted);white-space:nowrap;font-size:12px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--yellow)}.dot.live{background:var(--accent);box-shadow:0 0 10px #57d3b088}.dot.error{background:var(--red)}
 main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
+.map-wrap{position:relative;height:100%;width:100%;min-height:0}
 #map{height:100%;width:100%;background:#dce5e8}
+.emerg-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:600;background:#3d1118f2;border:1px solid var(--red);color:#ffe5e5;padding:7px 12px;border-radius:9px;display:none;align-items:center;gap:10px;box-shadow:0 4px 16px #000a;font-size:12px;max-width:calc(100% - 24px)}
+.emerg-banner.show{display:flex}
+.emerg-banner button{background:var(--red);color:#1a070a;border:0;font-weight:700;padding:4px 9px;font-size:11px;border-radius:6px}
+.barogram{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:600;background:#17232ff2;border:1px solid var(--line);border-radius:10px;padding:8px 12px;width:min(480px,calc(100% - 110px));box-shadow:0 4px 16px #0009;display:none}
+.barogram.show{display:block}
+.baro-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;margin-bottom:4px}
+.baro-actions{display:flex;gap:5px}
+.baro-actions button{padding:3px 7px;font-size:11px;border-radius:6px}
+.baro-svg{width:100%;height:70px;display:block}
+.replay-bar{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:610;background:#17232ff5;border:1px solid #38bdf8;border-radius:10px;padding:9px 12px;width:min(520px,calc(100% - 110px));box-shadow:0 4px 16px #000a;display:none;align-items:center;gap:8px;font-size:12px}
+.replay-bar.show{display:flex}
+.replay-bar input[type=range]{flex:1;padding:0;background:transparent;border:0}
 .sidebar{background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
-.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:13px;border-bottom:1px solid var(--line)}
-.stat{background:var(--panel2);border-radius:9px;padding:9px}.stat strong{display:block;font-size:20px}.stat span{color:var(--muted);font-size:11px}
-.section-head{padding:12px 14px 8px;display:flex;justify-content:space-between;align-items:center}
+.summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px;border-bottom:1px solid var(--line)}
+.stat{background:var(--panel2);border-radius:9px;padding:8px}.stat strong{display:block;font-size:19px}.stat span{color:var(--muted);font-size:11px}
+.filters{display:grid;grid-template-columns:1fr 1fr;gap:7px;padding:10px 12px;border-bottom:1px solid var(--line)}
+.filters .search,.filters #type{grid-column:1 / -1;width:100%}
+.filters select,.filters input{min-width:0;width:100%;padding:7px 9px;font-size:13px}
+.section-head{padding:11px 14px 7px;display:flex;justify-content:space-between;align-items:center}
 .section-head h2{font-size:13px;margin:0}.muted{color:var(--muted)}
 .aircraft-list{overflow:auto;min-height:0;flex:1}
-.aircraft{display:grid;grid-template-columns:7px 1fr auto;gap:10px;padding:11px 14px;border-top:1px solid #263744;cursor:pointer}
+.aircraft{display:grid;grid-template-columns:7px 1fr auto;gap:10px;padding:10px 14px;border-top:1px solid #263744;cursor:pointer}
 .aircraft:hover,.aircraft.selected{background:#213341}
+.aircraft.pinned{background:#1b2c38}.aircraft.pinned:hover,.aircraft.pinned.selected{background:#233948}
 .aircraft.emergency{background:#2b151a}.aircraft.emergency:hover,.aircraft.emergency.selected{background:#3a1c23}
 .stripe{border-radius:8px;background:var(--accent)}
 .callsign{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px}.track-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px #101923}
-.meta{color:var(--muted);font-size:11px;margin-top:3px}.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600;margin-top:3px}
+.pin-btn{background:transparent;border:0;padding:1px 4px;border-radius:4px;font-size:11px;line-height:1;color:var(--muted);opacity:.45;cursor:pointer;flex:none}
+.aircraft:hover .pin-btn,.pin-btn.pinned{opacity:1}
+.pin-btn:hover{background:#2b3d4c;color:var(--text)}
+.pin-btn.pinned{color:var(--yellow)}
+.meta{color:var(--muted);font-size:11px;margin-top:3px}.alt{text-align:right;font-weight:650;font-size:12px}.age{font-size:11px;color:var(--yellow);font-weight:600}
+.age-row{display:flex;align-items:center;justify-content:flex-end;gap:5px;margin-top:3px}
+.sig-bars{display:inline-flex;align-items:flex-end;gap:1.5px;height:12px}
+.sig-bars i{display:block;width:2.5px;border-radius:1px;background:#2b3d4c}
+.sig-bars i:nth-child(1){height:3px}.sig-bars i:nth-child(2){height:6px}.sig-bars i:nth-child(3){height:9px}.sig-bars i:nth-child(4){height:12px}
+.sig-bars.sig-strong i.on{background:var(--accent)}.sig-bars.sig-good i.on{background:var(--yellow)}.sig-bars.sig-weak i.on{background:var(--red)}
 .empty{padding:24px 16px;color:var(--muted);text-align:center}
 .footer{border-top:1px solid var(--line);padding:10px 13px;color:var(--muted);font-size:10px}
-.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#17232f;color:#edf4f8}.leaflet-popup-content{margin:12px;max-height: min(65vh,520px);overflow-y:auto;width: min(340px, calc(100vw - 70px))!important}.popup-title{font-weight:800;font-size:14px;margin-bottom:5px}.popup-section{font-size:11px;font-weight:800;color:#57d3b0;margin:12px 0 5px;border-bottom:1px solid #2b3d4c;padding-bottom:3px}.popup-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:11px}.popup-grid span{color:#9aabba}.popup-value{overflow-wrap:anywhere}.popup-raw{font-size:10px;color:#c7d4dc;overflow-wrap:anywhere;margin-top:4px}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:#17232f;color:#edf4f8}.leaflet-popup-content{margin:12px;max-height:min(65vh,520px);overflow-y:auto;width:min(340px,calc(100vw - 70px))!important}.popup-title{font-weight:800;font-size:14px;margin-bottom:5px}.popup-section{font-size:11px;font-weight:800;color:#57d3b0;margin:10px 0 5px;border-bottom:1px solid #2b3d4c;padding-bottom:3px}.popup-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:11px}.popup-grid span{color:#9aabba}.popup-value{overflow-wrap:anywhere}.popup-raw{font-size:10px;color:#c7d4dc;overflow-wrap:anywhere;margin-top:4px}
+.popup-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.popup-actions button{padding:4px 8px;font-size:11px;border-radius:6px}
 .snr-badge{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle}
-.snr-strong{background:#1b4d3e;color:#57d3b0;border:1px solid #2d7a63}
-.snr-good{background:#4a3d1a;color:#f5c451;border:1px solid #7d672a}
-.snr-weak{background:#4d2024;color:#f07878;border:1px solid #80333a}
-.glider-icon{background:transparent;border:0}.glider-wrap{width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid #57d3b0;display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000); fill:#57d3b0; stroke:#d9fff4; stroke-width:0.7}
+.snr-strong{background:#1b4d3e;color:#57d3b0;border:1px solid #2d7a63}.snr-good{background:#4a3d1a;color:#f5c451;border:1px solid #7d672a}.snr-weak{background:#4d2024;color:#f07878;border:1px solid #80333a}
+.glider-icon{background:transparent;border:0}.glider-wrap{width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid #57d3b0;display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000);fill:#57d3b0;stroke:#d9fff4;stroke-width:0.7}
 .glider-wrap.emergency{background:#3d1118ee;border:2px solid var(--red);animation:emergency-pulse 1.4s ease-out infinite}
 .glider-wrap.emergency svg{fill:#ff6b6b;stroke:#ffe0e0}
 @keyframes emergency-pulse{0%{box-shadow:0 0 0 0 rgba(240,120,120,.85)}70%{box-shadow:0 0 0 14px rgba(240,120,120,0)}100%{box-shadow:0 0 0 0 rgba(240,120,120,0)}}
-.ogn-cluster{background:transparent;border:0}
-.ogn-cluster div{width:34px;height:34px;border-radius:50%;background:#10212dee;border:2px solid #f5c451;color:#edf4f8;font:700 13px/30px system-ui,sans-serif;text-align:center;box-shadow:0 2px 10px #000a}
+.ogn-cluster{background:transparent;border:0}.ogn-cluster div{width:34px;height:34px;border-radius:50%;background:#10212dee;border:2px solid #f5c451;color:#edf4f8;font:700 13px/30px system-ui,sans-serif;text-align:center;box-shadow:0 2px 10px #000a}
 .leaflet-control-attribution{font-size:10px!important}
 .leaflet-control-layers{background:#17232f!important;color:#edf4f8!important;border:1px solid #2b3d4c!important;border-radius:8px!important}
 @media(max-width:800px){
   html,body{height:auto;min-height:100%}
   .app{height:auto;min-height:100%;display:block}
-  header{align-items:flex-start;flex-wrap:wrap;padding:10px}
-  .brand{min-width:0}
-  .status{margin-left:0}
-  .toolbar{order:3;flex-basis:100%}
+  header{align-items:center;flex-wrap:wrap;gap:8px;padding:10px}
+  .brand{min-width:0}.status{margin-left:auto}.toolbar{order:3;flex-basis:100%}
   main{display:block;height:auto}
-  #map{height:82vh;height:82dvh}
+  .map-wrap{height:82vh;height:82dvh}
   .sidebar{border-left:0;border-top:1px solid var(--line);height:auto}
   .summary{padding:8px}
+  .filters input,.filters select{font-size:16px}
   .aircraft-list{display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow:visible}
-  .aircraft{padding:9px}
+  .aircraft{padding:9px}.pin-btn{opacity:.75}
+  .barogram,.replay-bar{width:calc(100% - 20px);bottom:54px}
 }
-@media(max-width:480px){.aircraft-list{grid-template-columns:1fr}.search{min-width:130px}.toolbar button{padding:7px 8px}}
+@media(max-width:480px){.aircraft-list{grid-template-columns:1fr}.toolbar button{padding:6px 8px;font-size:12px}}
 </style>
 </head>
 <body>
@@ -71,124 +95,193 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 <header>
   <div class="brand"><div class="logo">✈</div><div><h1>OGN Glider Tracker</h1><div class="sub">Live APRS-IS feed · Open Glider Network</div></div></div>
   <div class="toolbar">
-    <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
-    <select id="type" aria-label="Aircraft filter">
-      <option value="all">All aircraft</option>
-      <option value="glider">Gliders / motorgliders</option>
-      <option value="para">Paragliders</option>
-      <option value="fanet">FANET</option>
-      <option value="other">Other aircraft / Stations</option>
-    </select>
-    <select id="markerWindow" aria-label="Show aircraft active within">
-      <option value="900" selected>Show: 15 min</option>
-      <option value="3600">Show: 1 hour</option>
-      <option value="21600">Show: 6 hours</option>
-      <option value="86400">Show: 24 hours</option>
-    </select>
-    <select id="trackWindow" aria-label="Track duration">
-      <option value="900" selected>Track: 15 min</option>
-      <option value="3600">Track: 1 hour</option>
-      <option value="21600">Track: 6 hours</option>
-      <option value="today">Track: Today</option>
-    </select>
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="refresh" class="primary">↻ Refresh</button>
+    <button id="btnReplay" title="24-hour time-lapse replay">▶ Replay</button>
+    <button id="btnNotify" title="Toggle notifications for pinned aircraft">🔔 Alerts</button>
+    <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
+    <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
   <div class="status"><i id="statusDot" class="dot"></i><span id="statusText">Connecting…</span></div>
 </header>
 <main>
-  <div id="map" aria-label="Map showing live OGN aircraft"></div>
+  <div class="map-wrap">
+    <div id="map" aria-label="Map showing live OGN aircraft"></div>
+    <div id="emergencyBanner" class="emerg-banner">
+      <span id="emergencyBannerText">Emergency Alert</span>
+      <button id="emergencyJump" type="button">Jump to Alert</button>
+    </div>
+    <div id="barogram" class="barogram">
+      <div class="baro-head">
+        <strong id="baroTitle">Altitude Profile</strong>
+        <div class="baro-actions">
+          <button id="toggleTrackMode" type="button" title="Toggle Vario vs Flat track color">Vario: OFF</button>
+          <button id="btnDownloadIgc" type="button">⬇ IGC</button>
+          <button id="btnCloseBaro" type="button">✕</button>
+        </div>
+      </div>
+      <svg id="baroSvg" class="baro-svg" viewBox="0 0 460 70" preserveAspectRatio="none"></svg>
+    </div>
+    <div id="replayBar" class="replay-bar">
+      <button id="replayPlay" type="button">▶</button>
+      <input id="replaySlider" type="range" min="0" max="1440" value="1440" step="1">
+      <span id="replayTime" style="white-space:nowrap;font-weight:600">--:--</span>
+      <button id="replayExit" type="button">✕</button>
+    </div>
+  </div>
   <aside class="sidebar">
     <div class="summary">
       <div class="stat"><strong id="count">—</strong><span>Aircraft shown</span></div>
       <div class="stat"><strong id="updated">—</strong><span>Last update</span></div>
       <div class="stat"><strong id="highest">—</strong><span>Highest altitude</span></div>
     </div>
-    <div class="section-head"><h2>Aircraft in range</h2><span class="muted" id="listCount">0 aircraft</span></div>
+    <div class="filters">
+      <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
+      <select id="type" aria-label="Aircraft filter">
+        <option value="all">All aircraft</option>
+        <option value="glider">Gliders / motorgliders</option>
+        <option value="para">Paragliders</option>
+        <option value="fanet">FANET</option>
+        <option value="other">Other aircraft / Stations</option>
+      </select>
+      <select id="markerWindow" aria-label="Show aircraft active within">
+        <option value="900" selected>Show: 15 min</option>
+        <option value="3600">Show: 1 hour</option>
+        <option value="21600">Show: 6 hours</option>
+        <option value="86400">Show: 24 hours</option>
+      </select>
+      <select id="trackWindow" aria-label="Track duration">
+        <option value="900" selected>Track: 15 min</option>
+        <option value="3600">Track: 1 hour</option>
+        <option value="21600">Track: 6 hours</option>
+        <option value="today">Track: Today</option>
+      </select>
+    </div>
+    <div class="section-head"><h2>Aircrafts/Stations</h2><span class="muted" id="listCount">0</span></div>
     <div class="aircraft-list" id="aircraftList"><div class="empty">Waiting for live data...</div></div>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
 </main>
 </div>
+
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script>
 (() => {
 'use strict';
 const BIR = [32.037, 76.708];
+const PINNED_STORAGE_KEY = 'ogn_pinned_aircraft';
+const TRACK_COLORS = ['#38bdf8','#f97316','#a855f7','#22c55e','#f43f5e','#eab308','#ec4899','#14b8a6','#818cf8','#84cc16'];
 
-const TRACK_COLORS = [
-  '#38bdf8', '#f97316', '#a855f7', '#22c55e', '#f43f5e',
-  '#eab308', '#ec4899', '#14b8a6', '#818cf8', '#84cc16'
-];
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtAlt = v => v == null ? '' : `${Math.round(v).toLocaleString()} m`;
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371, toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Parse initial URL hash (#lat,lon,zoom[,aircraft_id])
+let initialCenter = BIR, initialZoom = 11, pendingHashSelect = null;
+if (location.hash.length > 1) {
+  const parts = location.hash.slice(1).split(',');
+  const lat = parseFloat(parts[0]), lon = parseFloat(parts[1]), z = parseInt(parts[2], 10);
+  if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(z)) {
+    initialCenter = [lat, lon];
+    initialZoom = Math.max(2, Math.min(18, z));
+    if (parts[3]) pendingHashSelect = decodeURIComponent(parts[3]).toLowerCase();
+  }
+}
 
 const terrainLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
   maxNativeZoom: 17, maxZoom: 19,
   attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
 });
 const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-  maxZoom: 19,
-  attribution: 'Tiles &copy; Esri'
+  maxZoom: 19, attribution: 'Tiles &copy; Esri'
 });
 const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 });
 
-const map = L.map('map', {
-  zoomControl: true, 
-  layers: [terrainLayer] 
-}).setView(BIR, 11);
+const map = L.map('map', { zoomControl: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
+L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
-const baseMaps = {
-  "Terrain (OpenTopoMap)": terrainLayer,
-  "Satellite (Esri)": satelliteLayer,
-  "Standard (OSM)": osmLayer
-};
-L.control.layers(baseMaps, null, {position: 'topright'}).addTo(map);
+// Overlays
+const thermalLayer = L.heatLayer([], { radius: 18, blur: 14, maxZoom: 14, gradient: {0.2:'#38bdf8', 0.5:'#f5c451', 0.8:'#f97316', 1.0:'#ef4444'} });
+const coverageLayer = L.layerGroup();
+const airspaceLayer = L.geoJSON(null, {
+  style: { color: '#f5c451', weight: 2, fillOpacity: 0.12 },
+  onEachFeature: (f, l) => {
+    if (f.properties && (f.properties.name || f.properties.title)) {
+      l.bindPopup(`<b>${esc(f.properties.name || f.properties.title)}</b>`);
+    }
+  }
+});
 
-// Marker cluster group for normal aircraft
+const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
+const overlayMaps = { "Thermals (Today)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
+L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
+
 const clusterGroup = L.markerClusterGroup({
-  maxClusterRadius: 35,
-  spiderfyOnMaxZoom: true,
-  showCoverageOnHover: false,
-  zoomToBoundsOnClick: true,
-  spiderfyDistanceMultiplier: 1.5,
-  iconCreateFunction: cluster => L.divIcon({
-    html: `<div>${cluster.getChildCount()}</div>`,
-    className: 'ogn-cluster',
-    iconSize: L.point(34, 34)
-  })
+  maxClusterRadius: 35, spiderfyOnMaxZoom: true, showCoverageOnHover: false, zoomToBoundsOnClick: true, spiderfyDistanceMultiplier: 1.5,
+  iconCreateFunction: cluster => L.divIcon({ html: `<div>${cluster.getChildCount()}</div>`, className: 'ogn-cluster', iconSize: L.point(34, 34) })
 }).addTo(map);
-
-// Dedicated unclustered layer so emergency aircraft always stay visible on top
 const emergencyGroup = L.layerGroup().addTo(map);
+const replayGroup = L.layerGroup();
 
 let isSpiderfied = false;
 clusterGroup.on('spiderfied', () => { isSpiderfied = true; });
-clusterGroup.on('unspiderfied', () => {
-  isSpiderfied = false;
-  render();
-});
+clusterGroup.on('unspiderfied', () => { isSpiderfied = false; render(); });
 
 const markers = new Map();
 let aircraft = [];
 let fetching = false;
 let serverClockOffsetMs = 0;
 let userLocationMarker = null;
+let needMeta = true;
+const knownIds = new Set();
 
-// Multi-selection tracks: address -> { color, line, reqId }
+// Follow mode, Vario track mode, Notifications, Replay state
+let followedAddress = null;
+let varioTrackMode = false;
+let activeBaroAddress = null;
+let alertsEnabled = false;
+const lastPinnedStatus = new Map();
+let replayActive = false, replayTimer = null;
+
+// Pinned aircraft persisted in browser localStorage
+const pinnedAircraft = new Set();
+try {
+  const savedPins = JSON.parse(localStorage.getItem(PINNED_STORAGE_KEY) || '[]');
+  if (Array.isArray(savedPins)) savedPins.forEach(id => { if (typeof id === 'string' && id) pinnedAircraft.add(id.toLowerCase()); });
+} catch (e) {}
+
+function savePinnedAircraft() {
+  try { localStorage.setItem(PINNED_STORAGE_KEY, JSON.stringify([...pinnedAircraft])); } catch (e) {}
+}
+
+function togglePin(address) {
+  if (pinnedAircraft.has(address)) pinnedAircraft.delete(address);
+  else pinnedAircraft.add(address);
+  savePinnedAircraft();
+  render();
+}
+
+// Multi-selection tracks: address -> { color, layer, points, reqId }
 const selectedTracks = new Map();
-let trackReqSeq = 0;
-let colorSeq = 0;
+let trackReqSeq = 0, colorSeq = 0;
 
 const ddbCache = new Map();
 const aprsCache = new Map();
 const nameCache = new Map();
 const lastAltCache = new Map();
+const stationStatsCache = new Map();
 
-const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmtAlt = v => v == null ? '' : `${Math.round(v).toLocaleString()} m`;
 const serverNow = () => Date.now() + serverClockOffsetMs;
 
 function fmtAge(sec) {
@@ -200,42 +293,122 @@ function fmtAge(sec) {
   return remM > 0 ? `${h}h ${remM}m ago` : `${h}h ago`;
 }
 
-function setStatus(kind, text) { 
-  $('statusDot').className = 'dot ' + kind; 
-  $('statusText').textContent = text; 
+function setStatus(kind, text) {
+  $('statusDot').className = 'dot ' + kind;
+  $('statusText').textContent = text;
+}
+
+function updateUrlHash() {
+  const c = map.getCenter();
+  const sel = activeBaroAddress ? `,${encodeURIComponent(activeBaroAddress)}` : '';
+  const hash = `#${c.lat.toFixed(4)},${c.lng.toFixed(4)},${map.getZoom()}${sel}`;
+  if (location.hash !== hash) history.replaceState(null, '', hash);
 }
 
 function pickTrackColor() {
   const used = new Set();
   for (const entry of selectedTracks.values()) used.add(entry.color);
-  for (const c of TRACK_COLORS) {
-    if (!used.has(c)) return c;
-  }
+  for (const c of TRACK_COLORS) if (!used.has(c)) return c;
   return TRACK_COLORS[colorSeq++ % TRACK_COLORS.length];
+}
+
+function varioColor(climb) {
+  if (climb == null) return '#57d3b0';
+  if (climb >= 2.5) return '#ef4444';
+  if (climb >= 1.0) return '#f97316';
+  if (climb >= 0.2) return '#eab308';
+  if (climb >= -0.5) return '#22c55e';
+  if (climb >= -2.0) return '#38bdf8';
+  return '#3b82f6';
+}
+
+function buildTrackLayer(points, flatColor) {
+  if (!points || points.length < 2) return null;
+  if (!varioTrackMode) {
+    return L.polyline(points.map(p => [p[0], p[1]]), { color: flatColor, weight: 3, opacity: 0.9 });
+  }
+  const grp = L.layerGroup();
+  for (let i = 1; i < points.length; i++) {
+    const p0 = points[i - 1], p1 = points[i];
+    const dt = p1[3] - p0[3];
+    const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
+    L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], { color: varioColor(climb), weight: 3.5, opacity: 0.92 }).addTo(grp);
+  }
+  return grp;
+}
+
+function redrawAllTracks() {
+  for (const [addr, entry] of selectedTracks.entries()) {
+    if (entry.layer) map.removeLayer(entry.layer);
+    entry.layer = buildTrackLayer(entry.points, entry.color);
+    if (entry.layer) entry.layer.addTo(map);
+  }
+}
+
+function renderBarogram(address) {
+  const entry = selectedTracks.get(address);
+  if (!entry || !entry.points || entry.points.length < 2) {
+    $('barogram').classList.remove('show');
+    return;
+  }
+  const pts = entry.points.filter(p => p[2] != null);
+  if (pts.length < 2) {
+    $('barogram').classList.remove('show');
+    return;
+  }
+  activeBaroAddress = address;
+  const a = aircraft.find(x => x.address === address);
+  const minAlt = Math.min(...pts.map(p => p[2]));
+  const maxAlt = Math.max(...pts.map(p => p[2]));
+  const spanAlt = Math.max(10, maxAlt - minAlt);
+  const t0 = pts[0][3], t1 = pts[pts.length - 1][3], spanT = Math.max(1, t1 - t0);
+
+  const coords = pts.map(p => {
+    const x = ((p[3] - t0) / spanT) * 460;
+    const y = 65 - (((p[2] - minAlt) / spanAlt) * 58);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+
+  $('baroTitle').textContent = `${a ? displayName(a) : address.toUpperCase()} · Min ${Math.round(minAlt)}m / Max ${Math.round(maxAlt)}m`;
+  $('baroSvg').innerHTML = `
+    <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
+    <text x="4" y="12" fill="#9aabba" font-size="10">${Math.round(maxAlt)} m</text>
+    <text x="4" y="66" fill="#9aabba" font-size="10">${Math.round(minAlt)} m</text>
+  `;
+  $('barogram').classList.add('show');
+  updateUrlHash();
 }
 
 function removeTrack(address) {
   const entry = selectedTracks.get(address);
   if (entry) {
-    if (entry.line) map.removeLayer(entry.line);
+    if (entry.layer) map.removeLayer(entry.layer);
     selectedTracks.delete(address);
+  }
+  if (activeBaroAddress === address) {
+    const next = [...selectedTracks.keys()].pop() || null;
+    activeBaroAddress = next;
+    if (next) renderBarogram(next);
+    else $('barogram').classList.remove('show');
+    updateUrlHash();
   }
 }
 
 function clearAllTracks() {
   for (const entry of selectedTracks.values()) {
-    if (entry.line) map.removeLayer(entry.line);
+    if (entry.layer) map.removeLayer(entry.layer);
   }
   selectedTracks.clear();
+  activeBaroAddress = null;
+  $('barogram').classList.remove('show');
+  updateUrlHash();
 }
 
 function buildTrackQuery(address) {
   const val = $('trackWindow').value;
   if (val === 'today') {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const sinceSec = Math.floor(startOfDay.getTime() / 1000);
-    return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&since=${encodeURIComponent(sinceSec)}`;
+    const d = new Date(); d.setHours(0, 0, 0, 0);
+    return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&since=${Math.floor(d.getTime() / 1000)}`;
   }
   return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&window=${encodeURIComponent(val)}`;
 }
@@ -243,12 +416,7 @@ function buildTrackQuery(address) {
 async function loadTrack(address) {
   const entry = selectedTracks.get(address);
   if (!entry) return;
-
-  if (entry.line) {
-    map.removeLayer(entry.line);
-    entry.line = null;
-  }
-
+  if (entry.layer) { map.removeLayer(entry.layer); entry.layer = null; }
   const reqId = ++trackReqSeq;
   entry.reqId = reqId;
 
@@ -256,34 +424,63 @@ async function loadTrack(address) {
     const res = await fetch(buildTrackQuery(address));
     if (!res.ok) return;
     const data = await res.json();
-
     const current = selectedTracks.get(address);
-    if (!current || current.reqId !== reqId) return; // Deselected or superseded
+    if (!current || current.reqId !== reqId) return;
 
-    const pts = Array.isArray(data.points)
-      ? data.points.map(p => [p[0], p[1]])
-      : [];
-
-    if (pts.length > 0) {
-      current.line = L.polyline(pts, {
-        color: current.color,
-        weight: 3,
-        opacity: 0.9
-      }).addTo(map);
-    }
+    current.points = Array.isArray(data.points) ? data.points : [];
+    current.layer = buildTrackLayer(current.points, current.color);
+    if (current.layer) current.layer.addTo(map);
+    renderBarogram(address);
   } catch (err) {
     console.warn('Track fetch failed:', err);
   }
+}
+
+function downloadIgc(address) {
+  const entry = selectedTracks.get(address);
+  if (!entry || !entry.points || entry.points.length < 2) return alert('No track points loaded yet.');
+  const a = aircraft.find(x => x.address === address);
+  const name = a ? displayName(a) : address.toUpperCase();
+  const d0 = new Date(entry.points[0][3] * 1000);
+  const pad = (n, l = 2) => String(Math.floor(Math.abs(n))).padStart(l, '0');
+  const dateStr = `${pad(d0.getUTCDate())}${pad(d0.getUTCMonth() + 1)}${pad(d0.getUTCFullYear() % 100)}`;
+
+  const lines = [
+    'AOGN001',
+    `HFDTE${dateStr}`,
+    `HFPLTPILOTINCHARGE:${name}`,
+    `HFGIDGLIDERID:${name}`
+  ];
+
+  for (const [lat, lon, alt, ts] of entry.points) {
+    const dt = new Date(ts * 1000);
+    const hms = `${pad(dt.getUTCHours())}${pad(dt.getUTCMinutes())}${pad(dt.getUTCSeconds())}`;
+    const latDeg = Math.floor(Math.abs(lat)), latMin = Math.round((Math.abs(lat) - latDeg) * 60000);
+    const lonDeg = Math.floor(Math.abs(lon)), lonMin = Math.round((Math.abs(lon) - lonDeg) * 60000);
+    const latStr = `${pad(latDeg, 2)}${pad(latMin, 5)}${lat >= 0 ? 'N' : 'S'}`;
+    const lonStr = `${pad(lonDeg, 3)}${pad(lonMin, 5)}${lon >= 0 ? 'E' : 'W'}`;
+    const altVal = Math.max(0, Math.round(alt || 0));
+    lines.push(`B${hms}${latStr}${lonStr}A00000${pad(altVal, 5)}`);
+  }
+
+  const blob = new Blob([lines.join('\r\n') + '\r\n'], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${name.replace(/[^a-z0-9_-]/gi, '_')}_${dateStr}.igc`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function toggleSelection(address, openOnMap = false) {
   if (selectedTracks.has(address)) {
     removeTrack(address);
   } else {
-    selectedTracks.set(address, { color: pickTrackColor(), line: null, reqId: 0 });
+    selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
+    activeBaroAddress = address;
     loadTrack(address);
     if (openOnMap) {
-      if (window.innerWidth <= 800) $('map').scrollIntoView({behavior: 'smooth', block: 'start'});
+      if (window.innerWidth <= 800) $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
       const m = markers.get(address);
       if (m) {
         if (m._isEmergency) {
@@ -305,6 +502,18 @@ map.on('click', () => {
   }
 });
 
+map.on('dragstart', () => { followedAddress = null; });
+
+function parseAprsWeather(line) {
+  const m = line.match(/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?/);
+  if (!m) return null;
+  const dir = parseInt(m[1], 10);
+  const spdKmh = Math.round(parseInt(m[2], 10) * 1.60934);
+  const gustKmh = m[3] ? Math.round(parseInt(m[3], 10) * 1.60934) : null;
+  const tempC = m[4] ? Math.round((parseInt(m[4], 10) - 32) * 5 / 9) : null;
+  return { dir, spdKmh, gustKmh, tempC };
+}
+
 function parseAprsLine(line, timestampMs) {
   const baseMatch = line.match(/(\d{6})h(\d{2})(\d{2}\.\d+)([NS])(.)(\d{3})(\d{2}\.\d+)([EW])(.)/);
   if (!baseMatch) return null;
@@ -316,24 +525,16 @@ function parseAprsLine(line, timestampMs) {
 
   const symChar = baseMatch[9];
   let type = 0;
-
-  if (symChar === '_' || symChar === '&' || symChar === '#' || symChar === 'r') {
-    type = 15; // Ground station / weather
-  }
+  if (symChar === '_' || symChar === '&' || symChar === '#' || symChar === 'r') type = 15;
 
   let ognId = '', ddbId = '';
   const idMatch = line.match(/\bid([0-9a-fA-F]{2})([0-9a-fA-F]{6,8})\b/i);
-
   if (idMatch) {
     const parsedType = (parseInt(idMatch[1], 16) >> 2) & 0x0F;
     if (type !== 15 && parsedType > 0) {
-      if (parsedType === 15 && (/\bFNT7[0-9a-f]\b/i.test(line) || /^FNT[0-9a-f]{6}$/i.test(liveLabel))) {
-        type = 7; // FANET mobile tracker on the ground, not a ground station
-      } else if (parsedType === 7 && /^[^>]+>OGADSB\b/i.test(line)) {
-        type = 16; // ADS-B category B4 is almost always an ultralight, not a paraglider
-      } else {
-        type = parsedType;
-      }
+      if (parsedType === 15 && (/\bFNT7[0-9a-f]\b/i.test(line) || /^FNT[0-9a-f]{6}$/i.test(liveLabel))) type = 7;
+      else if (parsedType === 7 && /^[^>]+>OGADSB\b/i.test(line)) type = 16;
+      else type = parsedType;
     }
     ddbId = idMatch[2].slice(-6).toLowerCase();
     ognId = (idMatch[1] + idMatch[2]).toLowerCase();
@@ -342,56 +543,29 @@ function parseAprsLine(line, timestampMs) {
     ddbId = hexMatch ? hexMatch[1].toLowerCase() : liveLabel.toLowerCase();
   }
 
-  // Fallback to APRS symbol only if type is still unknown
   if (type === 0) {
-    if (symChar === 'g') type = 7;       // Paraglider / hang glider
-    else if (symChar === "'") type = 1;  // Glider / small aircraft
-    else if (symChar === '^') type = 8;  // Powered / large aircraft
-    else if (symChar === 'X') type = 3;  // Helicopter
-    else if (symChar === 'O') type = 11; // Balloon
+    if (symChar === 'g') type = 7;
+    else if (symChar === "'") type = 1;
+    else if (symChar === '^') type = 8;
+    else if (symChar === 'X') type = 3;
+    else if (symChar === 'O') type = 11;
   }
 
-  const latDeg = parseInt(baseMatch[2], 10);
-  const latMin = parseFloat(baseMatch[3]);
-  let lat = latDeg + (latMin / 60);
+  let lat = parseInt(baseMatch[2], 10) + (parseFloat(baseMatch[3]) / 60);
   if (baseMatch[4] === 'S') lat = -lat;
-
-  const lonDeg = parseInt(baseMatch[6], 10);
-  const lonMin = parseFloat(baseMatch[7]);
-  let lon = lonDeg + (lonMin / 60);
+  let lon = parseInt(baseMatch[6], 10) + (parseFloat(baseMatch[7]) / 60);
   if (baseMatch[8] === 'W') lon = -lon;
 
-  const timeStr = baseMatch[1];
-  const refDate = new Date(timestampMs || Date.now());
-  const reportDate = new Date(Date.UTC(
-    refDate.getUTCFullYear(),
-    refDate.getUTCMonth(),
-    refDate.getUTCDate(),
-    parseInt(timeStr.slice(0, 2), 10),
-    parseInt(timeStr.slice(2, 4), 10),
-    parseInt(timeStr.slice(4, 6), 10)
-  ));
-  if (reportDate.getTime() - refDate.getTime() > 43200000) {
-    reportDate.setUTCDate(reportDate.getUTCDate() - 1);
-  } else if (refDate.getTime() - reportDate.getTime() > 43200000) {
-    reportDate.setUTCDate(reportDate.getUTCDate() + 1);
-  }
-  const time = reportDate.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
-  
-  let course = null, speed = null, altitude = null, climb = null;
-  
   const remainder = line.substring(baseMatch.index + baseMatch[0].length);
+  let course = null, speed = null, altitude = null, climb = null;
   const csMatch = remainder.match(/^(\d{3})\/(\d{3})/);
-  if (csMatch) {
+  if (csMatch && symChar !== '_') {
     course = parseInt(csMatch[1], 10);
     speed = parseInt(csMatch[2], 10) * 1.852;
   }
   const altMatch = remainder.match(/\/A=(-?\d{6})/);
-  if (altMatch) {
-    altitude = parseInt(altMatch[1], 10) * 0.3048;
-  }
+  if (altMatch) altitude = parseInt(altMatch[1], 10) * 0.3048;
 
-  // Filter out corrupted RF noise / impossible telemetry
   if (Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) return null;
   if (altitude != null && (altitude < -500 || (type !== 11 && altitude > 18000))) return null;
   if (speed != null && speed > 1300) return null;
@@ -400,23 +574,20 @@ function parseAprsLine(line, timestampMs) {
 
   const fpmMatch = line.match(/\s([-+]\d+)fpm\b/);
   if (fpmMatch) climb = parseInt(fpmMatch[1], 10) * 0.00508;
-
   const snrMatch = line.match(/\b(\d+(?:\.\d+)?)dB\b/i);
   const snr = snrMatch ? parseFloat(snrMatch[1]) : null;
+  const weather = type === 15 ? parseAprsWeather(line) : null;
 
   return {
-    lat, lon, id: liveLabel, liveLabel, liveRegistration: '',
-    registration: '', callsign: '', model: '', ddbAircraftType: '',
-    altitude, time, speed, course, climb: climb ? Number(climb.toFixed(1)) : null,
-    snr, type, receiver, address: liveLabel.toLowerCase(), ognId, ddbId, markerExtraId: '',
-    receivedAtMs: timestampMs 
+    lat, lon, id: liveLabel, liveLabel, registration: '', callsign: '', model: '', ddbAircraftType: '',
+    altitude, speed, course, climb: climb ? Number(climb.toFixed(1)) : null,
+    snr, weather, type, receiver, address: liveLabel.toLowerCase(), ognId, ddbId, receivedAtMs: timestampMs
   };
 }
 
 const OGN_TYPES = {
   1:'Glider', 2:'Towplane', 3:'Helicopter', 4:'Parachutist', 5:'Drop plane', 6:'Hang glider',
-  7:'Paraglider', 8:'Powered', 9:'Jet', 10:'UFO', 11:'Balloon', 12:'Airship', 13:'Drone',
-  15:'Ground Station', 16:'Ultralight'
+  7:'Paraglider', 8:'Powered', 9:'Jet', 10:'UFO', 11:'Balloon', 12:'Airship', 13:'Drone', 15:'Ground Station', 16:'Ultralight'
 };
 
 const ICONS = {
@@ -431,33 +602,23 @@ const ICONS = {
 
 function getResolvedType(a) {
   if (a.type != null && a.type > 0) return a.type;
-  if (a.ddbAircraftType != null && String(a.ddbAircraftType).trim() !== '' && Number(a.ddbAircraftType) > 0) {
-    return Number(a.ddbAircraftType);
-  }
+  if (a.ddbAircraftType != null && String(a.ddbAircraftType).trim() !== '' && Number(a.ddbAircraftType) > 0) return Number(a.ddbAircraftType);
   return 0;
 }
-
 function isFanet(a) {
   const pkt = a.aprsPacket || '';
-  return /^[^>]+>OGNFNT\b/i.test(pkt) ||
-         /^FNT[0-9a-f]{6}$/i.test(a.liveLabel || '') ||
-         /\bFNT[17][0-9a-f]\b/i.test(pkt);
+  return /^[^>]+>OGNFNT\b/i.test(pkt) || /^FNT[0-9a-f]{6}$/i.test(a.liveLabel || '') || /\bFNT[17][0-9a-f]\b/i.test(pkt);
 }
-
 function typeName(a) {
   const rType = getResolvedType(a);
   if (rType != null && OGN_TYPES[rType]) return OGN_TYPES[rType];
   if (a.ddbAircraftType != null && String(a.ddbAircraftType).trim() !== '') return String(a.ddbAircraftType);
   return 'Aircraft / Station';
 }
-
 function displayModel(a) {
-  const m = (a.model || '').trim();
-  const t = (typeName(a) || '').trim();
-  if (!m || m.toLowerCase() === t.toLowerCase()) return '';
-  return m;
+  const m = (a.model || '').trim(), t = (typeName(a) || '').trim();
+  return (!m || m.toLowerCase() === t.toLowerCase()) ? '' : m;
 }
-
 function displayName(a) {
   if (!/([0-9A-F]{6})$/i.test(a.liveLabel)) return a.liveLabel;
   if (a.streamName) return a.streamName;
@@ -467,149 +628,153 @@ function displayName(a) {
   if (a.ognId) return a.ognId.toUpperCase();
   return a.liveLabel || 'Unknown';
 }
-
 function displayStreamName(a) {
-  const s = (a.streamName || '').trim();
-  const n = (displayName(a) || '').trim();
-  if (!s || s.toLowerCase() === n.toLowerCase()) return '';
-  return s;
+  const s = (a.streamName || '').trim(), n = (displayName(a) || '').trim();
+  return (!s || s.toLowerCase() === n.toLowerCase()) ? '' : s;
 }
-
 function displayRegistration(a) {
-  const r = (a.registration || '').trim();
-  const n = (displayName(a) || '').trim();
-  if (!r || r.toLowerCase() === n.toLowerCase()) return '';
-  return r;
-}
-
-function rebuildAircraftArray() {
-  const now = serverNow();
-  const maxAgeMs = (Number($('markerWindow').value) || 900) * 1000;
-  aircraft = [];
-  const seenStations = new Map(); 
-  
-  for (const [id, cached] of aprsCache.entries()) {
-    if (now - cached.timestamp > maxAgeMs) {
-      aprsCache.delete(id); 
-      continue;
-    }
-    
-    const a = parseAprsLine(cached.raw, cached.timestamp);
-    if (a) {
-      a.aprsPacket = cached.raw;
-      a.aprsReceivedAt = cached.received_at;
-
-      if (a.altitude != null) {
-        lastAltCache.set(a.address, { lat: a.lat, lon: a.lon, alt: a.altitude });
-      } else {
-        const lastAlt = lastAltCache.get(a.address);
-        if (lastAlt && Math.abs(a.lat - lastAlt.lat) < 0.0005 && Math.abs(a.lon - lastAlt.lon) < 0.0005) {
-          a.altitude = lastAlt.alt;
-        }
-      }
-      
-      if (nameCache.has(a.address)) {
-        a.streamName = nameCache.get(a.address);
-      } else if (nameCache.has(a.ddbId)) {
-        a.streamName = nameCache.get(a.ddbId);
-      }
-      
-      const details = ddbCache.get(a.ddbId);
-      if (details) {
-        if (details.callsign) a.callsign = details.callsign;
-        if (details.registration) a.registration = details.registration;
-        if (details.model) a.model = details.model;
-        if (details.ddbAircraftType !== '') a.ddbAircraftType = details.ddbAircraftType;
-      }
-      
-      const rType = getResolvedType(a);
-      if (rType === 15) {
-          const dispName = displayName(a);
-          const coordKey = a.lat.toFixed(4) + '_' + a.lon.toFixed(4);
-          
-          if (seenStations.has(dispName) || seenStations.has(coordKey)) {
-              const existing = seenStations.get(dispName) || seenStations.get(coordKey);
-              const aHasHex = /^[0-9a-f]{6}$/.test(a.ddbId);
-              const exHasHex = /^[0-9a-f]{6}$/.test(existing.ddbId);
-              
-              if (aHasHex && !exHasHex) {
-                  const idx = aircraft.indexOf(existing);
-                  if (idx > -1) aircraft[idx] = a;
-                  seenStations.set(dispName, a);
-                  seenStations.set(coordKey, a);
-              }
-              continue; 
-          }
-          seenStations.set(dispName, a);
-          seenStations.set(coordKey, a);
-      }
-      
-      aircraft.push(a);
-    }
-  }
+  const r = (a.registration || '').trim(), n = (displayName(a) || '').trim();
+  return (!r || r.toLowerCase() === n.toLowerCase()) ? '' : r;
 }
 
 const FANET_STATUS = {
-  0: 'Other',
-  1: 'Walking',
-  2: 'Vehicle',
-  3: 'Bike',
-  4: 'Boot',
-  8: 'Need a ride',
-  9: 'Landed well',
-  12: 'Need technical support',
-  13: 'Need medical help',
-  14: 'Distress call',
-  15: 'Distress call automatically'
+  0:'Other', 1:'Walking', 2:'Vehicle', 3:'Bike', 4:'Boot', 8:'Need a ride', 9:'Landed well',
+  12:'Need technical support', 13:'Need medical help', 14:'Distress call', 15:'Distress call automatically'
 };
-
-const SQUAWK_ALERTS = {
-  '7700': 'Squawk 7700 (Emergency)',
-  '7600': 'Squawk 7600 (Radio Failure)',
-  '7500': 'Squawk 7500 (Hijack)'
-};
+const SQUAWK_ALERTS = { '7700':'Squawk 7700 (Emergency)', '7600':'Squawk 7600 (Radio Failure)', '7500':'Squawk 7500 (Hijack)' };
 
 function parseFanetStatus(packet) {
   if (!packet) return '';
   const match = packet.match(/\bFNT([17])([0-9a-f])\b/i);
   if (!match) return '';
   if (match[1] === '1') return 'Airborne';
-  const code = parseInt(match[2], 16);
-  return FANET_STATUS[code] || '';
+  return FANET_STATUS[parseInt(match[2], 16)] || '';
 }
-
 function parseEmergencyStatus(packet) {
   if (!packet) return '';
   const fnt = parseFanetStatus(packet);
-  if (fnt === 'Distress call' || fnt === 'Distress call automatically' || fnt === 'Need medical help') {
-    return fnt;
-  }
+  if (fnt === 'Distress call' || fnt === 'Distress call automatically' || fnt === 'Need medical help') return fnt;
   const sqMatch = packet.match(/\bsq(7700|7600|7500)\b/i);
   if (sqMatch) return SQUAWK_ALERTS[sqMatch[1]];
   if (/^[^>]+>EMERGENCY[,:]/i.test(packet)) return 'APRS Emergency';
   const colonIdx = packet.indexOf(':');
   if (colonIdx !== -1) {
-    const payload = packet.slice(colonIdx + 1);
-    const kwMatch = payload.match(/\b(MAYDAY|SOS|EMERGENCY)\b/i);
+    const kwMatch = packet.slice(colonIdx + 1).match(/\b(MAYDAY|SOS|EMERGENCY)\b/i);
     if (kwMatch) return `Alert (${kwMatch[1].toUpperCase()})`;
   }
   return '';
 }
-
-function isEmergency(a) {
-  return Boolean(parseEmergencyStatus(a.aprsPacket));
-}
-
-function getDisplayStatus(a) {
-  return parseEmergencyStatus(a.aprsPacket) || parseFanetStatus(a.aprsPacket);
-}
-
+function isEmergency(a) { return Boolean(parseEmergencyStatus(a.aprsPacket)); }
+function getDisplayStatus(a) { return parseEmergencyStatus(a.aprsPacket) || parseFanetStatus(a.aprsPacket); }
 function statusColor(a, status) {
   if (isEmergency(a)) return 'var(--red)';
-  if (status === 'Need technical support' || status === 'Need a ride') {
-    return 'var(--yellow)';
-  }
+  if (status === 'Need technical support' || status === 'Need a ride') return 'var(--yellow)';
   return 'var(--accent)';
+}
+
+function playBeep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    osc.type = 'sine'; osc.frequency.value = 880;
+    osc.connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + 0.25);
+  } catch (e) {}
+}
+
+function checkPinnedNotifications() {
+  if (!alertsEnabled) return;
+  const notifyStatuses = new Set(['Distress call', 'Distress call automatically', 'Need medical help', 'Need a ride', 'Landed well']);
+  for (const a of aircraft) {
+    if (!pinnedAircraft.has(a.address)) continue;
+    const st = getDisplayStatus(a);
+    const prev = lastPinnedStatus.get(a.address);
+    if (st && st !== prev && (notifyStatuses.has(st) || isEmergency(a))) {
+      playBeep();
+      if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification(`${displayName(a)}: ${st}`, { body: `Alt: ${fmtAlt(a.altitude) || 'N/A'} · ${a.lat.toFixed(4)}, ${a.lon.toFixed(4)}` });
+      }
+    }
+    if (st) lastPinnedStatus.set(a.address, st);
+  }
+}
+
+function rebuildAircraftArray() {
+  const now = serverNow();
+  const maxAgeMs = (Number($('markerWindow').value) || 900) * 1000;
+  aircraft = [];
+  const seenStations = new Map();
+
+  for (const [id, cached] of aprsCache.entries()) {
+    if (now - cached.timestamp > maxAgeMs) { aprsCache.delete(id); continue; }
+    const a = parseAprsLine(cached.raw, cached.timestamp);
+    if (!a) continue;
+    a.aprsPacket = cached.raw;
+    a.aprsReceivedAt = cached.received_at;
+
+    if (a.altitude != null) lastAltCache.set(a.address, { lat: a.lat, lon: a.lon, alt: a.altitude });
+    else {
+      const lastAlt = lastAltCache.get(a.address);
+      if (lastAlt && Math.abs(a.lat - lastAlt.lat) < 0.0005 && Math.abs(a.lon - lastAlt.lon) < 0.0005) a.altitude = lastAlt.alt;
+    }
+
+    if (nameCache.has(a.address)) a.streamName = nameCache.get(a.address);
+    else if (nameCache.has(a.ddbId)) a.streamName = nameCache.get(a.ddbId);
+
+    const details = ddbCache.get(a.ddbId);
+    if (details) {
+      if (details.callsign) a.callsign = details.callsign;
+      if (details.registration) a.registration = details.registration;
+      if (details.model) a.model = details.model;
+      if (details.ddbAircraftType !== '') a.ddbAircraftType = details.ddbAircraftType;
+    }
+
+    if (getResolvedType(a) === 15) {
+      const dispName = displayName(a), coordKey = a.lat.toFixed(4) + '_' + a.lon.toFixed(4);
+      if (seenStations.has(dispName) || seenStations.has(coordKey)) {
+        const existing = seenStations.get(dispName) || seenStations.get(coordKey);
+        if (/^[0-9a-f]{6}$/.test(a.ddbId) && !/^[0-9a-f]{6}$/.test(existing.ddbId)) {
+          const idx = aircraft.indexOf(existing);
+          if (idx > -1) aircraft[idx] = a;
+          seenStations.set(dispName, a); seenStations.set(coordKey, a);
+        }
+        continue;
+      }
+      seenStations.set(dispName, a); seenStations.set(coordKey, a);
+    }
+    aircraft.push(a);
+  }
+  checkPinnedNotifications();
+}
+
+function getStationKeys(station) {
+  return new Set(
+    [station.liveLabel, station.streamName, station.callsign, displayName(station)]
+      .filter(Boolean)
+      .map(s => s.trim().toLowerCase())
+  );
+}
+
+function getStationReceptionStats(station) {
+  const keys = getStationKeys(station);
+  if (keys.size === 0) return null;
+  let count = 0, maxKm = -1, farthest = null;
+  for (const other of aircraft) {
+    if (other.address === station.address || getResolvedType(other) === 15) continue;
+    if (!keys.has((other.receiver || '').toLowerCase())) continue;
+    count++;
+    const km = haversineKm(station.lat, station.lon, other.lat, other.lon);
+    if (km > maxKm) {
+      maxKm = km;
+      farthest = other;
+    }
+  }
+  let best24h = null;
+  for (const k of keys) {
+    const rec = stationStatsCache.get(k);
+    if (rec && (!best24h || rec.max_km > best24h.max_km)) best24h = rec;
+  }
+  return { count, maxKm, farthest, best24h };
 }
 
 function formatSnrHtml(snr) {
@@ -620,11 +785,21 @@ function formatSnrHtml(snr) {
   return `${snr.toFixed(1)} dB <span class="snr-badge ${cls}">${label}</span>`;
 }
 
+function signalBarsHtml(snr) {
+  if (snr == null) return '';
+  let bars = 0, cls = 'sig-weak';
+  if (snr >= 25) { bars = 4; cls = 'sig-strong'; }
+  else if (snr >= 18) { bars = 3; cls = 'sig-strong'; }
+  else if (snr >= 12) { bars = 2; cls = 'sig-good'; }
+  else if (snr > 0) { bars = 1; cls = 'sig-weak'; }
+  const items = [1, 2, 3, 4].map(n => `<i${n <= bars ? ' class="on"' : ''}></i>`).join('');
+  return `<span class="sig-bars ${cls}" title="Signal: ${snr.toFixed(1)} dB" aria-label="Signal ${snr.toFixed(1)} dB">${items}</span>`;
+}
+
 function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
   const emergClass = isEmergency(a) ? ' emergency' : '';
-  
   let svgPath = ICONS.default;
   switch(type) {
     case 2: case 5: case 8: case 9: case 13: case 16: svgPath = ICONS.airplane; break;
@@ -634,9 +809,10 @@ function markerIcon(a) {
     case 11: case 12: svgPath = ICONS.balloon; break;
     case 15: svgPath = ICONS.tower; break;
   }
-
-  return L.divIcon({className:'glider-icon',iconSize:[30,30],iconAnchor:[15,15],html:
-    `<div class="glider-wrap${emergClass}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg></div>`});
+  return L.divIcon({
+    className: 'glider-icon', iconSize: [30, 30], iconAnchor: [15, 15],
+    html: `<div class="glider-wrap${emergClass}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg></div>`
+  });
 }
 
 function popupRow(label, value) {
@@ -649,28 +825,38 @@ function popupRowHtml(label, html) {
 }
 
 function popup(a) {
-  const latStr = a.lat.toFixed(6);
-  const lonStr = a.lon.toFixed(6);
+  const latStr = a.lat.toFixed(6), lonStr = a.lon.toFixed(6);
   const locText = a.altitude != null ? `${latStr},${lonStr},${Math.round(a.altitude)}m` : `${latStr},${lonStr}`;
-  const locLabel = a.altitude != null ? 'Location (Lat, Lon, Alt)' : 'Location (Lat, Lon)';
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
-  const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>${locLabel}</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(locText)}</a></div>`;
+  const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>Location</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(locText)}</a></div>`;
   const statusText = getDisplayStatus(a);
-  const statusHtml = statusText
-    ? `<span style="color:${statusColor(a, statusText)}">${esc(statusText)}</span>`
-    : '';
-  const modelText = displayModel(a);
+  const statusHtml = statusText ? `<span style="color:${statusColor(a, statusText)}">${esc(statusText)}</span>` : '';
+  const wxText = a.weather ? `${a.weather.dir}° ${a.weather.spdKmh} km/h${a.weather.gustKmh != null ? ` (G ${a.weather.gustKmh})` : ''}${a.weather.tempC != null ? ` · ${a.weather.tempC}°C` : ''}` : '';
 
   const liveFields = [
-    ['Track / course (°)', a.course],
+    ['Track (°)', a.course],
     ['Ground speed', a.speed != null ? a.speed.toFixed(1) + ' km/h' : null],
-    ['Climb / sink (m/s)', a.climb],
-    ['Receiver', a.receiver]
+    ['Climb (m/s)', a.climb],
+    ['Receiver', a.receiver],
+    ['Weather', wxText]
   ];
 
+  if (getResolvedType(a) === 15) {
+    const rxStats = getStationReceptionStats(a);
+    if (rxStats) {
+      liveFields.push(['Aircraft heard', String(rxStats.count)]);
+      if (rxStats.best24h) {
+        const ageSec = Math.max(0, Math.floor((serverNow() / 1000) - rxStats.best24h.ts));
+        liveFields.push(['Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(ageSec)})`]);
+      } else if (rxStats.farthest) {
+        liveFields.push(['Farthest heard', `${rxStats.maxKm.toFixed(1)} km (${displayName(rxStats.farthest)})`]);
+      }
+    }
+  }
+
+  const isFol = followedAddress === a.address;
   const rawSection = a.aprsPacket
-    ? `<div class="popup-section">Raw Packet</div><div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}`
-    : '';
+    ? `<div class="popup-section">Raw Packet</div><div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}` : '';
 
   return `<div class="popup-title">${esc(displayName(a))}</div>
     <div class="popup-section">Identification and Status</div>
@@ -679,12 +865,45 @@ function popup(a) {
       ${popupRow('Callsign / CN', a.callsign)}
       ${popupRow('Registration', displayRegistration(a))}
       ${popupRow('Aircraft type', typeName(a))}
-      ${popupRow('Aircraft model', modelText)}
+      ${popupRow('Aircraft model', displayModel(a))}
       ${popupRowHtml('Status / Alert', statusHtml)}
     </div>
     <div class="popup-section">Live APRS Data</div>
-    <div class="popup-grid">${locationRow}${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}${liveFields.map(([label,value])=>popupRow(label,value)).join('')}</div>
+    <div class="popup-grid">${locationRow}${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}${liveFields.map(([l,v]) => popupRow(l,v)).join('')}</div>
+    <div class="popup-actions">
+      <button type="button" data-act="follow" data-addr="${esc(a.address)}">${isFol ? 'Unfollow' : '◎ Follow'}</button>
+      <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 Copy SAR</button>
+      <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>
+    </div>
     ${rawSection}`;
+}
+
+function updateCoverageLayer() {
+  coverageLayer.clearLayers();
+  if (!map.hasLayer(coverageLayer)) return;
+  const rxPos = new Map();
+  for (const a of aircraft) {
+    if (getResolvedType(a) === 15) {
+      for (const k of getStationKeys(a)) rxPos.set(k, a);
+    }
+  }
+  for (const a of aircraft) {
+    if (a.snr == null || getResolvedType(a) === 15) continue;
+    const color = a.snr >= 25 ? '#57d3b0' : a.snr >= 12 ? '#f5c451' : '#f07878';
+    const rx = a.receiver ? rxPos.get(a.receiver.toLowerCase()) : null;
+    if (rx) {
+      const distKm = haversineKm(rx.lat, rx.lon, a.lat, a.lon).toFixed(1);
+      L.polyline([[rx.lat, rx.lon], [a.lat, a.lon]], {
+        color, weight: 2.5, opacity: 0.85, dashArray: '6 4'
+      }).bindTooltip(`${displayName(rx)} → ${displayName(a)} · ${a.snr.toFixed(1)} dB · ${distKm} km`, { sticky: true })
+        .addTo(coverageLayer);
+    } else {
+      L.circleMarker([a.lat, a.lon], {
+        radius: 20, color, fillColor: color, fillOpacity: 0.22, weight: 2
+      }).bindTooltip(`${a.receiver || 'Receiver'} → ${displayName(a)} · ${a.snr.toFixed(1)} dB`)
+        .addTo(coverageLayer);
+    }
+  }
 }
 
 function filtered() {
@@ -693,29 +912,34 @@ function filtered() {
     const matches = !q || `${displayName(a)} ${a.id} ${a.callsign} ${a.registration} ${a.model} ${a.ognId} ${a.address}`.toLowerCase().includes(q);
     if (isEmergency(a)) return matches;
     const rType = getResolvedType(a);
-    const typeMatch = t === 'all' || 
-        (t === 'glider' && rType === 1) ||
-        (t === 'para' && rType === 7) || 
-        (t === 'fanet' && isFanet(a) && rType !== 15) ||
-        (t === 'other' && rType != null && rType !== 1 && rType !== 7);
+    const typeMatch = t === 'all' || (t === 'glider' && rType === 1) || (t === 'para' && rType === 7) ||
+      (t === 'fanet' && isFanet(a) && rType !== 15) || (t === 'other' && rType != null && rType !== 1 && rType !== 7);
     return matches && typeMatch;
   });
 }
 
 function render() {
-  rebuildAircraftArray();
+  if (replayActive) return;
   const visible = filtered();
-  const keep = new Set(visible.map(a=>a.address));
+  const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
+
+  // Emergency banner
+  const emergencies = visible.filter(isEmergency);
+  if (emergencies.length > 0) {
+    const first = emergencies[0];
+    $('emergencyBannerText').textContent = `🚨 ${emergencies.length} Emergency: ${displayName(first)} (${getDisplayStatus(first)})`;
+    $('emergencyJump').dataset.addr = first.address;
+    $('emergencyBanner').classList.add('show');
+  } else {
+    $('emergencyBanner').classList.remove('show');
+  }
 
   if (!isSpiderfied) {
     for (const [key, m] of markers) {
       if (!keep.has(key)) {
-        if (m._isEmergency) {
-          emergencyGroup.removeLayer(m);
-        } else {
-          clusterGroup.removeLayer(m);
-        }
+        if (m._isEmergency) emergencyGroup.removeLayer(m);
+        else clusterGroup.removeLayer(m);
         markers.delete(key);
       }
     }
@@ -729,260 +953,399 @@ function render() {
 
     if (!m) {
       if (isSpiderfied && !emerg) return;
-      m = L.marker([a.lat, a.lon], {icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0});
-      m._iconSig = iconSig;
-      m._isEmergency = emerg;
-      m._trueLat = a.lat;
-      m._trueLon = a.lon;
-      m.on('click', () => {
-        toggleSelection(key, false);
-      });
-      m.bindPopup(popup(a), {maxWidth: 360, autoPan: true, keepInView: true});
+      m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0 });
+      m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon;
+      m.on('click', () => toggleSelection(key, false));
+      m.bindPopup(popup(a), { maxWidth: 360, autoPan: true, keepInView: true });
       markers.set(key, m);
-      if (emerg) {
-        emergencyGroup.addLayer(m);
-      } else {
-        clusterGroup.addLayer(m);
-      }
+      if (emerg) emergencyGroup.addLayer(m);
+      else clusterGroup.addLayer(m);
     } else {
       const moved = m._trueLat !== a.lat || m._trueLon !== a.lon;
       if ((!isSpiderfied || m._isEmergency) && moved) {
         m.setLatLng([a.lat, a.lon]);
-        m._trueLat = a.lat;
-        m._trueLon = a.lon;
+        m._trueLat = a.lat; m._trueLon = a.lon;
       }
       if (moved) {
         const trackEntry = selectedTracks.get(key);
-        if (trackEntry && trackEntry.line) {
-          trackEntry.line.addLatLng([a.lat, a.lon]);
+        if (trackEntry && trackEntry.points) {
+          trackEntry.points.push([a.lat, a.lon, a.altitude, Math.floor(a.receivedAtMs / 1000)]);
+          if (trackEntry.layer) map.removeLayer(trackEntry.layer);
+          trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
+          if (trackEntry.layer) trackEntry.layer.addTo(map);
+          if (activeBaroAddress === key) renderBarogram(key);
         }
       }
       if (!isSpiderfied && m._isEmergency !== emerg) {
-        if (m._isEmergency) {
-          emergencyGroup.removeLayer(m);
-          clusterGroup.addLayer(m);
-        } else {
-          clusterGroup.removeLayer(m);
-          emergencyGroup.addLayer(m);
-        }
+        if (m._isEmergency) { emergencyGroup.removeLayer(m); clusterGroup.addLayer(m); }
+        else { clusterGroup.removeLayer(m); emergencyGroup.addLayer(m); }
         m._isEmergency = emerg;
       }
       if ((!isSpiderfied || m._isEmergency) && m._iconSig !== iconSig) {
-        m.setIcon(markerIcon(a));
-        m.setZIndexOffset(emerg ? 1000 : 0);
-        m._iconSig = iconSig;
+        m.setIcon(markerIcon(a)); m.setZIndexOffset(emerg ? 1000 : 0); m._iconSig = iconSig;
       }
-      if (m.isPopupOpen()) {
-        m.setPopupContent(popup(a));
-      } else {
-        m.bindPopup(popup(a), {maxWidth: 360, autoPan: true, keepInView: true});
-      }
+      if (m.isPopupOpen()) m.setPopupContent(popup(a));
+      else m.bindPopup(popup(a), { maxWidth: 360, autoPan: true, keepInView: true });
     }
+
+    if (followedAddress === key) map.panTo([a.lat, a.lon], { animate: true });
   });
-  
+
+  updateCoverageLayer();
+
   $('count').textContent = visible.length;
-  $('listCount').textContent = `${visible.length} aircraft`;
-  const alts = visible.map(a=>a.altitude).filter(v=>v!=null);
+  $('listCount').textContent = visible.length;
+  const alts = visible.map(a => a.altitude).filter(v => v != null);
   $('highest').textContent = alts.length ? fmtAlt(Math.max(...alts)) : '—';
 
   const sorted = visible.slice().sort((a, b) => {
-    const ea = isEmergency(a) ? 1 : 0;
-    const eb = isEmergency(b) ? 1 : 0;
+    const ea = isEmergency(a) ? 1 : 0, eb = isEmergency(b) ? 1 : 0;
     if (ea !== eb) return eb - ea;
-    return displayName(a).localeCompare(displayName(b), undefined, {sensitivity:'base', numeric:true});
+    const pa = pinnedAircraft.has(a.address) ? 1 : 0, pb = pinnedAircraft.has(b.address) ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   });
 
-  $('aircraftList').innerHTML = sorted.length ? sorted.map(a=> {
+  $('aircraftList').innerHTML = sorted.length ? sorted.map(a => {
     const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
     const trackEntry = selectedTracks.get(a.address);
     const isSelected = trackEntry ? ' selected' : '';
+    const isPinned = pinnedAircraft.has(a.address);
+    const pinnedClass = isPinned ? ' pinned' : '';
     const emergClass = isEmergency(a) ? ' emergency' : '';
     const rType = getResolvedType(a);
     const statusText = getDisplayStatus(a);
     const barColor = statusColor(a, statusText);
-    
-    const metrics = rType === 15 ? [] : [
-      a.speed != null ? `${a.speed.toFixed(1)} km/h` : '',
-      a.climb != null ? `${a.climb} m/s` : ''
-    ].filter(Boolean);
+
+    const metrics = rType === 15
+      ? (a.weather ? [`💨 ${a.weather.dir}° ${a.weather.spdKmh} km/h`] : [])
+      : [a.speed != null ? `${a.speed.toFixed(1)} km/h` : '', a.climb != null ? `${a.climb} m/s` : ''].filter(Boolean);
     const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
-
-    const statusHtml = statusText
-        ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>`
-        : '';
-
-    const trackDotHtml = trackEntry
-        ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>`
-        : '';
+    const statusHtml = statusText ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>` : '';
+    const trackDotHtml = trackEntry ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>` : '';
 
     return `
-    <div class="aircraft${emergClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
-      <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}</div>
+    <div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
+      <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'}">📌</button></div>
       <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}</div></div>
-      <div class="alt">${fmtAlt(a.altitude)}<div class="age">${fmtAge(ageSec)}</div></div>
-    </div>`}).join('') : '<div class="empty">No aircraft match current filters.</div>';
-    
-  document.querySelectorAll('.aircraft').forEach(el=>{
-    const key = el.dataset.key;
-    el.addEventListener('click', () => toggleSelection(key, true));
-  });
+      <div class="alt">${fmtAlt(a.altitude)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div></div>
+    </div>`;
+  }).join('') : '<div class="empty">No aircraft match current filters.</div>';
+
+  if (pendingHashSelect && markers.has(pendingHashSelect)) {
+    const target = pendingHashSelect;
+    pendingHashSelect = null;
+    toggleSelection(target, true);
+  }
 }
 
+// Single delegated click listener for the aircraft list
+$('aircraftList').addEventListener('click', e => {
+  const pinBtn = e.target.closest('.pin-btn');
+  if (pinBtn) {
+    e.stopPropagation();
+    togglePin(pinBtn.dataset.pin);
+    return;
+  }
+  const row = e.target.closest('.aircraft');
+  if (row) toggleSelection(row.dataset.key, true);
+});
+
+// Delegated click listener for popup action buttons
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.popup-actions button');
+  if (!btn) return;
+  const addr = btn.dataset.addr, act = btn.dataset.act;
+  const a = aircraft.find(x => x.address === addr);
+  if (act === 'follow') {
+    followedAddress = (followedAddress === addr) ? null : addr;
+    const m = markers.get(addr);
+    if (m && a && m.isPopupOpen()) m.setPopupContent(popup(a));
+  } else if (act === 'sar' && a) {
+    const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
+    const txt = [
+      `SAR Info: ${displayName(a)}`,
+      `Status: ${getDisplayStatus(a) || 'Unknown'}`,
+      `Coords: ${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
+      `Alt: ${a.altitude != null ? Math.round(a.altitude) + ' m' : 'N/A'}`,
+      `Last heard: ${fmtAge(ageSec)}`,
+      `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`
+    ].join('\n');
+    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 Copy SAR'; }, 1500); });
+  } else if (act === 'igc') {
+    if (!selectedTracks.has(addr)) {
+      selectedTracks.set(addr, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
+      loadTrack(addr).then(() => downloadIgc(addr));
+    } else {
+      downloadIgc(addr);
+    }
+  }
+});
+
+async function fetchThermals() {
+  if (!map.hasLayer(thermalLayer)) return;
+  const b = map.getBounds();
+  const params = new URLSearchParams({
+    thermals: '1',
+    south: b.getSouth().toFixed(1), north: b.getNorth().toFixed(1),
+    west: b.getWest().toFixed(1), east: b.getEast().toFixed(1)
+  });
+  try {
+    const res = await fetch(`ogn-proxy.php?${params}`);
+    if (res.ok) {
+      const data = await res.json();
+      thermalLayer.setLatLngs(Array.isArray(data.points) ? data.points : []);
+    }
+  } catch (e) {}
+}
+
+map.on('overlayadd', e => {
+  if (e.layer === thermalLayer) fetchThermals();
+  if (e.layer === coverageLayer) updateCoverageLayer();
+});
+
 async function fetchLive(force = false) {
-  if (fetching || (document.hidden && !force)) return;
+  if (replayActive || fetching || (document.hidden && !force)) return;
   fetching = true;
   try {
     const b = map.getBounds();
-    const south = (Math.floor(b.getSouth() * 10) / 10).toFixed(1);
-    const north = (Math.ceil(b.getNorth() * 10) / 10).toFixed(1);
-    const west  = (Math.floor(b.getWest() * 10) / 10).toFixed(1);
-    const east  = (Math.ceil(b.getEast() * 10) / 10).toFixed(1);
-
     const params = new URLSearchParams({
       live: '1',
-      north, south, east, west,
-      window: $('markerWindow').value
+      south: (Math.floor(b.getSouth() * 10) / 10).toFixed(1),
+      north: (Math.ceil(b.getNorth() * 10) / 10).toFixed(1),
+      west: (Math.floor(b.getWest() * 10) / 10).toFixed(1),
+      east: (Math.ceil(b.getEast() * 10) / 10).toFixed(1),
+      window: $('markerWindow').value,
+      meta: needMeta ? '1' : '0'
     });
 
     const response = await fetch(`ogn-proxy.php?${params}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
 
-    if (payload.server_time) {
-      serverClockOffsetMs = (Number(payload.server_time) * 1000) - Date.now();
-    }
-
+    if (payload.server_time) serverClockOffsetMs = (Number(payload.server_time) * 1000) - Date.now();
     if (payload.names && typeof payload.names === 'object') {
-      for (const [id, name] of Object.entries(payload.names)) {
-        nameCache.set(id, name);
-      }
+      for (const [id, name] of Object.entries(payload.names)) nameCache.set(id, name);
     }
-
     if (payload.ddb && typeof payload.ddb === 'object') {
-      for (const [id, info] of Object.entries(payload.ddb)) {
-        ddbCache.set(id, info);
-      }
+      for (const [id, info] of Object.entries(payload.ddb)) ddbCache.set(id, info);
+    }
+    if (payload.station_stats && typeof payload.station_stats === 'object') {
+      stationStatsCache.clear();
+      for (const [id, st] of Object.entries(payload.station_stats)) stationStatsCache.set(id.toLowerCase(), st);
     }
 
     const incoming = payload.packets && typeof payload.packets === 'object' ? payload.packets : {};
+    let sawUnknown = false;
     aprsCache.clear();
     for (const [id, pkt] of Object.entries(incoming)) {
+      if (!knownIds.has(id)) { knownIds.add(id); sawUnknown = true; }
       const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
       aprsCache.set(id, {
         raw: pkt.raw || '',
-        received_at: new Date(tsMs).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}),
+        received_at: new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         timestamp: tsMs
       });
     }
+    needMeta = sawUnknown;
 
+    rebuildAircraftArray();
     render();
-    const updatedMs = (Number(payload.updated) || 0) * 1000;
-    $('updated').textContent = updatedMs > 0
-      ? new Date(updatedMs).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})
-      : '—';
 
+    const updatedMs = (Number(payload.updated) || 0) * 1000;
+    $('updated').textContent = updatedMs > 0 ? new Date(updatedMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
     const stale = !updatedMs || (serverNow() - updatedMs) > 120000;
-    if (stale) {
-      setStatus('error', 'Collector paused (>2m old)');
-    } else {
+    if (stale) setStatus('error', 'Collector paused (>2m old)');
+    else {
       const identified = aircraft.filter(a => a.callsign || a.registration || a.streamName || !/([0-9A-F]{6})$/i.test(a.liveLabel)).length;
       setStatus('live', `${aircraft.length} tracking · ${identified} identified`);
     }
   } catch (err) {
     setStatus('error', 'Waiting for live data…');
-    console.warn('Viewport fetch failed:', err);
   } finally {
     fetching = false;
   }
 }
 
+// Replay Mode
+async function loadReplaySlice() {
+  const minsAgo = 1440 - Number($('replaySlider').value);
+  const ts = Math.floor(serverNow() / 1000) - (minsAgo * 60);
+  $('replayTime').textContent = new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const b = map.getBounds();
+  const params = new URLSearchParams({
+    replay: '1', ts: String(ts),
+    south: b.getSouth().toFixed(1), north: b.getNorth().toFixed(1),
+    west: b.getWest().toFixed(1), east: b.getEast().toFixed(1)
+  });
+  try {
+    const res = await fetch(`ogn-proxy.php?${params}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    replayGroup.clearLayers();
+    (data.aircraft || []).forEach(p => {
+      L.circleMarker([p.lat, p.lon], { radius: 6, color: '#38bdf8', fillColor: '#57d3b0', fillOpacity: 0.9, weight: 2 })
+        .bindTooltip(`${p.label}${p.alt != null ? ' · ' + p.alt + 'm' : ''}`)
+        .addTo(replayGroup);
+    });
+  } catch (e) {}
+}
+
+function setReplayMode(on) {
+  replayActive = on;
+  $('btnReplay').classList.toggle('active', on);
+  $('replayBar').classList.toggle('show', on);
+  if (on) {
+    map.removeLayer(clusterGroup); map.removeLayer(emergencyGroup);
+    replayGroup.addTo(map);
+    loadReplaySlice();
+  } else {
+    clearInterval(replayTimer); replayTimer = null; $('replayPlay').textContent = '▶';
+    map.removeLayer(replayGroup); replayGroup.clearLayers();
+    clusterGroup.addTo(map); emergencyGroup.addTo(map);
+    fetchLive(true);
+  }
+}
+
+// OpenAir / GeoJSON Airspace loader
+function parseOpenAirToGeoJson(text) {
+  const features = [];
+  let name = 'Airspace', coords = [];
+  const flush = () => {
+    if (coords.length >= 3) {
+      coords.push(coords[0]);
+      features.push({ type: 'Feature', properties: { name }, geometry: { type: 'Polygon', coordinates: [coords] } });
+    }
+    coords = [];
+  };
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('*')) continue;
+    if (line.startsWith('AC ')) { flush(); name = line.slice(3).trim(); }
+    else if (line.startsWith('AN ')) { name = line.slice(3).trim(); }
+    else if (line.startsWith('DP ')) {
+      const m = line.match(/DP\s+(\d+):(\d+):(\d+(?:\.\d+)?)\s*([NS])\s+(\d+):(\d+):(\d+(?:\.\d+)?)\s*([EW])/i);
+      if (m) {
+        let lat = +m[1] + +m[2] / 60 + +m[3] / 3600; if (m[4].toUpperCase() === 'S') lat = -lat;
+        let lon = +m[5] + +m[6] / 60 + +m[7] / 3600; if (m[8].toUpperCase() === 'W') lon = -lon;
+        coords.push([lon, lat]);
+      }
+    }
+  }
+  flush();
+  return { type: 'FeatureCollection', features };
+}
+
+// UI Bindings
 let moveTimer = null;
 map.on('moveend', () => {
+  updateUrlHash();
+  needMeta = true;
   clearTimeout(moveTimer);
-  moveTimer = setTimeout(() => fetchLive(true), 300);
+  moveTimer = setTimeout(() => {
+    if (replayActive) loadReplaySlice();
+    else { fetchLive(true); fetchThermals(); }
+  }, 300);
 });
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) fetchLive(true);
-});
-
-$('refresh').addEventListener('click', () => fetchLive(true));
+document.addEventListener('visibilitychange', () => { if (!document.hidden && !replayActive) fetchLive(true); });
+$('refresh').addEventListener('click', () => { needMeta = true; fetchLive(true); });
 $('search').addEventListener('input', () => { clearAllTracks(); render(); });
 $('type').addEventListener('change', () => { clearAllTracks(); render(); });
-$('markerWindow').addEventListener('change', () => { clearAllTracks(); fetchLive(true); });
-$('trackWindow').addEventListener('change', () => {
-  for (const address of selectedTracks.keys()) {
-    loadTrack(address);
+$('markerWindow').addEventListener('change', () => { clearAllTracks(); needMeta = true; fetchLive(true); });
+$('trackWindow').addEventListener('change', () => { for (const addr of selectedTracks.keys()) loadTrack(addr); });
+
+$('emergencyJump').addEventListener('click', () => {
+  const addr = $('emergencyJump').dataset.addr;
+  if (addr) toggleSelection(addr, true);
+});
+
+$('toggleTrackMode').addEventListener('click', () => {
+  varioTrackMode = !varioTrackMode;
+  $('toggleTrackMode').textContent = `Vario: ${varioTrackMode ? 'ON' : 'OFF'}`;
+  $('toggleTrackMode').classList.toggle('active', varioTrackMode);
+  redrawAllTracks();
+});
+$('btnDownloadIgc').addEventListener('click', () => { if (activeBaroAddress) downloadIgc(activeBaroAddress); });
+$('btnCloseBaro').addEventListener('click', () => $('barogram').classList.remove('show'));
+
+$('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
+$('replayExit').addEventListener('click', () => setReplayMode(false));
+$('replaySlider').addEventListener('input', loadReplaySlice);
+$('replayPlay').addEventListener('click', () => {
+  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; $('replayPlay').textContent = '▶'; }
+  else {
+    $('replayPlay').textContent = '⏸';
+    replayTimer = setInterval(() => {
+      let v = Number($('replaySlider').value) + 5;
+      if (v > 1440) v = 0;
+      $('replaySlider').value = String(v);
+      loadReplaySlice();
+    }, 1000);
   }
 });
+
+$('btnNotify').addEventListener('click', async () => {
+  if (!alertsEnabled && 'Notification' in window && Notification.permission === 'default') {
+    await Notification.requestPermission();
+  }
+  alertsEnabled = !alertsEnabled;
+  $('btnNotify').classList.toggle('active', alertsEnabled);
+  $('btnNotify').textContent = alertsEnabled ? '🔔 Alerts: ON' : '🔔 Alerts';
+});
+
+$('btnAirspace').addEventListener('click', () => $('airspaceFile').click());
+$('airspaceFile').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  try {
+    const gj = file.name.toLowerCase().endsWith('.txt') ? parseOpenAirToGeoJson(text) : JSON.parse(text);
+    airspaceLayer.clearLayers();
+    airspaceLayer.addData(gj);
+    if (!map.hasLayer(airspaceLayer)) airspaceLayer.addTo(map);
+  } catch (err) {
+    alert('Could not parse airspace file. Please use valid GeoJSON or OpenAir (.txt).');
+  }
+  e.target.value = '';
+});
+
 $('locate').addEventListener('click', () => {
   const btn = $('locate');
-  btn.disabled = true;
-  btn.textContent = '◎ Locating…';
-
-  const resetBtn = () => {
-    btn.disabled = false;
-    btn.textContent = '◎ Locate';
-  };
-
+  btn.disabled = true; btn.textContent = '◎ Locating…';
+  const resetBtn = () => { btn.disabled = false; btn.textContent = '◎ Locate'; };
   const showLocation = (lat, lon, zoom, label) => {
     resetBtn();
     const pos = [lat, lon];
     map.setView(pos, Math.max(map.getZoom(), zoom));
-    if (userLocationMarker) {
-      userLocationMarker.setLatLng(pos).setPopupContent(label);
-    } else {
-      userLocationMarker = L.circleMarker(pos, {
-        radius: 7,
-        color: '#ffffff',
-        weight: 2,
-        fillColor: '#38bdf8',
-        fillOpacity: 1
-      }).bindPopup(label).addTo(map);
-    }
-    fetchLive(true);
+    if (userLocationMarker) userLocationMarker.setLatLng(pos).setPopupContent(label);
+    else userLocationMarker = L.circleMarker(pos, { radius: 7, color: '#ffffff', weight: 2, fillColor: '#38bdf8', fillOpacity: 1 }).bindPopup(label).addTo(map);
+    needMeta = true; fetchLive(true);
   };
-
   const fallbackToIp = async () => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 6000);
     try {
       const res = await fetch('https://get.geojs.io/v1/ip/geo.json', { signal: ctrl.signal });
       clearTimeout(timer);
-      if (!res.ok) throw new Error('IP lookup failed');
+      if (!res.ok) throw new Error();
       const data = await res.json();
-      const lat = parseFloat(data.latitude);
-      const lon = parseFloat(data.longitude);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error('Invalid IP coordinates');
+      const lat = parseFloat(data.latitude), lon = parseFloat(data.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw new Error();
       const place = [data.city, data.country].filter(Boolean).join(', ');
       showLocation(lat, lon, 10, place ? `Approximate location (IP: ${place})` : 'Approximate location (IP)');
     } catch (e) {
-      clearTimeout(timer);
-      resetBtn();
-      alert('Could not determine your location. Please check GPS/location services or try again.');
+      clearTimeout(timer); resetBtn();
+      alert('Could not determine your location.');
     }
   };
-
-  if (!window.isSecureContext || !navigator.geolocation) {
-    fallbackToIp();
-    return;
-  }
-
+  if (!window.isSecureContext || !navigator.geolocation) { fallbackToIp(); return; }
   const onSuccess = p => showLocation(p.coords.latitude, p.coords.longitude, 12, 'Your location');
-
   navigator.geolocation.getCurrentPosition(
     onSuccess,
     err => {
-      if (err.code === 1) {
-        resetBtn();
-        alert('Location permission denied. Please allow location access in your browser settings.');
-        return;
-      }
-      navigator.geolocation.getCurrentPosition(
-        onSuccess,
-        () => fallbackToIp(),
-        { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 }
-      );
+      if (err.code === 1) { resetBtn(); alert('Location permission denied.'); return; }
+      navigator.geolocation.getCurrentPosition(onSuccess, fallbackToIp, { enableHighAccuracy: false, timeout: 6000, maximumAge: 300000 });
     },
     { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
   );
@@ -990,7 +1353,16 @@ $('locate').addEventListener('click', () => {
 
 fetchLive(true);
 setInterval(() => fetchLive(false), 5000);
-setInterval(() => { if (!document.hidden) render(); }, 1000);
+
+// Lightweight 1-second timer: updates only packet age labels, no APRS re-parse or DOM rebuild
+setInterval(() => {
+  if (document.hidden || replayActive) return;
+  const now = serverNow();
+  document.querySelectorAll('#aircraftList .age[data-ts]').forEach(el => {
+    const ts = Number(el.dataset.ts);
+    if (ts) el.textContent = fmtAge(Math.max(0, Math.floor((now - ts) / 1000)));
+  });
+}, 1000);
 })();
 </script>
 </body>

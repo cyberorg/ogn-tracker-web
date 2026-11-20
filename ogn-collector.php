@@ -13,10 +13,11 @@ if (PHP_SAPI !== 'cli') {
 
 const RUN_SECONDS          = 55;
 const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft positions
-const TRACK_EXPIRE_SECONDS = 86400; // 24 hours for flight tracks (supports full "Today" tracks)
+const TRACK_EXPIRE_SECONDS = 86400; // 24 hours for flight tracks
 const TRACK_MIN_INTERVAL   = 15;    // Min seconds between track points for non-paragliders
 const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
 const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB every 6 hours
+const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
 
 $lockFile = __DIR__ . '/ogn-collector.lock';
 $dbFile   = __DIR__ . '/ogn-live.sqlite';
@@ -57,6 +58,17 @@ $pdo->exec('
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_tracks_ts ON tracks (ts);
 
+    CREATE TABLE IF NOT EXISTS stations (
+        id TEXT PRIMARY KEY,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        max_km REAL NOT NULL DEFAULT 0,
+        farthest_id TEXT NOT NULL DEFAULT "",
+        farthest_ts INTEGER NOT NULL DEFAULT 0,
+        updated INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_stations_coords ON stations (lat, lon);
+
     CREATE TABLE IF NOT EXISTS names (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -85,6 +97,13 @@ if (!in_array('is_emergency', $cols, true)) {
 }
 $pdo->exec('CREATE INDEX IF NOT EXISTS idx_aircraft_emerg ON aircraft (timestamp) WHERE is_emergency = 1;');
 
+function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $dLat = deg2rad($lat2 - $lat1);
+    $dLon = deg2rad($lon2 - $lon1);
+    $a = sin($dLat / 2.0) ** 2 + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon / 2.0) ** 2;
+    return 6371.0 * 2.0 * atan2(sqrt($a), sqrt(1.0 - $a));
+}
+
 function is_emergency_packet(string $line): int {
     if (preg_match('/\bFNT7[def]\b/i', $line)) return 1;
     if (preg_match('/\bsq(7700|7600|7500)\b/i', $line)) return 1;
@@ -96,11 +115,25 @@ function is_emergency_packet(string $line): int {
     return 0;
 }
 
+// Pre-load known ground stations & their 24h max-range records into memory
+$stationState = [];
+$cutoff24h = time() - EXPIRE_SECONDS;
+foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts FROM stations') as $row) {
+    $validRecord = ((int)$row['farthest_ts'] >= $cutoff24h);
+    $stationState[$row['id']] = [
+        'lat'         => (float)$row['lat'],
+        'lon'         => (float)$row['lon'],
+        'max_km'      => $validRecord ? (float)$row['max_km'] : 0.0,
+        'farthest_id' => $validRecord ? (string)$row['farthest_id'] : '',
+        'farthest_ts' => $validRecord ? (int)$row['farthest_ts'] : 0,
+    ];
+}
+
 // --- Sync full OGN DDB once every 6 hours ---
 $ddbUpdated = (int)$pdo->query('SELECT value FROM meta WHERE key = "ddb_updated"')->fetchColumn();
 if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
     try {
-        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.7']]);
+        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.8']]);
         $body = @file_get_contents('https://ddb.glidernet.org/download/?j=1&t=1', false, $ctx);
         if ($body !== false) {
             $data = json_decode($body, true);
@@ -167,6 +200,26 @@ $stmtUpsertName = $pdo->prepare('
     VALUES (:id, :name, :ts)
     ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated = excluded.updated
 ');
+$stmtUpsertStation = $pdo->prepare('
+    INSERT INTO stations (id, lat, lon, max_km, farthest_id, farthest_ts, updated)
+    VALUES (:id, :lat, :lon, :max_km, :fid, :fts, :ts)
+    ON CONFLICT(id) DO UPDATE SET
+        lat = excluded.lat,
+        lon = excluded.lon,
+        max_km = CASE
+            WHEN stations.farthest_ts < :cutoff OR excluded.max_km > stations.max_km THEN excluded.max_km
+            ELSE stations.max_km
+        END,
+        farthest_id = CASE
+            WHEN stations.farthest_ts < :cutoff OR excluded.max_km > stations.max_km THEN excluded.farthest_id
+            ELSE stations.farthest_id
+        END,
+        farthest_ts = CASE
+            WHEN stations.farthest_ts < :cutoff OR excluded.max_km > stations.max_km THEN excluded.farthest_ts
+            ELSE stations.farthest_ts
+        END,
+        updated = excluded.updated
+');
 $stmtMeta = $pdo->prepare('
     INSERT INTO meta (key, value) VALUES ("updated", :ts)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -178,14 +231,17 @@ function flush_batch(
     PDOStatement $stmtInsertTrack,
     PDOStatement $stmtTouchPos,
     PDOStatement $stmtUpsertName,
+    PDOStatement $stmtUpsertStation,
     PDOStatement $stmtMeta,
     array &$posBatch,
     array &$trackBatch,
     array &$touchBatch,
     array &$nameBatch,
+    array &$stationBatch,
     bool $prune = false
 ): void {
     $now = time();
+    $cutoff = $now - EXPIRE_SECONDS;
     $pdo->beginTransaction();
     try {
         foreach ($posBatch as $id => $p) {
@@ -216,19 +272,34 @@ function flush_batch(
         foreach ($nameBatch as $id => $name) {
             $stmtUpsertName->execute([':id' => $id, ':name' => $name, ':ts' => $now]);
         }
+        foreach ($stationBatch as $sid => $s) {
+            $stmtUpsertStation->execute([
+                ':id'     => $sid,
+                ':lat'    => $s['lat'],
+                ':lon'    => $s['lon'],
+                ':max_km' => $s['max_km'],
+                ':fid'    => $s['farthest_id'],
+                ':fts'    => $s['farthest_ts'],
+                ':ts'     => $now,
+                ':cutoff' => $cutoff,
+            ]);
+        }
         if ($prune) {
-            $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . ($now - EXPIRE_SECONDS));
+            $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . $cutoff);
             $pdo->exec('DELETE FROM tracks WHERE ts < ' . ($now - TRACK_EXPIRE_SECONDS));
+            $pdo->exec('UPDATE stations SET max_km = 0, farthest_id = "", farthest_ts = 0 WHERE farthest_ts > 0 AND farthest_ts < ' . $cutoff);
+            $pdo->exec('DELETE FROM stations WHERE updated < ' . $cutoff);
         }
         $stmtMeta->execute([':ts' => (string)$now]);
         $pdo->commit();
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
     }
-    $posBatch   = [];
-    $trackBatch = [];
-    $touchBatch = [];
-    $nameBatch  = [];
+    $posBatch     = [];
+    $trackBatch   = [];
+    $touchBatch   = [];
+    $nameBatch    = [];
+    $stationBatch = [];
 }
 
 $errno = 0;
@@ -241,7 +312,7 @@ if (!$socket) {
 }
 
 stream_set_timeout($socket, 2);
-fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.7 filter a/90/-180/-90/180\r\n");
+fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.8 filter a/90/-180/-90/180\r\n");
 
 $deadline  = microtime(true) + RUN_SECONDS;
 $lastFlush = microtime(true);
@@ -250,6 +321,7 @@ $posBatch       = [];
 $trackBatch     = [];
 $touchBatch     = [];
 $nameBatch      = [];
+$stationBatch   = [];
 $lastTrackPoint = [];
 
 while (microtime(true) < $deadline && !feof($socket)) {
@@ -276,8 +348,12 @@ while (microtime(true) < $deadline && !feof($socket)) {
 
             $now = time();
 
+            $streamName = '';
             if (preg_match('/Name="([^"]+)"/', $line, $nm)) {
-                $nameBatch[$id] = $nm[1];
+                $streamName = trim($nm[1]);
+                if ($streamName !== '') {
+                    $nameBatch[$id] = $streamName;
+                }
             }
 
             if (preg_match('/(\d{6})h(\d{2})(\d{2}\.\d+)([NS])(.)(\d{3})(\d{2}\.\d+)([EW])(.)/', $line, $bm, PREG_OFFSET_CAPTURE)) {
@@ -287,7 +363,6 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 $lon = (int)$bm[6][0] + ((float)$bm[7][0] / 60.0);
                 if ($bm[8][0] === 'W') $lon = -$lon;
 
-                // Reject corrupted coordinates before touching aircraft or tracks
                 if (abs($lat) > 90.0 || abs($lon) > 180.0 || ($lat == 0.0 && $lon == 0.0)) {
                     continue;
                 }
@@ -317,7 +392,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
 
                 $remainder = substr($line, $bm[0][1] + strlen($bm[0][0]));
                 $speed = null;
-                if (preg_match('/^(\d{3})\/(\d{3})/', $remainder, $csm)) {
+                if (preg_match('/^(\d{3})\/(\d{3})/', $remainder, $csm) && $sym !== '_') {
                     $speed = (int)$csm[2] * 1.852;
                 }
                 $alt = null;
@@ -325,7 +400,6 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     $alt = round((int)$am[1] * 0.3048, 1);
                 }
 
-                // Reject impossible RF noise telemetry so it never overwrites a good packet
                 if ($alt !== null && ($alt < -500.0 || ($type !== 11 && $alt > 18000.0))) {
                     continue;
                 }
@@ -348,8 +422,43 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     'is_emergency' => is_emergency_packet($line),
                 ];
 
-                // Log tracks (skip fixed ground/weather stations; log all points for paragliders)
-                if (!$isStation) {
+                if ($isStation) {
+                    // Record station coordinates (and FANET stream name alias if present)
+                    $stationKeys = [$id];
+                    if ($streamName !== '') {
+                        $stationKeys[] = strtolower($streamName);
+                    }
+                    foreach ($stationKeys as $sk) {
+                        $existing = $stationState[$sk] ?? ['max_km' => 0.0, 'farthest_id' => '', 'farthest_ts' => 0];
+                        $stationState[$sk] = [
+                            'lat'         => $lat,
+                            'lon'         => $lon,
+                            'max_km'      => $existing['max_km'],
+                            'farthest_id' => $existing['farthest_id'],
+                            'farthest_ts' => $existing['farthest_ts'],
+                        ];
+                        $stationBatch[$sk] = $stationState[$sk];
+                    }
+                } else {
+                    // Track 24-hour farthest aircraft heard per receiving ground station
+                    if (preg_match('/q[A-Z]{2},([^:,]+)[:,]/', $line, $rxm)) {
+                        $rxKey = strtolower(trim($rxm[1]));
+                        if (isset($stationState[$rxKey])) {
+                            $st = $stationState[$rxKey];
+                            $km = haversine_km($st['lat'], $st['lon'], $lat, $lon);
+                            if ($km <= MAX_RX_RANGE_KM) {
+                                $expired = ($st['farthest_ts'] < ($now - EXPIRE_SECONDS));
+                                if ($expired || $km > $st['max_km']) {
+                                    $stationState[$rxKey]['max_km']      = round($km, 1);
+                                    $stationState[$rxKey]['farthest_id'] = $id;
+                                    $stationState[$rxKey]['farthest_ts'] = $now;
+                                    $stationBatch[$rxKey] = $stationState[$rxKey];
+                                }
+                            }
+                        }
+                    }
+
+                    // Log flight tracks (all points for paragliders, throttled for others)
                     if ($type === 7) {
                         $logPoint = true;
                     } else {
@@ -379,20 +488,18 @@ while (microtime(true) < $deadline && !feof($socket)) {
     }
 
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
-        flush_batch($pdo, $stmtUpsertPos, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtMeta, $posBatch, $trackBatch, $touchBatch, $nameBatch, false);
+        flush_batch($pdo, $stmtUpsertPos, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, false);
         $lastFlush = microtime(true);
     }
 }
 
 fclose($socket);
-flush_batch($pdo, $stmtUpsertPos, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtMeta, $posBatch, $trackBatch, $touchBatch, $nameBatch, true);
+flush_batch($pdo, $stmtUpsertPos, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, true);
 
-// Reclaim freed pages and keep WAL file compact
 try {
     $pdo->exec('PRAGMA incremental_vacuum(500);');
     $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE);');
 } catch (Throwable $e) {
-    // Non-fatal if another reader holds a lock
 }
 
 flock($lockFp, LOCK_UN);
