@@ -1638,12 +1638,19 @@ function render() {
       m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a;
       m.on('click', () => toggleSelection(key, false));
       m._detailsOpen = false;
+      m._popupSig = '';
       m.on('popupopen', () => {
-        m.setPopupContent(popup(m._data));
+        const html = popup(m._data);
+        if (m._popupSig !== html) {
+          m._popupSig = html;
+          m.setPopupContent(html);
+        }
         const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
         if (d) {
           d.open = !!m._detailsOpen;
-          d.addEventListener('toggle', () => { m._detailsOpen = d.open; });
+          d.onTogglePopupDetails = d.onTogglePopupDetails || (() => { m._detailsOpen = d.open; });
+          d.removeEventListener('toggle', d.onTogglePopupDetails);
+          d.addEventListener('toggle', d.onTogglePopupDetails);
         }
       });
       m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: true, keepInView: true });
@@ -1679,11 +1686,17 @@ function render() {
         const popupEl = m.getPopup()?.getElement();
         const detailsEl = popupEl?.querySelector('[data-popup-details]');
         if (detailsEl) m._detailsOpen = detailsEl.open;
-        m.setPopupContent(popup(a));
+        const html = popup(a);
+        if (m._popupSig !== html) {
+          m._popupSig = html;
+          m.setPopupContent(html);
+        }
         const newDetails = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
         if (newDetails) {
           newDetails.open = !!m._detailsOpen;
-          newDetails.addEventListener('toggle', () => { m._detailsOpen = newDetails.open; });
+          newDetails.onTogglePopupDetails = newDetails.onTogglePopupDetails || (() => { m._detailsOpen = newDetails.open; });
+          newDetails.removeEventListener('toggle', newDetails.onTogglePopupDetails);
+          newDetails.addEventListener('toggle', newDetails.onTogglePopupDetails);
         }
       }
     }
@@ -1846,9 +1859,15 @@ document.addEventListener('click', e => {
     if (m && aa && m.isPopupOpen()) {
       const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
       if (d) m._detailsOpen = d.open;
-      m.setPopupContent(popup(aa));
+      const html = popup(aa);
+      if (m._popupSig !== html) { m._popupSig = html; m.setPopupContent(html); }
       const nd = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
-      if (nd) nd.open = !!m._detailsOpen;
+      if (nd) {
+        nd.open = !!m._detailsOpen;
+        nd.onTogglePopupDetails = nd.onTogglePopupDetails || (() => { m._detailsOpen = nd.open; });
+        nd.removeEventListener('toggle', nd.onTogglePopupDetails);
+        nd.addEventListener('toggle', nd.onTogglePopupDetails);
+      }
     }
   } else if (act === 'follow') {
     followedAddress = (followedAddress === addr) ? null : addr;
@@ -1856,9 +1875,15 @@ document.addEventListener('click', e => {
     if (m && a && m.isPopupOpen()) {
       const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
       if (d) m._detailsOpen = d.open;
-      m.setPopupContent(popup(a));
+      const html = popup(a);
+      if (m._popupSig !== html) { m._popupSig = html; m.setPopupContent(html); }
       const nd = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
-      if (nd) nd.open = !!m._detailsOpen;
+      if (nd) {
+        nd.open = !!m._detailsOpen;
+        nd.onTogglePopupDetails = nd.onTogglePopupDetails || (() => { m._detailsOpen = nd.open; });
+        nd.removeEventListener('toggle', nd.onTogglePopupDetails);
+        nd.addEventListener('toggle', nd.onTogglePopupDetails);
+      }
     }
   } else if (act === 'share') {
     const base = getShareUrl();
