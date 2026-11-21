@@ -735,48 +735,13 @@ try {
     // 24-hour farthest aircraft heard & unique aircraft heard count per ground station in viewport
     $stationStats = [];
     try {
-        $aliasGraph = [];
-        foreach ($pdo->query('SELECT id, name FROM names WHERE name != ""') as $nrow) {
-            link_station_alias($aliasGraph, (string)$nrow['id'], (string)$nrow['name']);
-        }
-        foreach ($pdo->query('SELECT id, ddb_id FROM aircraft WHERE ddb_id != ""') as $arow) {
-            link_station_alias($aliasGraph, (string)$arow['id'], (string)$arow['ddb_id']);
-        }
-
-        $heardSetsByKey = [];
-        $stmtHc = $pdo->prepare('
-            SELECT station_id, aircraft_id
-            FROM station_heard
-            WHERE last_ts >= :cutoff24
-        ');
-        $stmtHc->execute([':cutoff24' => $cutoff24]);
-        while ($hc = $stmtHc->fetch(PDO::FETCH_ASSOC)) {
-            $sid = strtolower(trim((string)$hc['station_id']));
-            $aid = strtolower(trim((string)$hc['aircraft_id']));
-            if ($sid === '' || $aid === '') continue;
-            if (!isset($heardSetsByKey[$sid])) $heardSetsByKey[$sid] = [];
-            $heardSetsByKey[$sid][$aid] = true;
-        }
-
-        $countAliases24h = static function (string $key) use (&$aliasGraph, &$heardSetsByKey): int {
-            $union = [];
-            foreach (expand_station_alias_set($aliasGraph, $key) as $ak) {
-                if (!empty($heardSetsByKey[$ak])) {
-                    foreach ($heardSetsByKey[$ak] as $aid => $_) {
-                        $union[$aid] = true;
-                    }
-                }
-            }
-            return count($union);
-        };
-
         $stParams = [':south' => $south, ':north' => $north, ':cutoff24' => $cutoff24];
         if (!$fullWorld) {
             $stParams[':west'] = $w;
             $stParams[':east'] = $e;
         }
         $stmtSt = $pdo->prepare("
-            SELECT s.id, s.max_km, s.farthest_id, s.farthest_ts,
+            SELECT s.id, s.max_km, s.farthest_id, s.farthest_ts, s.heard_24h,
                    n.name, d.callsign, d.registration
             FROM stations s
             LEFT JOIN aircraft a ON s.farthest_id = a.id
@@ -784,29 +749,21 @@ try {
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE s.lat BETWEEN :south AND :north
               AND {$lonClauseS}
-              AND s.farthest_ts >= :cutoff24
+              AND (s.farthest_ts >= :cutoff24 OR s.heard_24h > 0 OR s.updated >= :cutoff24)
             LIMIT 500
         ");
         $stmtSt->execute($stParams);
         while ($r = $stmtSt->fetch(PDO::FETCH_ASSOC)) {
             $sid = strtolower((string)$r['id']);
-            $label = $r['name'] ?: ($r['callsign'] ?: ($r['registration'] ?: strtoupper($r['farthest_id'])));
+            $farthestTs = (int)$r['farthest_ts'];
+            $hasFarthest = $farthestTs >= $cutoff24 && (float)$r['max_km'] > 0;
+            $label = $r['name'] ?: ($r['callsign'] ?: ($r['registration'] ?: strtoupper((string)$r['farthest_id'])));
             $stationStats[$r['id']] = [
-                'heard_24h' => $countAliases24h($sid),
-                'max_km'    => round((float)$r['max_km'], 1),
-                'label'     => $label,
-                'ts'        => (int)$r['farthest_ts'],
+                'heard_24h' => max(0, (int)($r['heard_24h'] ?? 0)),
+                'max_km'    => $hasFarthest ? round((float)$r['max_km'], 1) : 0.0,
+                'label'     => $hasFarthest ? $label : '',
+                'ts'        => $hasFarthest ? $farthestTs : 0,
             ];
-        }
-        foreach (array_keys($heardSetsByKey) as $sid) {
-            if (!isset($stationStats[$sid])) {
-                $stationStats[$sid] = [
-                    'heard_24h' => $countAliases24h($sid),
-                    'max_km'    => 0.0,
-                    'label'     => '',
-                    'ts'        => 0,
-                ];
-            }
         }
     } catch (Throwable $e) {
     }

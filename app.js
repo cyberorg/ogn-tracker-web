@@ -20,7 +20,7 @@ let speedUnit = 'kmh';
 let tempUnit = 'c';
 let climbUnit = 'mps';
 let alertsEnabled = false;
-let savedTypes = ['all'];
+let savedTypes = ['para', 'wx'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
 let collectorPaused = false;
@@ -52,7 +52,9 @@ function getCurrentTypesArray() {
 function isDefaultFilterState() {
   const activeTypes = getCurrentTypesArray();
   const searchQ = $('search') ? $('search').value.trim() : '';
-  return activeTypes.includes('all') &&
+  const defaultTypes = ['para', 'wx'];
+  const typesMatch = activeTypes.length === defaultTypes.length && defaultTypes.every(t => activeTypes.includes(t));
+  return typesMatch &&
     !searchQ &&
     $('markerWindow').value === '900' &&
     $('trackWindow').value === '900' &&
@@ -111,7 +113,7 @@ function applySavedMenuPrefs() {
 
 function resetFilters() {
   $('search').value = '';
-  savedTypes = ['all'];
+  savedTypes = ['para', 'wx'];
   savedMarkerWindow = '900';
   savedTrackWindow = '900';
   altUnit = 'm'; speedUnit = 'kmh'; tempUnit = 'c'; climbUnit = 'mps';

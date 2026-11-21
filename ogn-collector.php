@@ -92,6 +92,7 @@ $pdo->exec('
         max_km REAL NOT NULL DEFAULT 0,
         farthest_id TEXT NOT NULL DEFAULT "",
         farthest_ts INTEGER NOT NULL DEFAULT 0,
+        heard_24h INTEGER NOT NULL DEFAULT 0,
         updated INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_stations_coords ON stations (lat, lon);
@@ -130,6 +131,11 @@ if (!in_array('is_emergency', $cols, true)) {
     $pdo->exec('ALTER TABLE aircraft ADD COLUMN is_emergency INTEGER NOT NULL DEFAULT 0;');
 }
 $pdo->exec('CREATE INDEX IF NOT EXISTS idx_aircraft_emerg ON aircraft (timestamp) WHERE is_emergency = 1;');
+
+$stationCols = array_column($pdo->query('PRAGMA table_info(stations)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+if (!in_array('heard_24h', $stationCols, true)) {
+    $pdo->exec('ALTER TABLE stations ADD COLUMN heard_24h INTEGER NOT NULL DEFAULT 0;');
+}
 
 function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
     $dLat = deg2rad($lat2 - $lat1);
@@ -298,6 +304,23 @@ function register_station_alias(array &$stationAliases, string $a, string $b): v
     $stationAliases[$kb][$ka] = true;
 }
 
+function count_station_heard_24h(PDO $pdo, array $stationAliases, string $key, int $cutoff24h): int {
+    $keys = expand_station_keys($stationAliases, $key);
+    if (!$keys) return 0;
+    $placeholders = implode(',', array_fill(0, count($keys), '?'));
+    $sql = "SELECT COUNT(DISTINCT aircraft_id) FROM station_heard WHERE last_ts >= ? AND station_id IN ($placeholders)";
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute(array_merge([$cutoff24h], $keys));
+    return (int)$stmt->fetchColumn();
+}
+
+function refresh_station_heard_count(PDO $pdo, array &$stationState, array $stationAliases, array &$stationStatsDirty, string $key, int $cutoff24h): void {
+    $k = strtolower(trim($key));
+    if ($k === '' || !isset($stationState[$k])) return;
+    $stationState[$k]['heard_24h'] = count_station_heard_24h($pdo, $stationAliases, $k, $cutoff24h);
+    $stationStatsDirty[$k] = true;
+}
+
 function expand_station_keys(array $stationAliases, string $key): array {
     $root = strtolower(trim($key));
     if ($root === '') return [];
@@ -317,20 +340,28 @@ function expand_station_keys(array $stationAliases, string $key): array {
 
 $stationState = [];
 $stationAliases = [];
+$stationStatsDirty = [];
 $cutoff24h = time() - EXPIRE_SECONDS;
-foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts FROM stations') as $row) {
+foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts, heard_24h FROM stations') as $row) {
     $validRecord = ((int)$row['farthest_ts'] >= $cutoff24h);
-    $stationState[$row['id']] = [
+    $sid = (string)$row['id'];
+    $stationState[$sid] = [
         'lat'         => (float)$row['lat'],
         'lon'         => (float)$row['lon'],
         'max_km'      => $validRecord ? (float)$row['max_km'] : 0.0,
         'farthest_id' => $validRecord ? (string)$row['farthest_id'] : '',
         'farthest_ts' => $validRecord ? (int)$row['farthest_ts'] : 0,
+        'heard_24h'   => max(0, (int)($row['heard_24h'] ?? 0)),
     ];
 }
 
 foreach ($pdo->query('SELECT s.id, n.name FROM stations s INNER JOIN names n ON s.id = n.id WHERE n.name != ""') as $nrow) {
     register_station_alias($stationAliases, (string)$nrow['id'], (string)$nrow['name']);
+}
+
+// Precompute heard_24h for existing stations so proxy can avoid heavy aggregation.
+foreach (array_keys($stationState) as $sid) {
+    refresh_station_heard_count($pdo, $stationState, $stationAliases, $stationStatsDirty, $sid, $cutoff24h);
 }
 
 try {
@@ -471,8 +502,8 @@ $stmtUpsertName = $pdo->prepare('
     ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated = excluded.updated
 ');
 $stmtUpsertStation = $pdo->prepare('
-    INSERT INTO stations (id, lat, lon, max_km, farthest_id, farthest_ts, updated)
-    VALUES (:id, :lat, :lon, :max_km, :fid, :fts, :ts)
+    INSERT INTO stations (id, lat, lon, max_km, farthest_id, farthest_ts, heard_24h, updated)
+    VALUES (:id, :lat, :lon, :max_km, :fid, :fts, :heard_24h, :ts)
     ON CONFLICT(id) DO UPDATE SET
         lat = excluded.lat,
         lon = excluded.lon,
@@ -488,6 +519,7 @@ $stmtUpsertStation = $pdo->prepare('
             WHEN stations.farthest_ts < :cutoff OR excluded.max_km > stations.max_km THEN excluded.farthest_ts
             ELSE stations.farthest_ts
         END,
+        heard_24h = excluded.heard_24h,
         updated = excluded.updated
 ');
 $stmtMeta = $pdo->prepare('
@@ -536,10 +568,15 @@ function flush_batch(
     array &$touchBatch,
     array &$nameBatch,
     array &$stationBatch,
+    array &$stationState,
+    array $stationAliases,
+    array &$stationStatsDirty,
     bool $prune = false
-): void {
+): array {
     $now = time();
     $cutoff = $now - EXPIRE_SECONDS;
+    $heardByStation = [];
+    $pruneStats = ['deleted_rows' => 0];
     $pdo->beginTransaction();
     try {
         foreach ($posBatch as $id => $p) {
@@ -586,6 +623,8 @@ function flush_batch(
                 ':aid' => $h['aid'],
                 ':ts'  => $h['ts'],
             ]);
+            $sidH = strtolower((string)$h['sid']);
+            if ($sidH !== '') $heardByStation[$sidH] = true;
         }
         foreach ($trackBatch as $t) {
             $stmtInsertTrack->execute([
@@ -604,33 +643,64 @@ function flush_batch(
         foreach ($nameBatch as $id => $name) {
             $stmtUpsertName->execute([':id' => $id, ':name' => $name, ':ts' => $now]);
         }
-        foreach ($stationBatch as $sid => $s) {
+        if ($prune) {
+            $pruneSql = [
+                'DELETE FROM aircraft WHERE timestamp < ' . $cutoff,
+                'DELETE FROM alerts WHERE last_ts < ' . $cutoff,
+                'DELETE FROM telemetry WHERE timestamp < ' . $cutoff,
+                'DELETE FROM station_weather WHERE updated < ' . $cutoff,
+                'DELETE FROM station_heard WHERE last_ts < ' . $cutoff,
+                'DELETE FROM tracks WHERE ts < ' . ($now - TRACK_EXPIRE_SECONDS),
+                'UPDATE stations SET max_km = 0, farthest_id = "", farthest_ts = 0 WHERE farthest_ts > 0 AND farthest_ts < ' . $cutoff,
+                'DELETE FROM stations WHERE updated < ' . $cutoff,
+            ];
+            foreach ($pruneSql as $sql) {
+                $stmtPr = $pdo->prepare($sql);
+                $stmtPr->execute();
+                $pruneStats['deleted_rows'] += (int)$stmtPr->rowCount();
+            }
+        }
+
+        // Precompute 24h station heard counts so live proxy avoids expensive aggregation.
+        if (!empty($heardByStation) || $prune) {
+            $recomputeKeys = [];
+            if ($prune) {
+                foreach (array_keys($stationState) as $sidAll) $recomputeKeys[$sidAll] = true;
+            } else {
+                foreach (array_keys($heardByStation) as $sidTouched) {
+                    foreach (expand_station_keys($stationAliases, $sidTouched) as $aliasKey) {
+                        if (isset($stationState[$aliasKey])) $recomputeKeys[$aliasKey] = true;
+                    }
+                }
+            }
+            foreach (array_keys($recomputeKeys) as $sidRecompute) {
+                refresh_station_heard_count($pdo, $stationState, $stationAliases, $stationStatsDirty, $sidRecompute, $cutoff);
+            }
+        }
+
+        foreach ($stationStatsDirty as $sidDirty => $_) {
+            if (!isset($stationState[$sidDirty])) continue;
+            $s = $stationState[$sidDirty];
             $stmtUpsertStation->execute([
-                ':id'     => $sid,
-                ':lat'    => $s['lat'],
-                ':lon'    => $s['lon'],
-                ':max_km' => $s['max_km'],
-                ':fid'    => $s['farthest_id'],
-                ':fts'    => $s['farthest_ts'],
-                ':ts'     => $now,
-                ':cutoff' => $cutoff,
+                ':id'       => $sidDirty,
+                ':lat'      => $s['lat'],
+                ':lon'      => $s['lon'],
+                ':max_km'   => $s['max_km'],
+                ':fid'      => $s['farthest_id'],
+                ':fts'      => $s['farthest_ts'],
+                ':heard_24h' => max(0, (int)($s['heard_24h'] ?? 0)),
+                ':ts'       => $now,
+                ':cutoff'   => $cutoff,
             ]);
         }
-        if ($prune) {
-            $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . $cutoff);
-            $pdo->exec('DELETE FROM alerts WHERE last_ts < ' . $cutoff);
-            $pdo->exec('DELETE FROM telemetry WHERE timestamp < ' . $cutoff);
-            $pdo->exec('DELETE FROM station_weather WHERE updated < ' . $cutoff);
-            $pdo->exec('DELETE FROM station_heard WHERE last_ts < ' . $cutoff);
-            $pdo->exec('DELETE FROM tracks WHERE ts < ' . ($now - TRACK_EXPIRE_SECONDS));
-            $pdo->exec('UPDATE stations SET max_km = 0, farthest_id = "", farthest_ts = 0 WHERE farthest_ts > 0 AND farthest_ts < ' . $cutoff);
-            $pdo->exec('DELETE FROM stations WHERE updated < ' . $cutoff);
-        }
+
         $stmtMeta->execute([':ts' => (string)$now]);
         $pdo->commit();
+        $stationStatsDirty = [];
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
     }
+
     $posBatch       = [];
     $alertBatch     = [];
     $telemetryBatch = [];
@@ -640,6 +710,8 @@ function flush_batch(
     $touchBatch     = [];
     $nameBatch      = [];
     $stationBatch   = [];
+
+    return $pruneStats;
 }
 
 $errno = 0;
@@ -668,6 +740,8 @@ $nameBatch      = [];
 $stationBatch   = [];
 $lastTrackPoint = [];
 $lastKnownPos   = [];
+$lastPruneTs    = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_prune_ts"')->fetchColumn();
+$lastVacuumTs   = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_vacuum_ts"')->fetchColumn();
 
 while (microtime(true) < $deadline && !feof($socket)) {
     $line = fgets($socket, 1024);
@@ -884,18 +958,46 @@ while (microtime(true) < $deadline && !feof($socket)) {
     }
 
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
-        flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, false);
+        $nowTs = time();
+        $doPrune = ($nowTs - $lastPruneTs) >= 3600;
+        $flushStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doPrune);
+        if ($doPrune) {
+            $lastPruneTs = $nowTs;
+            $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+            $stmtMetaKey->execute([':k' => 'last_prune_ts', ':v' => (string)$nowTs]);
+            $deletedRows = (int)($flushStats['deleted_rows'] ?? 0);
+            if ($deletedRows > 0 && ($nowTs - $lastVacuumTs) >= 21600) {
+                try {
+                    $pdo->exec('PRAGMA incremental_vacuum(500);');
+                    $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE);');
+                    $lastVacuumTs = $nowTs;
+                    $stmtMetaKey->execute([':k' => 'last_vacuum_ts', ':v' => (string)$nowTs]);
+                } catch (Throwable $e) {
+                }
+            }
+        }
         $lastFlush = microtime(true);
     }
 }
 
 fclose($socket);
-flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, true);
-
-try {
-    $pdo->exec('PRAGMA incremental_vacuum(500);');
-    $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE);');
-} catch (Throwable $e) {
+$nowTs = time();
+$doFinalPrune = ($nowTs - $lastPruneTs) >= 3600;
+$finalStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doFinalPrune);
+if ($doFinalPrune) {
+    $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+    $stmtMetaKey->execute([':k' => 'last_prune_ts', ':v' => (string)$nowTs]);
+    $lastPruneTs = $nowTs;
+    $deletedRows = (int)($finalStats['deleted_rows'] ?? 0);
+    if ($deletedRows > 0 && ($nowTs - $lastVacuumTs) >= 21600) {
+        try {
+            $pdo->exec('PRAGMA incremental_vacuum(500);');
+            $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE);');
+            $stmtMetaKey->execute([':k' => 'last_vacuum_ts', ':v' => (string)$nowTs]);
+            $lastVacuumTs = $nowTs;
+        } catch (Throwable $e) {
+        }
+    }
 }
 
 flock($lockFp, LOCK_UN);
