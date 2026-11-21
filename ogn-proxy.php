@@ -285,13 +285,16 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
         }
 
         $stmt = $pdo->prepare("
-            SELECT id, lat, lon, alt, ts
-            FROM tracks
-            WHERE ts >= :cutoff
-              AND alt IS NOT NULL
-              AND lat BETWEEN :south AND :north
+            SELECT t.id, t.lat, t.lon, t.alt, t.ts
+            FROM tracks t
+            INNER JOIN aircraft a ON t.id = a.id
+            LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+            WHERE t.ts >= :cutoff
+              AND t.alt IS NOT NULL
+              AND t.lat BETWEEN :south AND :north
               AND {$lonClause}
-            ORDER BY id ASC, ts ASC
+              AND CAST(COALESCE(NULLIF(d.aircraft_type, ''), '0') AS INTEGER) IN (1, 6, 7)
+            ORDER BY t.id ASC, t.ts ASC
             LIMIT 40000
         ");
         $stmt->execute($params);

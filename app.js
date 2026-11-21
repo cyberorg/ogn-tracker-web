@@ -24,6 +24,10 @@ let savedTypes = ['all'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
 let collectorPaused = false;
+let lastFetchOkAtMs = 0;
+let lastFetchAttemptAtMs = 0;
+let lastStatusKind = 'connecting';
+let lastStatusText = 'Connecting…';
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -45,14 +49,24 @@ function getCurrentTypesArray() {
   return chosen.length > 0 ? chosen : ['all'];
 }
 
-function updateFilterBadge() {
+function isDefaultFilterState() {
   const activeTypes = getCurrentTypesArray();
-  const isDefaultState =
-    activeTypes.includes('all') &&
+  const searchQ = $('search') ? $('search').value.trim() : '';
+  return activeTypes.includes('all') &&
+    !searchQ &&
     $('markerWindow').value === '900' &&
     $('trackWindow').value === '900' &&
     isMetricPreset();
-  $('mapFilterToggle').classList.toggle('has-badge', !isDefaultState);
+}
+
+function updateFilterBadge() {
+  $('mapFilterToggle').classList.toggle('has-badge', !isDefaultFilterState());
+}
+
+function updateSearchUi() {
+  const has = $('search').value.trim().length > 0;
+  $('btnClearSearch').hidden = !has;
+  updateFilterBadge();
 }
 
 function saveMenuPrefs() {
@@ -90,7 +104,40 @@ function applySavedMenuPrefs() {
 
   $('btnNotify').classList.toggle('active', alertsEnabled);
   $('btnNotify').textContent = alertsEnabled ? '🔔 ON' : '🔔 OFF';
+  $('btnNotify').setAttribute('aria-pressed', String(alertsEnabled));
+  updateSearchUi();
   updateFilterBadge();
+}
+
+function resetFilters() {
+  $('search').value = '';
+  savedTypes = ['all'];
+  savedMarkerWindow = '900';
+  savedTrackWindow = '900';
+  altUnit = 'm'; speedUnit = 'kmh'; tempUnit = 'c'; climbUnit = 'mps';
+  applySavedMenuPrefs();
+  saveMenuPrefs();
+  syncUnitButtons();
+  $('listHint').textContent = '';
+  needMeta = true;
+  render();
+  fetchLive(true);
+  showToast('Filters reset');
+}
+
+function fitToResults() {
+  const visible = filtered();
+  const pts = visible.filter(a => Number.isFinite(a.lat) && Number.isFinite(a.lon)).map(a => [a.lat, a.lon]);
+  if (!pts.length) {
+    showToast('No visible results to fit');
+    return;
+  }
+  if (pts.length === 1) {
+    map.setView(pts[0], Math.max(map.getZoom(), 12));
+  } else {
+    const bounds = L.latLngBounds(pts);
+    map.fitBounds(bounds.pad(0.15), { maxZoom: 13 });
+  }
 }
 
 function isMetricPreset() {
@@ -336,6 +383,7 @@ function togglePin(address) {
   else pinnedAircraft.add(address);
   savePinnedAircraft();
   render();
+  requestAnimationFrame(() => focusListRow(address));
 }
 
 const selectedTracks = new Map();
@@ -361,9 +409,39 @@ function fmtAge(sec) {
   return remM > 0 ? `${h}h ${remM}m ago` : `${h}h ago`;
 }
 
+function updateStatusUpdated() {
+  const el = $('statusUpdated');
+  if (!el) return;
+  if (!lastFetchOkAtMs) {
+    el.textContent = '';
+    return;
+  }
+  const sec = Math.max(0, Math.floor((Date.now() - lastFetchOkAtMs) / 1000));
+  el.textContent = `· updated ${sec < 60 ? `${sec}s` : fmtAge(sec).replace(' ago', '')} ago`;
+}
+
 function setStatus(kind, text) {
+  lastStatusKind = kind;
+  lastStatusText = text;
   $('statusDot').className = 'dot ' + kind;
   $('statusText').textContent = text;
+  updateStatusUpdated();
+}
+
+function showToast(msg) {
+  let t = document.getElementById('appToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'appToast';
+    t.className = 'app-toast';
+    t.setAttribute('role', 'status');
+    t.setAttribute('aria-live', 'polite');
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(showToast._timer);
+  showToast._timer = setTimeout(() => t.classList.remove('show'), 1800);
 }
 
 function updateUrlHash() {
@@ -371,6 +449,30 @@ function updateUrlHash() {
   const sel = activeBaroAddress ? `,${encodeURIComponent(activeBaroAddress)}` : '';
   const hash = `#${c.lat.toFixed(4)},${c.lng.toFixed(4)},${map.getZoom()}${sel}`;
   if (location.hash !== hash) history.replaceState(null, '', hash);
+}
+
+function getShareUrl() {
+  updateUrlHash();
+  return location.href;
+}
+
+async function copyTextToClipboard(text, okMsg = 'Copied') {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(okMsg);
+    return true;
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+      showToast(okMsg);
+      return true;
+    } catch (_) {
+      showToast('Copy failed');
+      return false;
+    }
+  }
 }
 
 function pickTrackColor() {
@@ -453,7 +555,10 @@ function renderBarogram(address, scrubIdx = null) {
     scrubSuffix = ` · ${fmtAlt(sp[2])} @ ${timeStr}`;
   }
 
-  $('baroTitle').textContent = `${a ? displayName(a) : address.toUpperCase()} · Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
+  const title = `${a ? displayName(a) : address.toUpperCase()} · Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
+  $('baroTitle').textContent = title;
+  $('baroSvg').setAttribute('aria-label', `Altitude profile for ${title}`);
+  $('trackModeHint').textContent = varioTrackMode ? 'Vario-colored' : 'Flat';
   $('baroSvg').innerHTML = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
     ${scrubSvg}
@@ -462,6 +567,7 @@ function renderBarogram(address, scrubIdx = null) {
   `;
   $('barogram').classList.add('show');
   syncBottomBarOffset();
+  updateListHint();
   updateUrlHash();
 }
 
@@ -503,7 +609,10 @@ function removeTrack(address) {
       $('barogram').classList.remove('show');
       syncBottomBarOffset();
     }
+    updateListHint();
     updateUrlHash();
+  } else {
+    updateListHint();
   }
 }
 
@@ -515,6 +624,7 @@ function clearAllTracks() {
   activeBaroAddress = null;
   $('barogram').classList.remove('show');
   syncBottomBarOffset();
+  updateListHint();
   updateUrlHash();
 }
 
@@ -620,6 +730,12 @@ function jumpToAlertAddress(address) {
   }
 }
 
+function focusListRow(address) {
+  if (!address) return;
+  const row = $(`aircraftList`)?.querySelector(`.aircraft[data-key="${CSS.escape(address)}"]`);
+  if (row) row.focus({ preventScroll: true });
+}
+
 function toggleSelection(address, openOnMap = false) {
   if (selectedTracks.has(address)) {
     removeTrack(address);
@@ -640,7 +756,9 @@ function toggleSelection(address, openOnMap = false) {
       }
     }
   }
+  updateListHint();
   render();
+  requestAnimationFrame(() => focusListRow(address));
 }
 
 map.on('click', () => {
@@ -915,7 +1033,7 @@ function describeAlertOutcome(item, nowMs) {
   if (item.normalAfter) return 'Update: Seems back to normal';
   const latestAgeSec = Math.max(0, Math.floor((nowMs - (item.latestTsMs || item.tsMs)) / 1000));
   if (item.alertStillOn) {
-    return latestAgeSec < OFFLINE_THRESHOLD_SEC ? 'still live · alert on' : 'offline · alert still on';
+    return latestAgeSec < OFFLINE_THRESHOLD_SEC ? 'still live · alert on' : 'Went offline with alert still on';
   }
   return latestAgeSec >= OFFLINE_THRESHOLD_SEC ? 'offline' : '';
 }
@@ -956,58 +1074,60 @@ function record24hAlerts(list, nowMs) {
   if (changed) save24hAlerts(nowMs);
 }
 
-function renderAlertRowsHtml(items, nowMs) {
-  return items.slice(0, 6).map(it => {
-    const ageSec = Math.max(0, Math.floor((nowMs - it.tsMs) / 1000));
-    const outcome = describeAlertOutcome(it, nowMs);
-    const outcomePart = outcome ? ` · ${outcome}` : '';
-    return `<button type="button" class="alerts-24h-item" data-alert-addr="${esc(it.address)}" title="${esc(`${it.name} — ${it.status}${outcomePart}`)}">
-      <span class="alerts-24h-main">
-        <span class="alerts-24h-title"><b>${esc(it.name)}</b></span>
-        <span class="alerts-24h-detail">${esc(it.status)}${outcomePart ? ` · <span style="color:var(--yellow)">${esc(outcome)}</span>` : ''}</span>
-      </span>
-      <span class="alerts-24h-age">${esc(fmtAge(ageSec))}</span>
-    </button>`;
-  }).join('');
+function buildAlertRowHtml(it, nowMs) {
+  const ageSec = Math.max(0, Math.floor((nowMs - (it.latestTsMs || it.tsMs)) / 1000));
+  const outcome = describeAlertOutcome(it, nowMs);
+  const statusText = it.status || 'Emergency alert';
+  const lastStatus = it.lastStatus || statusText;
+  const outcomeHtml = outcome ? `<br><span style="color:var(--yellow);font-weight:600">${esc(outcome)}</span>` : '';
+  const lastStatusHtml = (lastStatus && lastStatus !== statusText) ? `<br><span style="color:var(--muted)">Last: ${esc(lastStatus)}</span>` : '';
+  const exactTime = new Date(it.latestTsMs || it.tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const label = `${it.name} - ${statusText}`;
+  return `<div class="aircraft emergency" data-alert-addr="${esc(it.address)}" data-key="${esc(it.address)}" tabindex="0" role="option" aria-selected="false" aria-label="${esc(label)}">
+    <div class="stripe" style="background:var(--red)"></div>
+    <div>
+      <div class="callsign">${esc(it.name)}</div>
+      <div class="meta"><span style="color:var(--red);font-weight:600">${esc(statusText)}</span>${lastStatusHtml}${outcomeHtml}</div>
+    </div>
+    <div class="alt station-alt">${esc(exactTime)}<div class="age-row"><span class="age" data-ts="${it.latestTsMs || it.tsMs}">${fmtAge(ageSec)}</span></div></div>
+  </div>`;
 }
+
+let alertsCollapsed = true;
+try {
+  const savedAlertsCollapsed = localStorage.getItem('ogn_alerts_collapsed');
+  if (savedAlertsCollapsed === '0') alertsCollapsed = false;
+  else if (savedAlertsCollapsed === '1') alertsCollapsed = true;
+} catch (e) {}
 
 function render24hAlertsSummary(nowMs) {
   const box = $('alerts24hSummary');
+  const head = $('alertsSectionHead');
+  const toggle = $('alertsToggle');
+  const countEl = $('alertsCount');
   for (const [key, item] of alerts24hHistory.entries()) {
     if ((nowMs - item.tsMs) > ALERT_24H_TTL_MS || /^need a ride/i.test(String(item.status))) {
       alerts24hHistory.delete(key);
     }
   }
-  const allItems = [...alerts24hHistory.values()].sort((a, b) => b.tsMs - a.tsMs);
-  const inView = allItems.filter(it => isInCurrentViewport(it.lat, it.lon));
-  const outOfView = allItems.filter(it => !isInCurrentViewport(it.lat, it.lon));
+  const allItems = [...alerts24hHistory.values()].sort((a, b) => (b.latestTsMs || b.tsMs) - (a.latestTsMs || a.tsMs));
 
-  if (!inView.length && !outOfView.length) {
+  if (!allItems.length) {
     box.hidden = true;
     box.innerHTML = '';
+    if (head) head.hidden = true;
+    if (countEl) countEl.textContent = '0';
     return;
   }
 
-  const sections = [];
-  if (inView.length) {
-    sections.push(`
-      <div class="alerts-24h-sub">
-        <div class="alerts-24h-head"><span>🚨 In Viewport (24h)</span><span class="alerts-24h-count">${inView.length}</span></div>
-        <div class="alerts-24h-list">${renderAlertRowsHtml(inView, nowMs)}</div>
-      </div>
-    `);
+  if (head) {
+    head.hidden = false;
+    head.classList.toggle('collapsed', alertsCollapsed);
   }
-  if (outOfView.length) {
-    sections.push(`
-      <div class="alerts-24h-sub">
-        <div class="alerts-24h-head"><span>🌐 Global (24h)</span><span class="alerts-24h-count">${outOfView.length}</span></div>
-        <div class="alerts-24h-list">${renderAlertRowsHtml(outOfView, nowMs)}</div>
-      </div>
-    `);
-  }
-
-  box.hidden = false;
-  box.innerHTML = sections.join('');
+  if (toggle) toggle.setAttribute('aria-expanded', String(!alertsCollapsed));
+  if (countEl) countEl.textContent = String(allItems.length);
+  box.hidden = alertsCollapsed;
+  box.innerHTML = `<div class="aircraft-list alerts-list" role="listbox" aria-label="Emergency alerts">${allItems.map(it => buildAlertRowHtml(it, nowMs)).join('')}</div>`;
 }
 
 function formatWeatherHtml(wx, compact = false) {
@@ -1289,47 +1409,62 @@ function popup(a) {
   const weatherRow = wxText
     ? `<div class="popup-value" style="grid-column:1/-1"><span>Weather</span><br><b>${wxText}</b></div>`
     : '';
+  const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
+  const lastSeenText = a.aprsReceivedAt ? `${a.aprsReceivedAt} (${fmtAge(ageSec)})` : fmtAge(ageSec);
 
-  const liveFields = [
+  const primaryFields = [
+    ['Last seen', lastSeenText],
     ['Track (°)', a.course],
     ['Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null],
     ['Climb', a.climb != null ? fmtClimb(a.climb) : null],
-    ['Receiver', a.receiver]
+    ['Receiver', a.receiver],
   ];
+  const secondaryFields = [];
 
   if (getResolvedType(a) === 15) {
     const rxStats = getStationReceptionStats(a);
     if (rxStats) {
-      liveFields.push(['Aircraft heard', String(rxStats.count)]);
+      primaryFields.push(['Aircraft heard', String(rxStats.count)]);
       if (rxStats.best24h) {
         const ageSec = Math.max(0, Math.floor((serverNow() / 1000) - rxStats.best24h.ts));
-        liveFields.push(['Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(ageSec)})`]);
+        secondaryFields.push(['Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(ageSec)})`]);
       }
     }
   }
 
   const isFol = followedAddress === a.address;
+  const isTracked = selectedTracks.has(a.address);
+  const detailRows = [
+    popupRow('Over-the-air Name', displayStreamName(a)),
+    popupRow('Callsign / CN', a.callsign),
+    popupRow('Registration', displayRegistration(a)),
+    popupRow('Aircraft model', displayModel(a)),
+    secondaryFields.map(([l, v]) => popupRow(l, v)).join('')
+  ].join('');
   const rawSection = a.aprsPacket
     ? `<div class="popup-section">Raw Packet</div><div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}` : '';
+  const detailsBlock = (detailRows.replace(/\s+/g, '') || rawSection)
+    ? `<details class="popup-details" data-popup-details="1"><summary>Details & raw packet</summary><div class="popup-grid" style="margin-top:6px">${detailRows}</div>${rawSection}</details>`
+    : '';
 
   return `<div class="popup-title">${esc(displayName(a))}</div>
-    <div class="popup-section">Identification and Status</div>
-    <div class="popup-grid">
-      ${popupRow('Over-the-air Name', displayStreamName(a))}
-      ${popupRow('Callsign / CN', a.callsign)}
-      ${popupRow('Registration', displayRegistration(a))}
-      ${popupRow('Aircraft type', typeName(a))}
-      ${popupRow('Aircraft model', displayModel(a))}
-      ${popupRowHtml('Status / Alert', statusHtml)}
-    </div>
-    <div class="popup-section">Live APRS Data</div>
-    <div class="popup-grid">${locationRow}${weatherRow}${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}${liveFields.map(([l,v]) => popupRow(l,v)).join('')}</div>
     <div class="popup-actions">
+      <button type="button" data-act="track" data-addr="${esc(a.address)}">${isTracked ? 'Hide track' : 'Show track'}</button>
       <button type="button" data-act="follow" data-addr="${esc(a.address)}">${isFol ? 'Unfollow' : '◎ Follow'}</button>
       <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 Copy SAR</button>
+      <button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Copy link</button>
+
       <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>
     </div>
-    ${rawSection}`;
+    <div class="popup-section">Identification and Status</div>
+    <div class="popup-grid">
+      ${popupRow('Aircraft type', typeName(a))}
+      ${popupRowHtml('Status / Alert', statusHtml)}
+      ${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}
+    </div>
+    <div class="popup-section">Live APRS Data</div>
+    <div class="popup-grid">${locationRow}${weatherRow}${primaryFields.map(([l,v]) => popupRow(l,v)).join('')}</div>
+    ${detailsBlock}`;
 }
 
 function updateCoverageLayer() {
@@ -1416,11 +1551,47 @@ function buildRowHtml(a, now) {
     rightColHtml = `${esc(`24h · ${heardCount}`)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div>`;
   }
 
-  return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
-    <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'}">📌</button></div>
+  const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
+  return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0" role="option" aria-selected="${trackEntry ? 'true' : 'false'}" aria-label="${esc(label)}">
+    <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'} ${esc(displayName(a))}" aria-pressed="${isPinned ? 'true' : 'false'}">📌</button></div>
     <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
     <div class="${altClass}">${rightColHtml}</div>
   </div>`;
+}
+
+let renderScheduled = false;
+function scheduleRender() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    render();
+  });
+}
+
+function isUserInteractingWithList() {
+  const ae = document.activeElement;
+  return !!(ae && $('aircraftList').contains(ae));
+}
+
+function updateListHint() {
+  const hint = $('listHint');
+  const q = $('search').value.trim();
+  const visibleKeys = new Set(filtered().map(a => a.address));
+  const hiddenTracks = [...selectedTracks.keys()].filter(k => !visibleKeys.has(k));
+  const parts = [];
+  if (q) parts.push(`Filtering by "${q}".`);
+  if (hiddenTracks.length) {
+    const names = hiddenTracks.slice(0, 3).map(addr => {
+      const a = aircraft.find(x => x.address === addr);
+      return a ? displayName(a) : addr.toUpperCase();
+    });
+    parts.push(`${hiddenTracks.length} selected track${hiddenTracks.length > 1 ? 's' : ''} hidden by filter/search: ${names.join(', ')}${hiddenTracks.length > 3 ? '…' : ''}.`);
+  }
+  if (followedAddress && !visibleKeys.has(followedAddress)) {
+    parts.push('Followed aircraft is currently outside current filter/view.');
+  }
+  hint.textContent = parts.join(' ');
 }
 
 function render() {
@@ -1430,11 +1601,13 @@ function render() {
   const now = serverNow();
 
   render24hAlertsSummary(now);
+  updateListHint();
 
   const emergencies = visible.filter(isEmergency);
   if (emergencies.length > 0) {
     const first = emergencies[0];
-    $('emergencyBannerText').textContent = `🚨 ${emergencies.length} Emergency: ${displayName(first)} (${getDisplayStatus(first)})`;
+    const msg = `🚨 ${emergencies.length} Emergency: ${displayName(first)} (${getDisplayStatus(first)})`;
+    if ($('emergencyBannerText').textContent !== msg) $('emergencyBannerText').textContent = msg;
     $('emergencyJump').dataset.addr = first.address;
     $('emergencyBanner').classList.add('show');
   } else {
@@ -1462,7 +1635,15 @@ function render() {
       m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0 });
       m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a;
       m.on('click', () => toggleSelection(key, false));
-      m.on('popupopen', () => m.setPopupContent(popup(m._data)));
+      m._detailsOpen = false;
+      m.on('popupopen', () => {
+        m.setPopupContent(popup(m._data));
+        const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+        if (d) {
+          d.open = !!m._detailsOpen;
+          d.addEventListener('toggle', () => { m._detailsOpen = d.open; });
+        }
+      });
       m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: true, keepInView: true });
       markers.set(key, m);
       if (emerg) emergencyGroup.addLayer(m);
@@ -1492,7 +1673,17 @@ function render() {
       if ((!isSpiderfied || m._isEmergency) && m._iconSig !== iconSig) {
         m.setIcon(markerIcon(a)); m.setZIndexOffset(emerg ? 1000 : 0); m._iconSig = iconSig;
       }
-      if (m.isPopupOpen()) m.setPopupContent(popup(a));
+      if (m.isPopupOpen()) {
+        const popupEl = m.getPopup()?.getElement();
+        const detailsEl = popupEl?.querySelector('[data-popup-details]');
+        if (detailsEl) m._detailsOpen = detailsEl.open;
+        m.setPopupContent(popup(a));
+        const newDetails = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+        if (newDetails) {
+          newDetails.open = !!m._detailsOpen;
+          newDetails.addEventListener('toggle', () => { m._detailsOpen = newDetails.open; });
+        }
+      }
     }
 
     if (followedAddress === key) map.panTo([a.lat, a.lon], { animate: true });
@@ -1510,27 +1701,71 @@ function render() {
   });
 
   const listEl = $('aircraftList');
+  const prevScroll = listEl.scrollTop;
+  const activeKey = (document.activeElement && listEl.contains(document.activeElement))
+    ? (document.activeElement.closest('.aircraft')?.dataset.key || null)
+    : null;
+
   if (!sorted.length) {
-    const emptyMsg = collectorPaused
-      ? 'Collector paused (>2m old). No fresh positions available.'
-      : 'No aircraft or stations in current map view / filter.';
-    listEl.innerHTML = `<div class="empty">${esc(emptyMsg)}</div>`;
+    const q = $('search').value.trim();
+    const selectedTypes = getSelectedTypes();
+    let title = 'No aircraft or stations in current map view.';
+    let detail = 'Try panning/zooming, increasing the Active window, or changing filters.';
+    let actions = `<button type="button" data-empty-act="reset">Reset filters</button>`;
+    if (collectorPaused) {
+      title = 'Collector paused (>2m old).';
+      detail = 'No fresh positions are available. Check collector cron/process and data freshness.';
+      actions = `<button type="button" data-empty-act="refresh">Refresh now</button>`;
+    } else if (q || selectedTypes) {
+      title = 'No matches for current filters/search.';
+      detail = 'Clear search or reset filters to see aircraft in the current map view.';
+      actions = `<button type="button" data-empty-act="clear-search">Clear search</button><button type="button" data-empty-act="reset">Reset filters</button>`;
+    } else if (aircraft.length === 0) {
+      title = lastFetchOkAtMs ? 'No live traffic in this area right now.' : 'Waiting for live data…';
+      detail = lastFetchOkAtMs ? 'Data source is connected, but nothing is in the current view/window.' : 'Connecting to the live feed. This may take a few seconds.';
+      actions = `<button type="button" data-empty-act="refresh">Refresh now</button><button type="button" data-empty-act="reset">Reset filters</button>`;
+    }
+    listEl.innerHTML = `<div class="empty"><b>${esc(title)}</b><div>${esc(detail)}</div><div class="empty-actions">${actions}</div></div>`;
   } else {
     const existingRows = [...listEl.querySelectorAll('.aircraft[data-key]')];
-    const orderMatches = existingRows.length === sorted.length &&
-      existingRows.every((el, idx) => el.dataset.key === sorted[idx].address);
+    const existingMap = new Map(existingRows.map(r => [r.dataset.key, r]));
+    const frag = document.createDocumentFragment();
+    let changedStructure = existingRows.length !== sorted.length;
 
-    if (orderMatches) {
-      sorted.forEach((a, idx) => {
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = buildRowHtml(a, now);
-        const freshRow = tempDiv.firstElementChild;
-        if (freshRow && existingRows[idx].outerHTML !== freshRow.outerHTML) {
-          existingRows[idx].replaceWith(freshRow);
+    sorted.forEach(a => {
+      const key = a.address;
+      const html = buildRowHtml(a, now);
+      let row = existingMap.get(key);
+      if (row) {
+        if (row.outerHTML !== html) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = html;
+          const fresh = tmp.firstElementChild;
+          row.replaceWith(fresh);
+          row = fresh;
         }
-      });
+        existingMap.delete(key);
+      } else {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = html;
+        row = tmp.firstElementChild;
+        changedStructure = true;
+      }
+      frag.appendChild(row);
+    });
+
+    if (existingMap.size > 0) changedStructure = true;
+    if (changedStructure || listEl.children.length !== sorted.length) {
+      listEl.replaceChildren(frag);
     } else {
-      listEl.innerHTML = sorted.map(a => buildRowHtml(a, now)).join('');
+      // Order same and no structural change; rows were updated in place above.
+    }
+
+    // Restore focus/scroll to avoid disruption during periodic refresh.
+    if (Math.abs(listEl.scrollTop - prevScroll) > 2) listEl.scrollTop = prevScroll;
+    if (activeKey && !isUserInteractingWithList()) {
+      const focusRow = listEl.querySelector(`.aircraft[data-key="${CSS.escape(activeKey)}"]`);
+      if (focusRow && document.activeElement !== focusRow) focusRow.focus({ preventScroll: true });
     }
   }
 
@@ -1541,6 +1776,12 @@ function render() {
   }
 }
 
+$('alertsToggle').addEventListener('click', () => {
+  alertsCollapsed = !alertsCollapsed;
+  try { localStorage.setItem('ogn_alerts_collapsed', alertsCollapsed ? '1' : '0'); } catch (e) {}
+  render24hAlertsSummary(serverNow());
+});
+
 $('alerts24hSummary').addEventListener('click', e => {
   const btn = e.target.closest('[data-alert-addr]');
   if (!btn) return;
@@ -1549,6 +1790,15 @@ $('alerts24hSummary').addEventListener('click', e => {
 });
 
 $('aircraftList').addEventListener('click', e => {
+  const emptyAct = e.target.closest('[data-empty-act]');
+  if (emptyAct) {
+    const act = emptyAct.dataset.emptyAct;
+    if (act === 'reset') resetFilters();
+    else if (act === 'clear-search') { $('search').value = ''; updateSearchUi(); render(); }
+    else if (act === 'fit') fitToResults();
+    else if (act === 'refresh') fetchLive(true);
+    return;
+  }
   const pinBtn = e.target.closest('.pin-btn');
   if (pinBtn) {
     e.stopPropagation();
@@ -1559,26 +1809,72 @@ $('aircraftList').addEventListener('click', e => {
   if (row) toggleSelection(row.dataset.key, true);
 });
 
+$('aircraftList').addEventListener('keydown', e => {
+  const row = e.target.closest('.aircraft');
+  if (!row) return;
+  if (e.key === 'Enter' || e.key === ' ') {
+    const pinBtn = e.target.closest('.pin-btn');
+    if (pinBtn) {
+      e.preventDefault();
+      togglePin(pinBtn.dataset.pin);
+      return;
+    }
+    e.preventDefault();
+    toggleSelection(row.dataset.key, true);
+  } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const rows = [...$('aircraftList').querySelectorAll('.aircraft[data-key]')];
+    const idx = rows.indexOf(row);
+    if (idx === -1) return;
+    const next = rows[e.key === 'ArrowDown' ? idx + 1 : idx - 1];
+    if (next) next.focus();
+  }
+});
+
 document.addEventListener('click', e => {
   const btn = e.target.closest('.popup-actions button');
   if (!btn) return;
   const addr = btn.dataset.addr, act = btn.dataset.act;
   const a = aircraft.find(x => x.address === addr);
-  if (act === 'follow') {
+  if (act === 'track') {
+    if (!addr) return;
+    toggleSelection(addr, false);
+    const m = markers.get(addr);
+    const aa = aircraft.find(x => x.address === addr);
+    if (m && aa && m.isPopupOpen()) {
+      const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+      if (d) m._detailsOpen = d.open;
+      m.setPopupContent(popup(aa));
+      const nd = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+      if (nd) nd.open = !!m._detailsOpen;
+    }
+  } else if (act === 'follow') {
     followedAddress = (followedAddress === addr) ? null : addr;
     const m = markers.get(addr);
-    if (m && a && m.isPopupOpen()) m.setPopupContent(popup(a));
+    if (m && a && m.isPopupOpen()) {
+      const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+      if (d) m._detailsOpen = d.open;
+      m.setPopupContent(popup(a));
+      const nd = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+      if (nd) nd.open = !!m._detailsOpen;
+    }
+  } else if (act === 'share') {
+    const base = getShareUrl();
+    const url = addr ? `${base.replace(/#.*/, '')}#${map.getCenter().lat.toFixed(4)},${map.getCenter().lng.toFixed(4)},${map.getZoom()},${encodeURIComponent(addr)}` : base;
+    copyTextToClipboard(url, 'Link copied');
   } else if (act === 'sar' && a) {
     const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
+    const shareUrl = `${location.href.replace(/#.*/, '')}#${a.lat.toFixed(4)},${a.lon.toFixed(4)},${Math.max(map.getZoom(), 12)},${encodeURIComponent(a.address)}`;
     const txt = [
       `SAR Info: ${displayName(a)}`,
       `Status: ${getDisplayStatus(a) || 'Unknown'}`,
       `Coords: ${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
       `Alt: ${a.altitude != null ? fmtAlt(a.altitude) : 'N/A'}`,
       `Last heard: ${fmtAge(ageSec)}`,
-      `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`
+      `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`,
+      `Tracker: ${shareUrl}`
     ].join('\n');
-    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 Copy SAR'; }, 1500); });
+    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 Copy SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
   } else if (act === 'igc') {
     if (!selectedTracks.has(addr)) {
       selectedTracks.set(addr, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
@@ -1622,6 +1918,7 @@ function boundsMovedSignificantly(b) {
 
 async function fetchLive(force = false) {
   if (replayActive || fetching || (document.hidden && !force)) return;
+  lastFetchAttemptAtMs = Date.now();
   fetching = true;
   try {
     const b = map.getBounds();
@@ -1739,16 +2036,21 @@ async function fetchLive(force = false) {
     rebuildAircraftArray();
     render();
 
-    if (collectorPaused) setStatus('error', 'Collector paused (>2m old)');
-    else {
+    lastFetchOkAtMs = Date.now();
+    const updatedSecAgo = updatedMs ? Math.max(0, Math.floor((nowTick - updatedMs) / 1000)) : null;
+    if (collectorPaused) {
+      setStatus('error', updatedSecAgo != null ? `Collector paused (${fmtAge(updatedSecAgo).replace(' ago', '')} old)` : 'Collector paused (>2m old)');
+    } else {
       const identified = aircraft.filter(a => a.callsign || a.registration || a.streamName || !/([0-9A-F]{6})$/i.test(a.liveLabel)).length;
       setStatus('live', `${aircraft.length} tracking · ${identified} identified`);
     }
   } catch (err) {
     wasDisconnected = true;
-    setStatus('error', 'Waiting for live data…');
+    const stale = lastFetchOkAtMs ? ` · last update ${fmtAge(Math.max(0, Math.floor((Date.now() - lastFetchOkAtMs) / 1000)))}` : '';
+    setStatus('error', `Waiting for live data${stale}`);
   } finally {
     fetching = false;
+    updateStatusUpdated();
   }
 }
 
@@ -1778,6 +2080,7 @@ async function loadReplaySlice() {
 function setReplayMode(on) {
   replayActive = on;
   $('btnReplay').classList.toggle('active', on);
+  $('btnReplay').setAttribute('aria-pressed', String(on));
   $('replayBar').classList.toggle('show', on);
   syncBottomBarOffset();
   if (on) {
@@ -1786,6 +2089,7 @@ function setReplayMode(on) {
     loadReplaySlice();
   } else {
     clearInterval(replayTimer); replayTimer = null; $('replayPlay').textContent = '▶';
+    $('replayPlay').setAttribute('aria-label', 'Play replay');
     map.removeLayer(replayGroup); replayGroup.clearLayers();
     clusterGroup.addTo(map); emergencyGroup.addTo(map);
     fetchLive(true);
@@ -1844,7 +2148,27 @@ window.addEventListener('online', () => {
   fetchLive(true);
 });
 
-$('search').addEventListener('input', () => { clearAllTracks(); render(); });
+let searchTimer = null;
+$('search').addEventListener('input', () => {
+  updateSearchUi();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    render();
+    const q = $('search').value.trim();
+    if (q) {
+      $('listHint').textContent = `Filtering by "${q}". Tracks are kept; hidden tracks may not be in list.`;
+    } else if ($('listHint').textContent.startsWith('Filtering by ')) {
+      $('listHint').textContent = '';
+    }
+  }, 120);
+});
+$('btnClearSearch').addEventListener('click', () => {
+  $('search').value = '';
+  updateSearchUi();
+  $('listHint').textContent = '';
+  render();
+  $('search').focus();
+});
 
 $('type').addEventListener('change', e => {
   const cb = e.target.closest('input[type="checkbox"]');
@@ -1911,21 +2235,31 @@ $('trackWindow').addEventListener('change', () => {
 const mapFilterControl = $('mapFilterControl');
 const mapFilterToggle = $('mapFilterToggle');
 const mapFilterPanel = $('mapFilterPanel');
-mapFilterToggle.addEventListener('click', event => {
-  event.stopPropagation();
-  const isOpen = mapFilterPanel.hidden;
-  mapFilterPanel.hidden = !isOpen;
-  mapFilterToggle.setAttribute('aria-expanded', String(isOpen));
-});
-mapFilterPanel.addEventListener('click', event => event.stopPropagation());
-document.addEventListener('click', () => {
+function openFilterPanel() {
+  mapFilterPanel.hidden = false;
+  mapFilterToggle.setAttribute('aria-expanded', 'true');
+  const first = mapFilterPanel.querySelector('input,select,button');
+  if (first) first.focus();
+}
+function closeFilterPanel(restoreFocus = false) {
+  if (mapFilterPanel.hidden) return;
   mapFilterPanel.hidden = true;
   mapFilterToggle.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) mapFilterToggle.focus();
+}
+mapFilterToggle.addEventListener('click', event => {
+  event.stopPropagation();
+  if (mapFilterPanel.hidden) openFilterPanel();
+  else closeFilterPanel(true);
+});
+mapFilterPanel.addEventListener('click', event => event.stopPropagation());
+document.addEventListener('click', e => {
+  if (!mapFilterControl.contains(e.target)) closeFilterPanel(false);
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') {
-    mapFilterPanel.hidden = true;
-    mapFilterToggle.setAttribute('aria-expanded', 'false');
+  if (event.key === 'Escape' && !mapFilterPanel.hidden) {
+    event.preventDefault();
+    closeFilterPanel(true);
   }
 });
 
@@ -1938,6 +2272,8 @@ $('toggleTrackMode').addEventListener('click', () => {
   varioTrackMode = !varioTrackMode;
   $('toggleTrackMode').textContent = `Vario: ${varioTrackMode ? 'ON' : 'OFF'}`;
   $('toggleTrackMode').classList.toggle('active', varioTrackMode);
+  $('toggleTrackMode').setAttribute('aria-pressed', String(varioTrackMode));
+  $('trackModeHint').textContent = varioTrackMode ? 'Vario-colored' : 'Flat';
   redrawAllTracks();
 });
 $('btnDownloadIgc').addEventListener('click', () => { if (activeBaroAddress) downloadIgc(activeBaroAddress); });
@@ -1947,9 +2283,13 @@ $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
 $('replaySlider').addEventListener('input', loadReplaySlice);
 $('replayPlay').addEventListener('click', () => {
-  if (replayTimer) { clearInterval(replayTimer); replayTimer = null; $('replayPlay').textContent = '▶'; }
-  else {
+  if (replayTimer) {
+    clearInterval(replayTimer); replayTimer = null;
+    $('replayPlay').textContent = '▶';
+    $('replayPlay').setAttribute('aria-label', 'Play replay');
+  } else {
     $('replayPlay').textContent = '⏸';
+    $('replayPlay').setAttribute('aria-label', 'Pause replay');
     replayTimer = setInterval(() => {
       let v = Number($('replaySlider').value) + 5;
       if (v > 1440) v = 0;
@@ -1959,6 +2299,8 @@ $('replayPlay').addEventListener('click', () => {
   }
 });
 
+$('btnResetFilters').addEventListener('click', resetFilters);
+
 $('btnNotify').addEventListener('click', async () => {
   if (!alertsEnabled && 'Notification' in window && Notification.permission === 'default') {
     await Notification.requestPermission();
@@ -1967,6 +2309,7 @@ $('btnNotify').addEventListener('click', async () => {
   saveMenuPrefs();
   $('btnNotify').classList.toggle('active', alertsEnabled);
   $('btnNotify').textContent = alertsEnabled ? '🔔 ON' : '🔔 OFF';
+  $('btnNotify').setAttribute('aria-pressed', String(alertsEnabled));
 });
 
 $('btnAirspace').addEventListener('click', () => $('airspaceFile').click());
@@ -2028,6 +2371,8 @@ $('locate').addEventListener('click', () => {
 
 render24hAlertsSummary(serverNow());
 updateBottomScale();
+syncUnitButtons();
+updateSearchUi();
 fetchLive(true);
 setInterval(() => fetchLive(false), 5000);
 
@@ -2039,5 +2384,6 @@ setInterval(() => {
     if (ts) el.textContent = fmtAge(Math.max(0, Math.floor((now - ts) / 1000)));
   });
   if (!$('alerts24hSummary').hidden) render24hAlertsSummary(now);
+  updateStatusUpdated();
 }, 1000);
 })();

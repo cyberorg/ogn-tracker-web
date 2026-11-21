@@ -15,17 +15,17 @@
   <div class="brand"><div class="logo">✈</div><div><h1>OGN Glider Tracker</h1><div class="sub">Live APRS-IS feed · Open Glider Network</div></div></div>
   <div class="toolbar">
     <button id="locate" title="Locate me">◎ Locate</button>
-    <button id="btnReplay" title="24-hour time-lapse replay">▶ Replay</button>
+    <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
     <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
     <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
-  <div class="status"><i id="statusDot" class="dot"></i><span id="statusText">Connecting…</span></div>
+  <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
 </header>
 <main>
   <div class="map-wrap" id="mapWrap">
     <div class="map-filter-control" id="mapFilterControl">
       <button class="map-filter-toggle" id="mapFilterToggle" type="button" aria-label="Aircraft filters" aria-expanded="false" aria-controls="mapFilterPanel" title="Aircraft filters">☷</button>
-      <div class="map-filter-panel" id="mapFilterPanel" aria-label="Aircraft filters" hidden>
+      <div class="map-filter-panel" id="mapFilterPanel" role="dialog" aria-label="Aircraft filters" aria-modal="false" hidden>
         <div class="menu-section">
           <span class="group-label">Filter</span>
           <div class="type-checklist" id="type" role="group" aria-label="Aircraft filter">
@@ -78,7 +78,13 @@
 
         <div class="menu-inline-head">
           <span class="group-label">Pinned alerts</span>
-          <button type="button" class="menu-compact-btn" id="btnNotify" title="Toggle notifications for pinned aircraft">🔔 OFF</button>
+          <button type="button" class="menu-compact-btn" id="btnNotify" title="Toggle notifications for pinned aircraft" aria-pressed="false">🔔 OFF</button>
+        </div>
+        <div class="menu-section menu-actions">
+          <span class="group-label">Actions</span>
+          <div class="action-grid">
+            <button type="button" class="menu-compact-btn" id="btnResetFilters" title="Reset filters, windows, and units to defaults">Reset filters</button>
+          </div>
         </div>
       </div>
     </div>
@@ -87,35 +93,46 @@
       <div class="map-scale-label" id="mapScaleLabel">—</div>
       <div class="map-scale-bar" id="mapScaleBar"></div>
     </div>
-    <div id="emergencyBanner" class="emerg-banner">
+    <div id="emergencyBanner" class="emerg-banner" role="status" aria-live="assertive" aria-atomic="true">
       <span id="emergencyBannerText">Emergency Alert</span>
       <button id="emergencyJump" type="button">Jump to Alert</button>
     </div>
-    <div id="barogram" class="barogram">
+    <div id="barogram" class="barogram" role="region" aria-label="Altitude profile">
       <div class="baro-head">
         <strong id="baroTitle">Altitude Profile</strong>
         <div class="baro-actions">
-          <button id="toggleTrackMode" type="button" title="Toggle Vario vs Flat track color">Vario: OFF</button>
+          <button id="toggleTrackMode" type="button" title="Toggle Vario vs Flat track color" aria-pressed="false">Vario: OFF</button>
           <button id="btnDownloadIgc" type="button">⬇ IGC</button>
-          <button id="btnCloseBaro" type="button">✕</button>
+          <button id="btnCloseBaro" type="button" aria-label="Close altitude profile">✕</button>
         </div>
       </div>
-      <svg id="baroSvg" class="baro-svg" viewBox="0 0 460 70" preserveAspectRatio="none"></svg>
+      <svg id="baroSvg" class="baro-svg" viewBox="0 0 460 70" preserveAspectRatio="none" role="img" aria-label="Altitude profile chart" tabindex="0"></svg>
+      <div id="baroHint" class="baro-hint">Tip: drag on chart to inspect altitude/time. Track color mode: <span id="trackModeHint">Flat</span>.</div>
     </div>
-    <div id="replayBar" class="replay-bar">
-      <button id="replayPlay" type="button">▶</button>
-      <input id="replaySlider" type="range" min="0" max="1440" value="1440" step="1">
-      <span id="replayTime" style="white-space:nowrap;font-weight:600">--:--</span>
-      <button id="replayExit" type="button">✕</button>
+    <div id="replayBar" class="replay-bar" role="region" aria-label="24-hour replay controls">
+      <button id="replayPlay" type="button" aria-label="Play replay">▶</button>
+      <label class="sr-only" for="replaySlider">Replay time (minutes ago)</label>
+      <input id="replaySlider" type="range" min="0" max="1440" value="1440" step="1" aria-label="Replay time slider">
+      <span id="replayTime" style="white-space:nowrap;font-weight:600" aria-live="polite">--:--</span>
+      <button id="replayExit" type="button" aria-label="Exit replay">✕</button>
     </div>
+
   </div>
   <aside class="sidebar">
     <div class="filters">
       <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
+      <button type="button" id="btnClearSearch" class="clear-search-btn" aria-label="Clear search" hidden>Clear</button>
     </div>
+    <div class="section-head section-head-toggle" id="alertsSectionHead" hidden>
+      <button type="button" class="section-toggle-btn" id="alertsToggle" aria-expanded="true" aria-controls="alerts24hSummary">
+        <span class="section-title">Emergency/Alerts</span>
+        <span class="section-meta"><span class="muted" id="alertsCount">0</span><span class="section-caret" aria-hidden="true">▾</span></span>
+      </button>
+    </div>
+    <div id="alerts24hSummary" class="alerts-panel" aria-label="Emergency alerts in the last 24 hours" hidden></div>
     <div class="section-head"><h2>Aircrafts/Stations</h2><span class="muted" id="listCount">0</span></div>
-    <div id="alerts24hSummary" class="alerts-24h" aria-label="Alerts in the last 24 hours" hidden></div>
-    <div class="aircraft-list" id="aircraftList"><div class="empty">Waiting for live data...</div></div>
+    <div id="listHint" class="list-hint" aria-live="polite"></div>
+    <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
 </main>
