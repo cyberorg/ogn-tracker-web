@@ -12,12 +12,14 @@ if (PHP_SAPI !== 'cli') {
 }
 
 const RUN_SECONDS          = 55;
-const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft positions
+const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft positions & station stats
 const TRACK_EXPIRE_SECONDS = 86400; // 24 hours for flight tracks
 const TRACK_MIN_INTERVAL   = 15;    // Min seconds between track points for non-paragliders
 const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
 const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB every 6 hours
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
+const MIN_VALID_TEMP_C     = -50.0;
+const MAX_VALID_TEMP_C     = 55.0;
 
 $lockFile = __DIR__ . '/ogn-collector.lock';
 $dbFile   = __DIR__ . '/ogn-live.sqlite';
@@ -83,6 +85,14 @@ $pdo->exec('
     );
     CREATE INDEX IF NOT EXISTS idx_stations_coords ON stations (lat, lon);
 
+    CREATE TABLE IF NOT EXISTS station_heard (
+        station_id TEXT NOT NULL,
+        aircraft_id TEXT NOT NULL,
+        last_ts INTEGER NOT NULL,
+        PRIMARY KEY (station_id, aircraft_id)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_station_heard_ts ON station_heard (station_id, last_ts);
+
     CREATE TABLE IF NOT EXISTS names (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -128,52 +138,22 @@ function is_emergency_packet(string $line): int {
     return 0;
 }
 
-function parse_aprs_weather_fields(string $line): ?array {
-    $colonPos = strpos($line, ':');
-    $payload  = ($colonPos !== false) ? substr($line, $colonPos + 1) : $line;
+function sanitize_weather_array(array $wx): ?array {
+    $dir      = isset($wx['dir']) && is_numeric($wx['dir']) ? (int)$wx['dir'] : null;
+    $spdKmh   = isset($wx['spdKmh']) && is_numeric($wx['spdKmh']) ? (int)$wx['spdKmh'] : null;
+    $gustKmh  = isset($wx['gustKmh']) && is_numeric($wx['gustKmh']) ? (int)$wx['gustKmh'] : null;
+    $tempC    = isset($wx['tempC']) && is_numeric($wx['tempC']) ? (int)$wx['tempC'] : null;
+    $pressure = isset($wx['pressureHpa']) && is_numeric($wx['pressureHpa']) ? round((float)$wx['pressureHpa'], 1) : null;
+    $humidity = isset($wx['humidityPct']) && is_numeric($wx['humidityPct']) ? (int)$wx['humidityPct'] : null;
 
-    $dir      = null;
-    $spdKmh   = null;
-    $gustKmh  = null;
-    $tempC    = null;
-    $pressure = null;
-    $humidity = null;
-
-    if (preg_match('/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?/', $payload, $wm)) {
-        $dir    = (int)$wm[1];
-        $spdKmh = (int)round((int)$wm[2] * 1.60934);
-        if (isset($wm[3]) && $wm[3] !== '') {
-            $gustKmh = (int)round((int)$wm[3] * 1.60934);
-        }
-        if (isset($wm[4]) && $wm[4] !== '') {
-            $tempC = (int)round(((int)$wm[4] - 32) * 5.0 / 9.0);
-        }
+    if ($tempC !== null && ($tempC < MIN_VALID_TEMP_C || $tempC > MAX_VALID_TEMP_C)) {
+        $tempC = null;
     }
-
-    if (preg_match('/(?:^|[\s,(])([+-]?\d+(?:\.\d+)?)\s*°?C(?=$|[\s,;)/])/u', $payload, $cm)) {
-        $tempC = (int)round((float)$cm[1]);
-    }
-
-    if (preg_match('/_(?:\d{3}\/\d{3})(?:g\d{3})?(?:t-?\d{3})?h(\d{2,3})/', $payload, $whm)) {
-        $rawH = (int)$whm[1];
-        $humidity = ($rawH === 0) ? 100 : min(100, max(0, $rawH));
-    } elseif (preg_match('/(?:^|[^\w.%])(\d{1,3})\s*%(?=$|[^\w%])/', $payload, $pm)) {
-        $rawPct = (int)$pm[1];
-        if ($rawPct >= 0 && $rawPct <= 100) {
-            $humidity = $rawPct;
-        }
-    }
-
-    if (preg_match('/(?:^|[\s,(])(\d{3,4}(?:\.\d+)?)\s*(?:hpa|mbar)(?=$|[\s,;)/])/i', $payload, $hpm)) {
-        $pressure = round((float)$hpm[1], 1);
-    } elseif (preg_match('/_(?:\d{3}\/\d{3})(?:g\d{3})?(?:t-?\d{3})?(?:h\d{2,3})?b(\d{4,5})/', $payload, $wbm)) {
-        $pressure = round((int)$wbm[1] / 10.0, 1);
-    } elseif (preg_match('/(?:^|[\s,(])b(\d{4,5})(?=$|[\s,;)/])/', $payload, $bm)) {
-        $pressure = round((int)$bm[1] / 10.0, 1);
-    }
-
     if ($pressure !== null && ($pressure < 850.0 || $pressure > 1085.0)) {
         $pressure = null;
+    }
+    if ($humidity !== null && ($humidity < 0 || $humidity > 100)) {
+        $humidity = null;
     }
 
     if ($dir === null && $spdKmh === null && $gustKmh === null && $tempC === null && $pressure === null && $humidity === null) {
@@ -188,6 +168,64 @@ function parse_aprs_weather_fields(string $line): ?array {
         'pressureHpa' => $pressure,
         'humidityPct' => $humidity,
     ];
+}
+
+function parse_aprs_weather_fields(string $line): ?array {
+    $colonPos = strpos($line, ':');
+    $payload  = ($colonPos !== false) ? substr($line, $colonPos + 1) : $line;
+
+    $dir      = null;
+    $spdKmh   = null;
+    $gustKmh  = null;
+    $tempC    = null;
+    $pressure = null;
+    $humidity = null;
+
+    if (preg_match('/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?(?:h(\d{2,3}))?(?:b(\d{4,5}))?/', $payload, $wm)) {
+        $dir    = (int)$wm[1];
+        $spdKmh = (int)round((int)$wm[2] * 1.60934);
+        if (isset($wm[3]) && $wm[3] !== '') {
+            $gustKmh = (int)round((int)$wm[3] * 1.60934);
+        }
+        if (isset($wm[4]) && $wm[4] !== '') {
+            $tempC = (int)round(((int)$wm[4] - 32) * 5.0 / 9.0);
+        }
+        if (isset($wm[5]) && $wm[5] !== '') {
+            $rawH = (int)$wm[5];
+            $humidity = ($rawH === 0) ? 100 : min(100, max(0, $rawH));
+        }
+        if (isset($wm[6]) && $wm[6] !== '') {
+            $pressure = round((int)$wm[6] / 10.0, 1);
+        }
+    }
+
+    if ($tempC === null && preg_match('/(?:^|[\s,(])([+-]?\d{1,2}(?:\.\d+)?)\s*°?C(?=$|[\s,;)\/])/u', $payload, $cm)) {
+        $tempC = (int)round((float)$cm[1]);
+    }
+
+    if ($humidity === null && preg_match('/(?:^|[\s,(])(?:rh\s*[:=]?\s*|hum(?:idity)?\s*[:=]?\s*)?(\d{1,3})\s*%(?=$|[\s,;)\/])/i', $payload, $pm)) {
+        $rawPct = (int)$pm[1];
+        if ($rawPct >= 0 && $rawPct <= 100) {
+            $humidity = $rawPct;
+        }
+    }
+
+    if ($pressure === null) {
+        if (preg_match('/(?:^|[\s,(])(\d{3,4}(?:\.\d+)?)\s*(?:hpa|mbar)(?=$|[\s,;)\/])/i', $payload, $hpm)) {
+            $pressure = round((float)$hpm[1], 1);
+        } elseif (!preg_match('/_\d{3}\/\d{3}/', $payload) && preg_match('/(?:^|[\s,(])b(\d{4,5})(?=$|[\s,;)\/])/', $payload, $bm)) {
+            $pressure = round((int)$bm[1] / 10.0, 1);
+        }
+    }
+
+    return sanitize_weather_array([
+        'dir'         => $dir,
+        'spdKmh'      => $spdKmh,
+        'gustKmh'     => $gustKmh,
+        'tempC'       => $tempC,
+        'pressureHpa' => $pressure,
+        'humidityPct' => $humidity,
+    ]);
 }
 
 $stationState = [];
@@ -209,10 +247,13 @@ $stmtLoadWx->execute([':cutoff' => $cutoff24h]);
 while ($wrow = $stmtLoadWx->fetch(PDO::FETCH_ASSOC)) {
     $decoded = json_decode((string)$wrow['wx_json'], true);
     if (is_array($decoded)) {
-        $stationWeatherState[$wrow['id']] = [
-            'wx'      => $decoded,
-            'updated' => (int)$wrow['updated'],
-        ];
+        $clean = sanitize_weather_array($decoded);
+        if ($clean !== null) {
+            $stationWeatherState[$wrow['id']] = [
+                'wx'      => $clean,
+                'updated' => (int)$wrow['updated'],
+            ];
+        }
     }
 }
 
@@ -220,7 +261,7 @@ while ($wrow = $stmtLoadWx->fetch(PDO::FETCH_ASSOC)) {
 $ddbUpdated = (int)$pdo->query('SELECT value FROM meta WHERE key = "ddb_updated"')->fetchColumn();
 if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
     try {
-        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.10']]);
+        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.12']]);
         $body = @file_get_contents('https://ddb.glidernet.org/download/?j=1&t=1', false, $ctx);
         if ($body !== false) {
             $data = json_decode($body, true);
@@ -291,6 +332,12 @@ $stmtUpsertStationWx = $pdo->prepare('
         wx_json = excluded.wx_json,
         updated = excluded.updated
 ');
+$stmtUpsertHeard = $pdo->prepare('
+    INSERT INTO station_heard (station_id, aircraft_id, last_ts)
+    VALUES (:sid, :aid, :ts)
+    ON CONFLICT(station_id, aircraft_id) DO UPDATE SET
+        last_ts = excluded.last_ts
+');
 $stmtInsertTrack = $pdo->prepare('
     INSERT OR IGNORE INTO tracks (id, ts, lat, lon, alt)
     VALUES (:id, :ts, :lat, :lon, :alt)
@@ -337,10 +384,12 @@ function record_station_weather(array &$stationWeatherState, array &$stationWxBa
                 $merged[$field] = $val;
             }
         }
+        $clean = sanitize_weather_array($merged);
+        if ($clean === null) continue;
         $prevTs = $stationWeatherState[$k]['updated'] ?? 0;
         $updatedTs = max($ts, $prevTs);
-        $stationWeatherState[$k] = ['wx' => $merged, 'updated' => $updatedTs];
-        $stationWxBatch[$k] = ['wx' => $merged, 'updated' => $updatedTs];
+        $stationWeatherState[$k] = ['wx' => $clean, 'updated' => $updatedTs];
+        $stationWxBatch[$k] = ['wx' => $clean, 'updated' => $updatedTs];
     }
 }
 
@@ -349,6 +398,7 @@ function flush_batch(
     PDOStatement $stmtUpsertPos,
     PDOStatement $stmtUpsertTelemetry,
     PDOStatement $stmtUpsertStationWx,
+    PDOStatement $stmtUpsertHeard,
     PDOStatement $stmtInsertTrack,
     PDOStatement $stmtTouchPos,
     PDOStatement $stmtUpsertName,
@@ -357,6 +407,7 @@ function flush_batch(
     array &$posBatch,
     array &$telemetryBatch,
     array &$stationWxBatch,
+    array &$heardBatch,
     array &$trackBatch,
     array &$touchBatch,
     array &$nameBatch,
@@ -395,6 +446,13 @@ function flush_batch(
                 ]);
             }
         }
+        foreach ($heardBatch as $hKey => $h) {
+            $stmtUpsertHeard->execute([
+                ':sid' => $h['sid'],
+                ':aid' => $h['aid'],
+                ':ts'  => $h['ts'],
+            ]);
+        }
         foreach ($trackBatch as $t) {
             $stmtInsertTrack->execute([
                 ':id'  => $t['id'],
@@ -428,6 +486,7 @@ function flush_batch(
             $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . $cutoff);
             $pdo->exec('DELETE FROM telemetry WHERE timestamp < ' . $cutoff);
             $pdo->exec('DELETE FROM station_weather WHERE updated < ' . $cutoff);
+            $pdo->exec('DELETE FROM station_heard WHERE last_ts < ' . $cutoff);
             $pdo->exec('DELETE FROM tracks WHERE ts < ' . ($now - TRACK_EXPIRE_SECONDS));
             $pdo->exec('UPDATE stations SET max_km = 0, farthest_id = "", farthest_ts = 0 WHERE farthest_ts > 0 AND farthest_ts < ' . $cutoff);
             $pdo->exec('DELETE FROM stations WHERE updated < ' . $cutoff);
@@ -440,6 +499,7 @@ function flush_batch(
     $posBatch       = [];
     $telemetryBatch = [];
     $stationWxBatch = [];
+    $heardBatch     = [];
     $trackBatch     = [];
     $touchBatch     = [];
     $nameBatch      = [];
@@ -456,7 +516,7 @@ if (!$socket) {
 }
 
 stream_set_timeout($socket, 2);
-fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.10 filter a/90/-180/-90/180\r\n");
+fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.12 filter a/90/-180/-90/180\r\n");
 
 $deadline  = microtime(true) + RUN_SECONDS;
 $lastFlush = microtime(true);
@@ -464,6 +524,7 @@ $lastFlush = microtime(true);
 $posBatch       = [];
 $telemetryBatch = [];
 $stationWxBatch = [];
+$heardBatch     = [];
 $trackBatch     = [];
 $touchBatch     = [];
 $nameBatch      = [];
@@ -595,6 +656,9 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 } else {
                     if (preg_match('/q[A-Z]{2},([^:,]+)[:,]/', $line, $rxm)) {
                         $rxKey = strtolower(trim($rxm[1]));
+                        if ($rxKey !== '') {
+                            $heardBatch[$rxKey . '|' . $id] = ['sid' => $rxKey, 'aid' => $id, 'ts' => $now];
+                        }
                         if (isset($stationState[$rxKey])) {
                             $st = $stationState[$rxKey];
                             $km = haversine_km($st['lat'], $st['lon'], $lat, $lon);
@@ -650,13 +714,13 @@ while (microtime(true) < $deadline && !feof($socket)) {
     }
 
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
-        flush_batch($pdo, $stmtUpsertPos, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $telemetryBatch, $stationWxBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, false);
+        flush_batch($pdo, $stmtUpsertPos, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, false);
         $lastFlush = microtime(true);
     }
 }
 
 fclose($socket);
-flush_batch($pdo, $stmtUpsertPos, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $telemetryBatch, $stationWxBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, true);
+flush_batch($pdo, $stmtUpsertPos, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, true);
 
 try {
     $pdo->exec('PRAGMA incremental_vacuum(500);');

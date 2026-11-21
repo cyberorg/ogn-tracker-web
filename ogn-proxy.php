@@ -360,14 +360,14 @@ if (($cached = cache_get($cacheDir, $cacheKey, 3)) !== null) {
 
 if (!is_file($dbFile)) {
     echo json_encode([
-        'server_time'    => time(),
-        'updated'        => 0,
-        'packets'        => new stdClass(),
-        'telemetry'      => new stdClass(),
-        'station_weather'=> new stdClass(),
-        'names'          => new stdClass(),
-        'ddb'            => new stdClass(),
-        'station_stats'  => new stdClass(),
+        'server_time'     => time(),
+        'updated'         => 0,
+        'packets'         => new stdClass(),
+        'telemetry'       => new stdClass(),
+        'station_weather' => new stdClass(),
+        'names'           => new stdClass(),
+        'ddb'             => new stdClass(),
+        'station_stats'   => new stdClass(),
     ]);
     exit;
 }
@@ -522,9 +522,21 @@ try {
     } catch (Throwable $e) {
     }
 
-    // 24-hour farthest aircraft heard per ground station in viewport
+    // 24-hour farthest aircraft heard & unique aircraft heard count per ground station in viewport
     $stationStats = [];
     try {
+        $heardCounts = [];
+        $stmtHc = $pdo->prepare('
+            SELECT station_id, COUNT(DISTINCT aircraft_id) AS heard_24h
+            FROM station_heard
+            WHERE last_ts >= :cutoff24
+            GROUP BY station_id
+        ');
+        $stmtHc->execute([':cutoff24' => $now - 86400]);
+        while ($hc = $stmtHc->fetch(PDO::FETCH_ASSOC)) {
+            $heardCounts[strtolower((string)$hc['station_id'])] = (int)$hc['heard_24h'];
+        }
+
         $stParams = [':south' => $south, ':north' => $north, ':cutoff24' => $now - 86400];
         if (!$fullWorld) {
             $stParams[':west'] = $w;
@@ -539,18 +551,29 @@ try {
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE s.lat BETWEEN :south AND :north
               AND {$lonClauseS}
-              AND s.max_km > 0
               AND s.farthest_ts >= :cutoff24
             LIMIT 500
         ");
         $stmtSt->execute($stParams);
         while ($r = $stmtSt->fetch(PDO::FETCH_ASSOC)) {
+            $sid = strtolower((string)$r['id']);
             $label = $r['name'] ?: ($r['callsign'] ?: ($r['registration'] ?: strtoupper($r['farthest_id'])));
             $stationStats[$r['id']] = [
-                'max_km' => round((float)$r['max_km'], 1),
-                'label'  => $label,
-                'ts'     => (int)$r['farthest_ts'],
+                'heard_24h' => $heardCounts[$sid] ?? 0,
+                'max_km'    => round((float)$r['max_km'], 1),
+                'label'     => $label,
+                'ts'        => (int)$r['farthest_ts'],
             ];
+        }
+        foreach ($heardCounts as $sid => $cnt) {
+            if (!isset($stationStats[$sid])) {
+                $stationStats[$sid] = [
+                    'heard_24h' => $cnt,
+                    'max_km'    => 0.0,
+                    'label'     => '',
+                    'ts'        => 0,
+                ];
+            }
         }
     } catch (Throwable $e) {
     }
