@@ -82,6 +82,33 @@ function parse_bounds(): ?array {
     return [$south, $north, $w, $e, $fullWorld];
 }
 
+function link_station_alias(array &$aliasGraph, string $a, string $b): void {
+    $ka = strtolower(trim($a));
+    $kb = strtolower(trim($b));
+    if ($ka === '' || $kb === '' || $ka === $kb) return;
+    if (!isset($aliasGraph[$ka])) $aliasGraph[$ka] = [];
+    if (!isset($aliasGraph[$kb])) $aliasGraph[$kb] = [];
+    $aliasGraph[$ka][$kb] = true;
+    $aliasGraph[$kb][$ka] = true;
+}
+
+function expand_station_alias_set(array $aliasGraph, string $key): array {
+    $root = strtolower(trim($key));
+    if ($root === '') return [];
+    $visited = [$root => true];
+    $queue   = [$root];
+    while ($queue) {
+        $curr = array_shift($queue);
+        foreach ($aliasGraph[$curr] ?? [] as $alias => $_) {
+            if (!isset($visited[$alias])) {
+                $visited[$alias] = true;
+                $queue[] = $alias;
+            }
+        }
+    }
+    return array_keys($visited);
+}
+
 // --- 1. Track Endpoint ---
 if (isset($_GET['track']) && $_GET['track'] === '1') {
     $id = strtolower(trim((string)($_GET['id'] ?? '')));
@@ -523,19 +550,43 @@ try {
     }
 
     // 24-hour farthest aircraft heard & unique aircraft heard count per ground station in viewport
+    // Aggregated across aliased station IDs and Name tags without double-counting aircraft
     $stationStats = [];
     try {
-        $heardCounts = [];
+        $aliasGraph = [];
+        foreach ($pdo->query('SELECT id, name FROM names WHERE name != ""') as $nrow) {
+            link_station_alias($aliasGraph, (string)$nrow['id'], (string)$nrow['name']);
+        }
+        foreach ($pdo->query('SELECT id, ddb_id FROM aircraft WHERE ddb_id != ""') as $arow) {
+            link_station_alias($aliasGraph, (string)$arow['id'], (string)$arow['ddb_id']);
+        }
+
+        $heardSetsByKey = [];
         $stmtHc = $pdo->prepare('
-            SELECT station_id, COUNT(DISTINCT aircraft_id) AS heard_24h
+            SELECT station_id, aircraft_id
             FROM station_heard
             WHERE last_ts >= :cutoff24
-            GROUP BY station_id
         ');
         $stmtHc->execute([':cutoff24' => $now - 86400]);
         while ($hc = $stmtHc->fetch(PDO::FETCH_ASSOC)) {
-            $heardCounts[strtolower((string)$hc['station_id'])] = (int)$hc['heard_24h'];
+            $sid = strtolower(trim((string)$hc['station_id']));
+            $aid = strtolower(trim((string)$hc['aircraft_id']));
+            if ($sid === '' || $aid === '') continue;
+            if (!isset($heardSetsByKey[$sid])) $heardSetsByKey[$sid] = [];
+            $heardSetsByKey[$sid][$aid] = true;
         }
+
+        $countAliases24h = static function (string $key) use (&$aliasGraph, &$heardSetsByKey): int {
+            $union = [];
+            foreach (expand_station_alias_set($aliasGraph, $key) as $ak) {
+                if (!empty($heardSetsByKey[$ak])) {
+                    foreach ($heardSetsByKey[$ak] as $aid => $_) {
+                        $union[$aid] = true;
+                    }
+                }
+            }
+            return count($union);
+        };
 
         $stParams = [':south' => $south, ':north' => $north, ':cutoff24' => $now - 86400];
         if (!$fullWorld) {
@@ -559,16 +610,16 @@ try {
             $sid = strtolower((string)$r['id']);
             $label = $r['name'] ?: ($r['callsign'] ?: ($r['registration'] ?: strtoupper($r['farthest_id'])));
             $stationStats[$r['id']] = [
-                'heard_24h' => $heardCounts[$sid] ?? 0,
+                'heard_24h' => $countAliases24h($sid),
                 'max_km'    => round((float)$r['max_km'], 1),
                 'label'     => $label,
                 'ts'        => (int)$r['farthest_ts'],
             ];
         }
-        foreach ($heardCounts as $sid => $cnt) {
+        foreach (array_keys($heardSetsByKey) as $sid) {
             if (!isset($stationStats[$sid])) {
                 $stationStats[$sid] = [
-                    'heard_24h' => $cnt,
+                    'heard_24h' => $countAliases24h($sid),
                     'max_km'    => 0.0,
                     'label'     => '',
                     'ts'        => 0,

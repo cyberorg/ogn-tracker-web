@@ -35,7 +35,7 @@ try {
 } catch (e) {}
 
 function getCurrentTypesArray() {
-  const boxes = [...$('type').queryAll ? $('type').queryAll('input[type="checkbox"]') : $('type').querySelectorAll('input[type="checkbox"]')];
+  const boxes = [...$('type').querySelectorAll('input[type="checkbox"]')];
   const allBox = boxes.find(b => b.value === 'all');
   if (allBox && allBox.checked) return ['all'];
   const chosen = boxes.filter(b => b.value !== 'all' && b.checked).map(b => b.value);
@@ -832,7 +832,7 @@ function formatWeatherHtml(wx, compact = false) {
     const arrow = clean.dir != null
       ? `<span style="display:inline-block;font-size:${compact ? '12px' : '19px'};line-height:1;vertical-align:-2px;transform:rotate(${Number(clean.dir) || 0}deg);margin-right:2px" aria-label="Wind direction">↑</span>`
       : '';
-    const gustStr = clean.gustKmh != null ? ` (G ${fmtWindSpeed(clean.gustKmh)})` : '';
+    const gustStr = clean.gustKmh != null ? ` (${fmtWindSpeed(clean.gustKmh)})` : '';
     parts.push(`${arrow}${fmtWindSpeed(clean.spdKmh)}${gustStr}`);
   }
   const tempStr = fmtTemp(clean.tempC);
