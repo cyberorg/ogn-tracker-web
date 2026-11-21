@@ -12,7 +12,7 @@ if (PHP_SAPI !== 'cli') {
 }
 
 const RUN_SECONDS          = 55;
-const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft positions & station stats
+const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft positions, alerts & station stats
 const TRACK_EXPIRE_SECONDS = 86400; // 24 hours for flight tracks
 const TRACK_MIN_INTERVAL   = 15;    // Min seconds between track points for non-paragliders
 const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
@@ -49,6 +49,17 @@ $pdo->exec('
     );
     CREATE INDEX IF NOT EXISTS idx_aircraft_coords ON aircraft (lat, lon);
     CREATE INDEX IF NOT EXISTS idx_aircraft_ts ON aircraft (timestamp);
+
+    CREATE TABLE IF NOT EXISTS alerts (
+        id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        lat REAL,
+        lon REAL,
+        raw TEXT NOT NULL,
+        last_ts INTEGER NOT NULL,
+        PRIMARY KEY (id, status)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (last_ts);
 
     CREATE TABLE IF NOT EXISTS telemetry (
         id TEXT PRIMARY KEY,
@@ -138,6 +149,54 @@ function is_emergency_packet(string $line): int {
     return 0;
 }
 
+function detect_alert_status(string $line): ?string {
+    static $fanetLabels = [
+        '8' => 'Need a ride',
+        'c' => 'Need technical support',
+        'd' => 'Need medical help',
+        'e' => 'Distress call',
+        'f' => 'Distress call automatically',
+    ];
+    if (preg_match('/\bFNT7([0-9a-f])\b/i', $line, $fm)) {
+        $hex = strtolower($fm[1]);
+        if (isset($fanetLabels[$hex])) {
+            $reason = $fanetLabels[$hex];
+            $colonPos = strpos($line, ':');
+            if ($colonPos !== false) {
+                $tail = preg_replace('/\bFNT[0-9a-f]{2}\b/i', '', substr($line, $colonPos + 1));
+                $tail = trim(preg_replace('/\s+/', ' ', (string)$tail));
+                if ($tail !== '' && !preg_match('/^[\d.NSWE\s\/+-]+$/', $tail)) {
+                    $reason .= ': ' . substr($tail, 0, 48);
+                }
+            }
+            return $reason;
+        }
+    }
+    if (preg_match('/\bsq(7700|7600|7500)\b/i', $line, $sm)) {
+        $map = [
+            '7700' => 'Squawk 7700 (Emergency)',
+            '7600' => 'Squawk 7600 (Radio Failure)',
+            '7500' => 'Squawk 7500 (Hijack)',
+        ];
+        return $map[$sm[1]];
+    }
+    if (preg_match('/^[^>]+>EMERGENCY[,:]/i', $line)) {
+        $colonPos = strpos($line, ':');
+        $detail = $colonPos !== false ? trim(substr($line, $colonPos + 1)) : '';
+        return $detail !== '' ? 'APRS Emergency: ' . substr($detail, 0, 48) : 'APRS Emergency';
+    }
+    $colonPos = strpos($line, ':');
+    if ($colonPos !== false) {
+        $payload = trim(substr($line, $colonPos + 1));
+        if (preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $payload, $km)) {
+            $tag = strtoupper($km[1]);
+            $cleanNote = trim(preg_replace('/\b(MAYDAY|SOS|EMERGENCY)\b[:\s-]*/i', '', $payload));
+            return $cleanNote !== '' ? "Alert ({$tag}): " . substr($cleanNote, 0, 44) : "Alert ({$tag})";
+        }
+    }
+    return null;
+}
+
 function sanitize_weather_array(array $wx): ?array {
     $dir      = isset($wx['dir']) && is_numeric($wx['dir']) ? (int)$wx['dir'] : null;
     $spdKmh   = isset($wx['spdKmh']) && is_numeric($wx['spdKmh']) ? (int)$wx['spdKmh'] : null;
@@ -156,7 +215,7 @@ function sanitize_weather_array(array $wx): ?array {
         $humidity = null;
     }
 
-    $hasNonTempWx = ($dir !== null || $spdKmh !== null || $gustKmh !== null || $pressure !== null || $humidity !== null);
+    $hasNonTempWx = ($dir !== null || $spdKmh !== null || $gustKmh !== null || pressure !== null || humidity !== null);
     if (!$hasNonTempWx) {
         return null;
     }
@@ -270,9 +329,29 @@ foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts FROM
     ];
 }
 
-// Seed aliases from existing station names in SQLite
 foreach ($pdo->query('SELECT s.id, n.name FROM stations s INNER JOIN names n ON s.id = n.id WHERE n.name != ""') as $nrow) {
     register_station_alias($stationAliases, (string)$nrow['id'], (string)$nrow['name']);
+}
+
+try {
+    $stmtSeed = $pdo->prepare('SELECT id, lat, lon, raw, timestamp FROM aircraft WHERE timestamp >= :cutoff AND is_emergency = 1');
+    $stmtSeed->execute([':cutoff' => $cutoff24h]);
+    $stmtSeedInsert = $pdo->prepare('
+        INSERT OR IGNORE INTO alerts (id, status, lat, lon, raw, last_ts)
+        VALUES (:id, :status, :lat, :lon, :raw, :ts)
+    ');
+    while ($sr = $stmtSeed->fetch(PDO::FETCH_ASSOC)) {
+        $decodedStatus = detect_alert_status((string)$sr['raw']) ?? 'Emergency alert';
+        $stmtSeedInsert->execute([
+            ':id'     => (string)$sr['id'],
+            ':status' => $decodedStatus,
+            ':lat'    => (float)$sr['lat'],
+            ':lon'    => (float)$sr['lon'],
+            ':raw'    => (string)$sr['raw'],
+            ':ts'     => (int)$sr['timestamp'],
+        ]);
+    }
+} catch (Throwable $e) {
 }
 
 $stationWeatherState = [];
@@ -295,7 +374,7 @@ while ($wrow = $stmtLoadWx->fetch(PDO::FETCH_ASSOC)) {
 $ddbUpdated = (int)$pdo->query('SELECT value FROM meta WHERE key = "ddb_updated"')->fetchColumn();
 if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
     try {
-        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.12']]);
+        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.14']]);
         $body = @file_get_contents('https://ddb.glidernet.org/download/?j=1&t=1', false, $ctx);
         if ($body !== false) {
             $data = json_decode($body, true);
@@ -351,6 +430,15 @@ $stmtUpsertPos = $pdo->prepare('
         raw = excluded.raw,
         timestamp = excluded.timestamp,
         is_emergency = excluded.is_emergency
+');
+$stmtUpsertAlert = $pdo->prepare('
+    INSERT INTO alerts (id, status, lat, lon, raw, last_ts)
+    VALUES (:id, :status, :lat, :lon, :raw, :ts)
+    ON CONFLICT(id, status) DO UPDATE SET
+        lat = COALESCE(excluded.lat, alerts.lat),
+        lon = COALESCE(excluded.lon, alerts.lon),
+        raw = excluded.raw,
+        last_ts = excluded.last_ts
 ');
 $stmtUpsertTelemetry = $pdo->prepare('
     INSERT INTO telemetry (id, raw, timestamp)
@@ -430,6 +518,7 @@ function record_station_weather(array &$stationWeatherState, array &$stationWxBa
 function flush_batch(
     PDO $pdo,
     PDOStatement $stmtUpsertPos,
+    PDOStatement $stmtUpsertAlert,
     PDOStatement $stmtUpsertTelemetry,
     PDOStatement $stmtUpsertStationWx,
     PDOStatement $stmtUpsertHeard,
@@ -439,6 +528,7 @@ function flush_batch(
     PDOStatement $stmtUpsertStation,
     PDOStatement $stmtMeta,
     array &$posBatch,
+    array &$alertBatch,
     array &$telemetryBatch,
     array &$stationWxBatch,
     array &$heardBatch,
@@ -461,6 +551,16 @@ function flush_batch(
                 ':raw'    => $p['raw'],
                 ':ts'     => $p['ts'],
                 ':emerg'  => $p['is_emergency'],
+            ]);
+        }
+        foreach ($alertBatch as $al) {
+            $stmtUpsertAlert->execute([
+                ':id'     => $al['id'],
+                ':status' => $al['status'],
+                ':lat'    => $al['lat'],
+                ':lon'    => $al['lon'],
+                ':raw'    => $al['raw'],
+                ':ts'     => $al['ts'],
             ]);
         }
         foreach ($telemetryBatch as $id => $tel) {
@@ -518,6 +618,7 @@ function flush_batch(
         }
         if ($prune) {
             $pdo->exec('DELETE FROM aircraft WHERE timestamp < ' . $cutoff);
+            $pdo->exec('DELETE FROM alerts WHERE last_ts < ' . $cutoff);
             $pdo->exec('DELETE FROM telemetry WHERE timestamp < ' . $cutoff);
             $pdo->exec('DELETE FROM station_weather WHERE updated < ' . $cutoff);
             $pdo->exec('DELETE FROM station_heard WHERE last_ts < ' . $cutoff);
@@ -531,6 +632,7 @@ function flush_batch(
         if ($pdo->inTransaction()) $pdo->rollBack();
     }
     $posBatch       = [];
+    $alertBatch     = [];
     $telemetryBatch = [];
     $stationWxBatch = [];
     $heardBatch     = [];
@@ -550,12 +652,13 @@ if (!$socket) {
 }
 
 stream_set_timeout($socket, 2);
-fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.12 filter a/90/-180/-90/180\r\n");
+fwrite($socket, "user PARAGUIDE pass -1 vers OGN-Global-Collector 1.14 filter a/90/-180/-90/180\r\n");
 
 $deadline  = microtime(true) + RUN_SECONDS;
 $lastFlush = microtime(true);
 
 $posBatch       = [];
+$alertBatch     = [];
 $telemetryBatch = [];
 $stationWxBatch = [];
 $heardBatch     = [];
@@ -564,6 +667,7 @@ $touchBatch     = [];
 $nameBatch      = [];
 $stationBatch   = [];
 $lastTrackPoint = [];
+$lastKnownPos   = [];
 
 while (microtime(true) < $deadline && !feof($socket)) {
     $line = fgets($socket, 1024);
@@ -603,6 +707,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
             }
 
             $wxFields = parse_aprs_weather_fields($line);
+            $alertStatus = detect_alert_status($line);
 
             if (preg_match('/(\d{6})h(\d{2})(\d{2}\.\d+)([NS])(.)(\d{3})(\d{2}\.\d+)([EW])(.)/', $line, $bm, PREG_OFFSET_CAPTURE)) {
                 $lat = (int)$bm[2][0] + ((float)$bm[3][0] / 60.0);
@@ -661,6 +766,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     continue;
                 }
 
+                $lastKnownPos[$id] = ['lat' => $lat, 'lon' => $lon];
                 $posBatch[$id] = [
                     'ddb_id'       => $ddbId,
                     'lat'          => $lat,
@@ -669,6 +775,17 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     'ts'           => $now,
                     'is_emergency' => is_emergency_packet($line),
                 ];
+
+                if ($alertStatus !== null) {
+                    $alertBatch[$id . '|' . $alertStatus] = [
+                        'id'     => $id,
+                        'status' => $alertStatus,
+                        'lat'    => $lat,
+                        'lon'    => $lon,
+                        'raw'    => $line,
+                        'ts'     => $now,
+                    ];
+                }
 
                 if ($wxFields !== null) {
                     $wxKeys = [$id];
@@ -740,6 +857,17 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 }
             } else {
                 $touchBatch[$id] = $now;
+                if ($alertStatus !== null) {
+                    $pos = $lastKnownPos[$id] ?? ['lat' => null, 'lon' => null];
+                    $alertBatch[$id . '|' . $alertStatus] = [
+                        'id'     => $id,
+                        'status' => $alertStatus,
+                        'lat'    => $pos['lat'],
+                        'lon'    => $pos['lon'],
+                        'raw'    => $line,
+                        'ts'     => $now,
+                    ];
+                }
                 if ($wxFields !== null || preg_match('/(?:hPa|mbar|%|\b[+-]?\d+(?:\.\d+)?C\b)/i', $line)) {
                     $telemetryBatch[$id] = [
                         'raw' => $line,
@@ -756,13 +884,13 @@ while (microtime(true) < $deadline && !feof($socket)) {
     }
 
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
-        flush_batch($pdo, $stmtUpsertPos, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, false);
+        flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, false);
         $lastFlush = microtime(true);
     }
 }
 
 fclose($socket);
-flush_batch($pdo, $stmtUpsertPos, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, true);
+flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, true);
 
 try {
     $pdo->exec('PRAGMA incremental_vacuum(500);');

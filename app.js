@@ -3,7 +3,10 @@
 const BIR = [32.037, 76.708];
 const PINNED_STORAGE_KEY = 'ogn_pinned_aircraft';
 const MENU_PREFS_STORAGE_KEY = 'ogn_menu_prefs';
+const ALERTS_24H_STORAGE_KEY = 'ogn_alerts_24h';
 const WX_CACHE_TTL_MS = 30 * 60 * 1000;
+const ALERT_24H_TTL_MS = 24 * 60 * 60 * 1000;
+const OFFLINE_THRESHOLD_SEC = 180;
 const MIN_VALID_TEMP_C = -50;
 const MAX_VALID_TEMP_C = 55;
 const TRACK_COLORS = ['#38bdf8','#f97316','#a855f7','#22c55e','#f43f5e','#eab308','#ec4899','#14b8a6','#818cf8','#84cc16'];
@@ -44,8 +47,12 @@ function getCurrentTypesArray() {
 
 function updateFilterBadge() {
   const activeTypes = getCurrentTypesArray();
-  const hasCustomFilter = !activeTypes.includes('all') || $('markerWindow').value !== '900' || isImperialPreset();
-  $('mapFilterToggle').classList.toggle('has-badge', hasCustomFilter);
+  const isDefaultState =
+    activeTypes.includes('all') &&
+    $('markerWindow').value === '900' &&
+    $('trackWindow').value === '900' &&
+    isMetricPreset();
+  $('mapFilterToggle').classList.toggle('has-badge', !isDefaultState);
 }
 
 function saveMenuPrefs() {
@@ -275,7 +282,44 @@ let followedAddress = null;
 let varioTrackMode = false;
 let activeBaroAddress = null;
 const lastPinnedStatus = new Map();
+const alerts24hHistory = new Map();
 let replayActive = false, replayTimer = null;
+
+try {
+  const savedAlerts = JSON.parse(localStorage.getItem(ALERTS_24H_STORAGE_KEY) || '[]');
+  const nowInit = Date.now();
+  if (Array.isArray(savedAlerts)) {
+    for (const item of savedAlerts) {
+      if (item && item.address && item.status && Number.isFinite(Number(item.tsMs))) {
+        if ((nowInit - Number(item.tsMs)) <= ALERT_24H_TTL_MS && !/^need a ride/i.test(String(item.status))) {
+          alerts24hHistory.set(String(item.address).toLowerCase(), {
+            address: String(item.address).toLowerCase(),
+            name: String(item.name || item.address).toUpperCase(),
+            status: String(item.status),
+            lastStatus: String(item.lastStatus || item.status),
+            lat: Number.isFinite(Number(item.lat)) ? Number(item.lat) : null,
+            lon: Number.isFinite(Number(item.lon)) ? Number(item.lon) : null,
+            raw: String(item.raw || ''),
+            tsMs: Number(item.tsMs),
+            latestTsMs: Number.isFinite(Number(item.latestTsMs)) ? Number(item.latestTsMs) : Number(item.tsMs),
+            normalAfter: Boolean(item.normalAfter),
+            alertStillOn: Boolean(item.alertStillOn)
+          });
+        }
+      }
+    }
+  }
+} catch (e) {}
+
+function save24hAlerts(nowMs) {
+  try {
+    const pruned = [...alerts24hHistory.values()]
+      .filter(item => (nowMs - item.tsMs) <= ALERT_24H_TTL_MS && !/^need a ride/i.test(String(item.status)))
+      .sort((a, b) => b.tsMs - a.tsMs)
+      .slice(0, 100);
+    localStorage.setItem(ALERTS_24H_STORAGE_KEY, JSON.stringify(pruned));
+  } catch (e) {}
+}
 
 const pinnedAircraft = new Set();
 try {
@@ -542,6 +586,40 @@ function downloadIgc(address) {
   URL.revokeObjectURL(url);
 }
 
+function jumpToAlertAddress(address) {
+  const key = String(address || '').toLowerCase();
+  if (!key) return;
+  if (markers.has(key)) {
+    toggleSelection(key, true);
+    return;
+  }
+  const item = alerts24hHistory.get(key);
+  if (item && Number.isFinite(item.lat) && Number.isFinite(item.lon)) {
+    if (window.innerWidth <= 800) $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    const nowMs = serverNow();
+    const lastSeenMs = item.latestTsMs || item.tsMs;
+    const lastSeenAge = fmtAge(Math.max(0, Math.floor((nowMs - lastSeenMs) / 1000)));
+    const exactTime = new Date(lastSeenMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const outcome = describeAlertOutcome(item, nowMs);
+    const lastStatus = item.lastStatus || item.status;
+    map.setView([item.lat, item.lon], Math.max(map.getZoom(), 12));
+    L.popup({ maxWidth: 340 })
+      .setLatLng([item.lat, item.lon])
+      .setContent(`
+        <div class="popup-title">${esc(item.name)}</div>
+        <div class="popup-grid" style="margin-top:6px">
+          <div class="popup-value"><span>Alert</span><br><b style="color:var(--red)">${esc(item.status)}</b></div>
+          <div class="popup-value"><span>Last status</span><br><b>${esc(lastStatus)}</b></div>
+          <div class="popup-value" style="grid-column:1/-1"><span>Last seen</span><br><b>${esc(`${exactTime} (${lastSeenAge})`)}</b></div>
+          ${outcome ? `<div class="popup-value" style="grid-column:1/-1"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
+          <div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><b>${esc(`${item.lat.toFixed(6)}, ${item.lon.toFixed(6)}`)}</b></div>
+        </div>
+        ${item.raw ? `<div class="popup-section">Last Packet</div><div class="popup-raw">${esc(item.raw)}</div>` : ''}
+      `)
+      .openOn(map);
+  }
+}
+
 function toggleSelection(address, openOnMap = false) {
   if (selectedTracks.has(address)) {
     removeTrack(address);
@@ -805,7 +883,7 @@ function parseFanetStatus(packet) {
 function parseEmergencyStatus(packet) {
   if (!packet) return '';
   const fnt = parseFanetStatus(packet);
-  if (fnt === 'Distress call' || fnt === 'Distress call automatically' || fnt === 'Need medical help') return fnt;
+  if (fnt === 'Distress call' || fnt === 'Distress call automatically' || fnt === 'Need medical help' || fnt === 'Need technical support') return fnt;
   const sqMatch = packet.match(/\bsq(7700|7600|7500)\b/i);
   if (sqMatch) return SQUAWK_ALERTS[sqMatch[1]];
   if (/^[^>]+>EMERGENCY[,:]/i.test(packet)) return 'APRS Emergency';
@@ -820,8 +898,116 @@ function isEmergency(a) { return Boolean(parseEmergencyStatus(a.aprsPacket)); }
 function getDisplayStatus(a) { return parseEmergencyStatus(a.aprsPacket) || parseFanetStatus(a.aprsPacket); }
 function statusColor(a, status) {
   if (isEmergency(a)) return 'var(--red)';
-  if (status === 'Need technical support' || status === 'Need a ride') return 'var(--yellow)';
+  if (status === 'Need technical support') return 'var(--yellow)';
   return 'var(--accent)';
+}
+
+function isInCurrentViewport(lat, lon) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  try {
+    return map.getBounds().contains([lat, lon]);
+  } catch (e) {
+    return false;
+  }
+}
+
+function describeAlertOutcome(item, nowMs) {
+  if (item.normalAfter) return 'Update: Seems back to normal';
+  const latestAgeSec = Math.max(0, Math.floor((nowMs - (item.latestTsMs || item.tsMs)) / 1000));
+  if (item.alertStillOn) {
+    return latestAgeSec < OFFLINE_THRESHOLD_SEC ? 'still live · alert on' : 'offline · alert still on';
+  }
+  return latestAgeSec >= OFFLINE_THRESHOLD_SEC ? 'offline' : '';
+}
+
+function record24hAlerts(list, nowMs) {
+  let changed = false;
+  for (const [key, item] of alerts24hHistory.entries()) {
+    if ((nowMs - item.tsMs) > ALERT_24H_TTL_MS || /^need a ride/i.test(String(item.status))) {
+      alerts24hHistory.delete(key);
+      changed = true;
+    }
+  }
+  for (const a of list) {
+    const emergText = parseEmergencyStatus(a.aprsPacket);
+    if (!emergText || /^need a ride/i.test(emergText)) continue;
+    const prev = alerts24hHistory.get(a.address);
+    const nextTs = Math.max(a.receivedAtMs || nowMs, prev ? prev.tsMs : 0);
+    const nextLatestTs = Math.max(a.receivedAtMs || nowMs, prev ? (prev.latestTsMs || 0) : 0);
+    const nextLat = Number.isFinite(a.lat) ? a.lat : (prev ? prev.lat : null);
+    const nextLon = Number.isFinite(a.lon) ? a.lon : (prev ? prev.lon : null);
+    if (!prev || prev.status !== emergText || prev.tsMs !== nextTs || prev.latestTsMs !== nextLatestTs) {
+      alerts24hHistory.set(a.address, {
+        address: a.address,
+        name: displayName(a),
+        status: emergText,
+        lastStatus: emergText,
+        lat: nextLat,
+        lon: nextLon,
+        raw: a.aprsPacket || (prev ? prev.raw : ''),
+        tsMs: nextTs,
+        latestTsMs: nextLatestTs,
+        normalAfter: false,
+        alertStillOn: true
+      });
+      changed = true;
+    }
+  }
+  if (changed) save24hAlerts(nowMs);
+}
+
+function renderAlertRowsHtml(items, nowMs) {
+  return items.slice(0, 6).map(it => {
+    const ageSec = Math.max(0, Math.floor((nowMs - it.tsMs) / 1000));
+    const outcome = describeAlertOutcome(it, nowMs);
+    const outcomePart = outcome ? ` · ${outcome}` : '';
+    return `<button type="button" class="alerts-24h-item" data-alert-addr="${esc(it.address)}" title="${esc(`${it.name} — ${it.status}${outcomePart}`)}">
+      <span class="alerts-24h-main">
+        <span class="alerts-24h-title"><b>${esc(it.name)}</b></span>
+        <span class="alerts-24h-detail">${esc(it.status)}${outcomePart ? ` · <span style="color:var(--yellow)">${esc(outcome)}</span>` : ''}</span>
+      </span>
+      <span class="alerts-24h-age">${esc(fmtAge(ageSec))}</span>
+    </button>`;
+  }).join('');
+}
+
+function render24hAlertsSummary(nowMs) {
+  const box = $('alerts24hSummary');
+  for (const [key, item] of alerts24hHistory.entries()) {
+    if ((nowMs - item.tsMs) > ALERT_24H_TTL_MS || /^need a ride/i.test(String(item.status))) {
+      alerts24hHistory.delete(key);
+    }
+  }
+  const allItems = [...alerts24hHistory.values()].sort((a, b) => b.tsMs - a.tsMs);
+  const inView = allItems.filter(it => isInCurrentViewport(it.lat, it.lon));
+  const outOfView = allItems.filter(it => !isInCurrentViewport(it.lat, it.lon));
+
+  if (!inView.length && !outOfView.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+
+  const sections = [];
+  if (inView.length) {
+    sections.push(`
+      <div class="alerts-24h-sub">
+        <div class="alerts-24h-head"><span>🚨 In Viewport (24h)</span><span class="alerts-24h-count">${inView.length}</span></div>
+        <div class="alerts-24h-list">${renderAlertRowsHtml(inView, nowMs)}</div>
+      </div>
+    `);
+  }
+  if (outOfView.length) {
+    sections.push(`
+      <div class="alerts-24h-sub">
+        <div class="alerts-24h-head"><span>🌐 Global (24h)</span><span class="alerts-24h-count">${outOfView.length}</span></div>
+        <div class="alerts-24h-list">${renderAlertRowsHtml(outOfView, nowMs)}</div>
+      </div>
+    `);
+  }
+
+  box.hidden = false;
+  box.innerHTML = sections.join('');
 }
 
 function formatWeatherHtml(wx, compact = false) {
@@ -1028,6 +1214,7 @@ function rebuildAircraftArray() {
     }
   }
 
+  record24hAlerts(aircraft, now);
   checkPinnedNotifications();
 }
 
@@ -1242,6 +1429,8 @@ function render() {
   const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
 
+  render24hAlertsSummary(now);
+
   const emergencies = visible.filter(isEmergency);
   if (emergencies.length > 0) {
     const first = emergencies[0];
@@ -1352,6 +1541,13 @@ function render() {
   }
 }
 
+$('alerts24hSummary').addEventListener('click', e => {
+  const btn = e.target.closest('[data-alert-addr]');
+  if (!btn) return;
+  const addr = btn.dataset.alertAddr;
+  if (addr) jumpToAlertAddress(addr);
+});
+
 $('aircraftList').addEventListener('click', e => {
   const pinBtn = e.target.closest('.pin-btn');
   if (pinBtn) {
@@ -1452,6 +1648,8 @@ async function fetchLive(force = false) {
     }
 
     if (payload.server_time) serverClockOffsetMs = (Number(payload.server_time) * 1000) - Date.now();
+    const nowTick = serverNow();
+
     if (payload.names && typeof payload.names === 'object') {
       for (const [id, name] of Object.entries(payload.names)) nameCache.set(id, name);
     }
@@ -1461,6 +1659,30 @@ async function fetchLive(force = false) {
     if (payload.station_stats && typeof payload.station_stats === 'object') {
       stationStatsCache.clear();
       for (const [id, st] of Object.entries(payload.station_stats)) stationStatsCache.set(id.toLowerCase(), st);
+    }
+    if (Array.isArray(payload.alerts_24h)) {
+      alerts24hHistory.clear();
+      for (const al of payload.alerts_24h) {
+        if (al && al.address && al.status && al.ts && !/^need a ride/i.test(String(al.status))) {
+          const addrKey = String(al.address).toLowerCase();
+          const latVal = Number.isFinite(Number(al.lat)) ? Number(al.lat) : null;
+          const lonVal = Number.isFinite(Number(al.lon)) ? Number(al.lon) : null;
+          alerts24hHistory.set(addrKey, {
+            address: addrKey,
+            name: String(al.name || al.address).toUpperCase(),
+            status: String(al.status),
+            lastStatus: String(al.last_status || al.status),
+            lat: latVal,
+            lon: lonVal,
+            raw: String(al.raw || ''),
+            tsMs: Number(al.ts) * 1000,
+            latestTsMs: Number.isFinite(Number(al.latest_ts)) ? Number(al.latest_ts) * 1000 : Number(al.ts) * 1000,
+            normalAfter: Boolean(al.normal_after),
+            alertStillOn: Boolean(al.alert_still_on)
+          });
+        }
+      }
+      save24hAlerts(nowTick);
     }
 
     const incoming = payload.packets && typeof payload.packets === 'object' ? payload.packets : {};
@@ -1512,7 +1734,7 @@ async function fetchLive(force = false) {
     }
 
     const updatedMs = (Number(payload.updated) || 0) * 1000;
-    collectorPaused = !updatedMs || (serverNow() - updatedMs) > 120000;
+    collectorPaused = !updatedMs || (nowTick - updatedMs) > 120000;
 
     rebuildAircraftArray();
     render();
@@ -1601,6 +1823,7 @@ function parseOpenAirToGeoJson(text) {
 let moveTimer = null;
 map.on('moveend', () => {
   updateUrlHash();
+  render24hAlertsSummary(serverNow());
   clearTimeout(moveTimer);
   moveTimer = setTimeout(() => {
     if (replayActive) loadReplaySlice();
@@ -1708,7 +1931,7 @@ document.addEventListener('keydown', event => {
 
 $('emergencyJump').addEventListener('click', () => {
   const addr = $('emergencyJump').dataset.addr;
-  if (addr) toggleSelection(addr, true);
+  if (addr) jumpToAlertAddress(addr);
 });
 
 $('toggleTrackMode').addEventListener('click', () => {
@@ -1803,6 +2026,7 @@ $('locate').addEventListener('click', () => {
   );
 });
 
+render24hAlertsSummary(serverNow());
 updateBottomScale();
 fetchLive(true);
 setInterval(() => fetchLive(false), 5000);
@@ -1814,5 +2038,6 @@ setInterval(() => {
     const ts = Number(el.dataset.ts);
     if (ts) el.textContent = fmtAge(Math.max(0, Math.floor((now - ts) / 1000)));
   });
+  if (!$('alerts24hSummary').hidden) render24hAlertsSummary(now);
 }, 1000);
 })();

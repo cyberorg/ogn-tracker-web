@@ -7,7 +7,7 @@
 <title>OGN Glider Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261121">
 </head>
 <body>
 <div class="app">
@@ -114,6 +114,7 @@
       <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
     </div>
     <div class="section-head"><h2>Aircrafts/Stations</h2><span class="muted" id="listCount">0</span></div>
+    <div id="alerts24hSummary" class="alerts-24h" aria-label="Alerts in the last 24 hours" hidden></div>
     <div class="aircraft-list" id="aircraftList"><div class="empty">Waiting for live data...</div></div>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
@@ -123,6 +124,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=20261121"></script>
 </body>
 </html>

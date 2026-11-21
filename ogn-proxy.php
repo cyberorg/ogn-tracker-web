@@ -109,6 +109,63 @@ function expand_station_alias_set(array $aliasGraph, string $key): array {
     return array_keys($visited);
 }
 
+function format_packet_status(string $line, string $fallback = 'Normal'): string {
+    static $fanetMap = [
+        '0' => 'Other',
+        '1' => 'Airborne',
+        '2' => 'Vehicle',
+        '3' => 'Bike',
+        '4' => 'Boot',
+        '8' => 'Need a ride',
+        '9' => 'Landed well',
+        'c' => 'Need technical support',
+        'd' => 'Need medical help',
+        'e' => 'Distress call',
+        'f' => 'Distress call automatically',
+    ];
+    if (preg_match('/\bFNT([17])([0-9a-f])\b/i', $line, $fm)) {
+        if ($fm[1] === '1') return 'Airborne';
+        $hex = strtolower($fm[2]);
+        if (isset($fanetMap[$hex])) {
+            $label = $fanetMap[$hex];
+            if (in_array($hex, ['c', 'd', 'e', 'f'], true)) {
+                $colonPos = strpos($line, ':');
+                if ($colonPos !== false) {
+                    $tail = preg_replace('/\bFNT[0-9a-f]{2}\b/i', '', substr($line, $colonPos + 1));
+                    $tail = trim(preg_replace('/\s+/', ' ', (string)$tail));
+                    if ($tail !== '' && !preg_match('/^[\d.NSWE\s\/+-]+$/', $tail)) {
+                        $label .= ': ' . substr($tail, 0, 48);
+                    }
+                }
+            }
+            return $label;
+        }
+    }
+    if (preg_match('/\bsq(7700|7600|7500)\b/i', $line, $sm)) {
+        $sqMap = [
+            '7700' => 'Squawk 7700 (Emergency)',
+            '7600' => 'Squawk 7600 (Radio Failure)',
+            '7500' => 'Squawk 7500 (Hijack)',
+        ];
+        return $sqMap[$sm[1]];
+    }
+    if (preg_match('/^[^>]+>EMERGENCY[,:]/i', $line)) {
+        $colonPos = strpos($line, ':');
+        $detail = $colonPos !== false ? trim(substr($line, $colonPos + 1)) : '';
+        return $detail !== '' ? 'APRS Emergency: ' . substr($detail, 0, 48) : 'APRS Emergency';
+    }
+    $colonPos = strpos($line, ':');
+    if ($colonPos !== false) {
+        $payload = trim(substr($line, $colonPos + 1));
+        if (preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $payload, $km)) {
+            $tag = strtoupper($km[1]);
+            $note = trim(preg_replace('/\b(MAYDAY|SOS|EMERGENCY)\b[:\s-]*/i', '', $payload));
+            return $note !== '' ? "Alert ({$tag}): " . substr($note, 0, 44) : "Alert ({$tag})";
+        }
+    }
+    return $fallback;
+}
+
 // --- 1. Track Endpoint ---
 if (isset($_GET['track']) && $_GET['track'] === '1') {
     $id = strtolower(trim((string)($_GET['id'] ?? '')));
@@ -395,6 +452,7 @@ if (!is_file($dbFile)) {
         'names'           => new stdClass(),
         'ddb'             => new stdClass(),
         'station_stats'   => new stdClass(),
+        'alerts_24h'      => [],
     ]);
     exit;
 }
@@ -403,6 +461,7 @@ try {
     $pdo = open_db($dbFile);
     $now = time();
     $cutoff = $now - $window;
+    $cutoff24 = $now - 86400;
     $wxCutoff = $now - max($window, 1800);
     $params = [':south' => $south, ':north' => $north, ':cutoff' => $cutoff];
 
@@ -506,6 +565,127 @@ try {
         }
     }
 
+    // 24-hour alerts (excluding routine 'Need a ride' / FNT78) with alert reason, last-seen coords/time, and post-alert state
+    $alerts24h = [];
+    $alertsCacheKey = 'alerts24h_v7';
+    $alertsCached = cache_get($cacheDir, $alertsCacheKey, 10);
+    if ($alertsCached !== null) {
+        $decodedAlerts = json_decode($alertsCached, true);
+        if (is_array($decodedAlerts)) {
+            $alerts24h = $decodedAlerts;
+        }
+    } else {
+        try {
+            $byAddr = [];
+            $hasAlertsTable = (bool)$pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alerts'")->fetchColumn();
+            if ($hasAlertsTable) {
+                $stmtAl = $pdo->prepare("
+                    SELECT al.id, al.status, al.lat, al.lon, al.raw, al.last_ts,
+                           a.lat AS latest_lat, a.lon AS latest_lon,
+                           a.timestamp AS latest_ts, a.is_emergency AS latest_emerg, a.raw AS latest_raw,
+                           n.name, d.callsign, d.registration
+                    FROM alerts al
+                    LEFT JOIN aircraft a ON al.id = a.id
+                    LEFT JOIN names n ON al.id = n.id
+                    LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+                    WHERE al.last_ts >= :cutoff24
+                      AND lower(al.status) NOT LIKE 'need a ride%'
+                    ORDER BY al.last_ts DESC
+                    LIMIT 100
+                ");
+                $stmtAl->execute([':cutoff24' => $cutoff24]);
+                while ($ar = $stmtAl->fetch(PDO::FETCH_ASSOC)) {
+                    $addr = strtolower((string)$ar['id']);
+                    $alertTs = (int)$ar['last_ts'];
+                    $alertRaw = (string)$ar['raw'];
+                    $latestTs = $ar['latest_ts'] !== null ? (int)$ar['latest_ts'] : $alertTs;
+                    $latestRaw = (string)($ar['latest_raw'] ?? $alertRaw);
+                    $latestEmerg = (int)($ar['latest_emerg'] ?? 0) === 1;
+                    $latestHasAlert = $latestEmerg
+                        || (bool)preg_match('/\bFNT7[cdef]\b/i', $latestRaw)
+                        || (bool)preg_match('/\bsq(7700|7600|7500)\b/i', $latestRaw)
+                        || (bool)preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $latestRaw);
+                    $subsequentNormal = ($latestTs > $alertTs) && !$latestHasAlert;
+                    $stillAlertOnLast = !$subsequentNormal && $latestHasAlert;
+
+                    $storedStatus = trim((string)$ar['status']);
+                    $decodedAlertStatus = format_packet_status($alertRaw, $storedStatus !== '' ? $storedStatus : 'Alert');
+                    if (($storedStatus === '' || $storedStatus === 'Alert') && $decodedAlertStatus !== 'Alert') {
+                        $storedStatus = $decodedAlertStatus;
+                    }
+                    $lastStatus = $subsequentNormal
+                        ? format_packet_status($latestRaw, 'Normal packet')
+                        : format_packet_status($latestRaw, $storedStatus);
+
+                    $lastLat = $ar['latest_lat'] !== null ? (float)$ar['latest_lat'] : ($ar['lat'] !== null ? (float)$ar['lat'] : null);
+                    $lastLon = $ar['latest_lon'] !== null ? (float)$ar['latest_lon'] : ($ar['lon'] !== null ? (float)$ar['lon'] : null);
+
+                    $label = $ar['name'] ?: ($ar['callsign'] ?: ($ar['registration'] ?: strtoupper((string)$ar['id'])));
+                    $byAddr[$addr] = [
+                        'address'        => $addr,
+                        'name'           => $label,
+                        'status'         => $storedStatus,
+                        'last_status'    => $lastStatus,
+                        'lat'            => $lastLat,
+                        'lon'            => $lastLon,
+                        'raw'            => $latestRaw !== '' ? $latestRaw : $alertRaw,
+                        'ts'             => $alertTs,
+                        'latest_ts'      => $latestTs,
+                        'normal_after'   => $subsequentNormal,
+                        'alert_still_on' => $stillAlertOnLast,
+                    ];
+                }
+            }
+
+            $stmtA24 = $pdo->prepare("
+                SELECT a.id, a.lat, a.lon, a.raw, a.timestamp, a.is_emergency, n.name, d.callsign, d.registration
+                FROM aircraft a
+                LEFT JOIN names n ON a.id = n.id
+                LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+                WHERE a.timestamp >= :cutoff24
+                  AND (
+                    a.is_emergency = 1
+                    OR lower(a.raw) LIKE '%fnt7c%'
+                    OR lower(a.raw) LIKE '%fnt7d%'
+                    OR lower(a.raw) LIKE '%fnt7e%'
+                    OR lower(a.raw) LIKE '%fnt7f%'
+                  )
+                ORDER BY a.timestamp DESC
+                LIMIT 100
+            ");
+            $stmtA24->execute([':cutoff24' => $cutoff24]);
+            while ($ar = $stmtA24->fetch(PDO::FETCH_ASSOC)) {
+                $addr = strtolower((string)$ar['id']);
+                $ts = (int)$ar['timestamp'];
+                if (isset($byAddr[$addr]) && $byAddr[$addr]['ts'] >= $ts) continue;
+                $raw = (string)$ar['raw'];
+                $status = format_packet_status($raw, 'Alert');
+                $label = $ar['name'] ?: ($ar['callsign'] ?: ($ar['registration'] ?: strtoupper((string)$ar['id'])));
+                $byAddr[$addr] = [
+                    'address'        => $addr,
+                    'name'           => $label,
+                    'status'         => $status,
+                    'last_status'    => $status,
+                    'lat'            => (float)$ar['lat'],
+                    'lon'            => (float)$ar['lon'],
+                    'raw'            => $raw,
+                    'ts'             => $ts,
+                    'latest_ts'      => $ts,
+                    'normal_after'   => false,
+                    'alert_still_on' => true,
+                ];
+            }
+
+            $alerts24h = array_values($byAddr);
+            usort($alerts24h, static fn(array $a, array $b): int => $b['ts'] <=> $a['ts']);
+            $alertsJson = json_encode($alerts24h, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+            if ($alertsJson !== false) {
+                cache_set($cacheDir, $alertsCacheKey, $alertsJson);
+            }
+        } catch (Throwable $e) {
+        }
+    }
+
     // Telemetry / status packets
     $telemetry = [];
     try {
@@ -550,7 +730,6 @@ try {
     }
 
     // 24-hour farthest aircraft heard & unique aircraft heard count per ground station in viewport
-    // Aggregated across aliased station IDs and Name tags without double-counting aircraft
     $stationStats = [];
     try {
         $aliasGraph = [];
@@ -567,7 +746,7 @@ try {
             FROM station_heard
             WHERE last_ts >= :cutoff24
         ');
-        $stmtHc->execute([':cutoff24' => $now - 86400]);
+        $stmtHc->execute([':cutoff24' => $cutoff24]);
         while ($hc = $stmtHc->fetch(PDO::FETCH_ASSOC)) {
             $sid = strtolower(trim((string)$hc['station_id']));
             $aid = strtolower(trim((string)$hc['aircraft_id']));
@@ -588,7 +767,7 @@ try {
             return count($union);
         };
 
-        $stParams = [':south' => $south, ':north' => $north, ':cutoff24' => $now - 86400];
+        $stParams = [':south' => $south, ':north' => $north, ':cutoff24' => $cutoff24];
         if (!$fullWorld) {
             $stParams[':west'] = $w;
             $stParams[':east'] = $e;
@@ -638,6 +817,7 @@ try {
         'telemetry'       => $telemetry ?: new stdClass(),
         'station_weather' => $stationWeather ?: new stdClass(),
         'station_stats'   => $stationStats ?: new stdClass(),
+        'alerts_24h'      => $alerts24h,
     ];
     if ($includeMeta) {
         $out['names'] = $names ?: new stdClass();
