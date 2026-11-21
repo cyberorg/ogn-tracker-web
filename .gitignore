@@ -1,0 +1,34 @@
+# SQLite database and journal/WAL files
+ogn-live.sqlite
+ogn-live.sqlite-wal
+ogn-live.sqlite-shm
+ogn-live.sqlite-journal
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Collector lock and runtime files
+ogn-collector.lock
+*.lock
+*.pid
+*.log
+
+# Caches and temporary files
+ogn_tracker_cache/
+cache/
+*.cache
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# OS and editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace

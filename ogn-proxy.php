@@ -166,6 +166,14 @@ function format_packet_status(string $line, string $fallback = 'Normal'): string
     return $fallback;
 }
 
+function extract_altitude_from_raw(string $raw): ?float
+{
+    if (preg_match('/\/A=(-?\d{6})/', $raw, $m)) {
+        return round((int)$m[1] * 0.3048, 1);
+    }
+    return null;
+}
+
 // --- 1. Track Endpoint ---
 if (isset($_GET['track']) && $_GET['track'] === '1') {
     $id = strtolower(trim((string)($_GET['id'] ?? '')));
@@ -570,7 +578,7 @@ try {
 
     // 24-hour alerts (excluding routine 'Need a ride' / FNT78) with alert reason, last-seen coords/time, and post-alert state
     $alerts24h = [];
-    $alertsCacheKey = 'alerts24h_v7';
+    $alertsCacheKey = 'alerts24h_v8';
     $alertsCached = cache_get($cacheDir, $alertsCacheKey, 10);
     if ($alertsCached !== null) {
         $decodedAlerts = json_decode($alertsCached, true);
@@ -583,7 +591,7 @@ try {
             $hasAlertsTable = (bool)$pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alerts'")->fetchColumn();
             if ($hasAlertsTable) {
                 $stmtAl = $pdo->prepare("
-                    SELECT al.id, al.status, al.lat, al.lon, al.raw, al.last_ts,
+                    SELECT al.id, al.status, al.lat, al.lon, al.alt, al.raw, al.last_ts,
                            a.lat AS latest_lat, a.lon AS latest_lon,
                            a.timestamp AS latest_ts, a.is_emergency AS latest_emerg, a.raw AS latest_raw,
                            n.name, d.callsign, d.registration
@@ -622,6 +630,10 @@ try {
 
                     $lastLat = $ar['latest_lat'] !== null ? (float)$ar['latest_lat'] : ($ar['lat'] !== null ? (float)$ar['lat'] : null);
                     $lastLon = $ar['latest_lon'] !== null ? (float)$ar['latest_lon'] : ($ar['lon'] !== null ? (float)$ar['lon'] : null);
+                    $alertAlt = isset($ar['alt']) && $ar['alt'] !== null ? (float)$ar['alt'] : null;
+                    $rawForAlt = $latestRaw !== '' ? $latestRaw : $alertRaw;
+                    if ($alertAlt === null) $alertAlt = extract_altitude_from_raw($rawForAlt);
+                    if ($alertAlt === null) $alertAlt = extract_altitude_from_raw($alertRaw);
 
                     $label = $ar['name'] ?: ($ar['callsign'] ?: ($ar['registration'] ?: strtoupper((string)$ar['id'])));
                     $byAddr[$addr] = [
@@ -631,7 +643,8 @@ try {
                         'last_status'    => $lastStatus,
                         'lat'            => $lastLat,
                         'lon'            => $lastLon,
-                        'raw'            => $latestRaw !== '' ? $latestRaw : $alertRaw,
+                        'alt'            => $alertAlt,
+                        'raw'            => $rawForAlt,
                         'ts'             => $alertTs,
                         'latest_ts'      => $latestTs,
                         'normal_after'   => $subsequentNormal,
@@ -671,6 +684,7 @@ try {
                     'last_status'    => $status,
                     'lat'            => (float)$ar['lat'],
                     'lon'            => (float)$ar['lon'],
+                    'alt'            => extract_altitude_from_raw($raw),
                     'raw'            => $raw,
                     'ts'             => $ts,
                     'latest_ts'      => $ts,

@@ -55,6 +55,7 @@ $pdo->exec('
         status TEXT NOT NULL,
         lat REAL,
         lon REAL,
+        alt REAL,
         raw TEXT NOT NULL,
         last_ts INTEGER NOT NULL,
         PRIMARY KEY (id, status)
@@ -135,6 +136,11 @@ $pdo->exec('CREATE INDEX IF NOT EXISTS idx_aircraft_emerg ON aircraft (timestamp
 $stationCols = array_column($pdo->query('PRAGMA table_info(stations)')->fetchAll(PDO::FETCH_ASSOC), 'name');
 if (!in_array('heard_24h', $stationCols, true)) {
     $pdo->exec('ALTER TABLE stations ADD COLUMN heard_24h INTEGER NOT NULL DEFAULT 0;');
+}
+
+$alertCols = array_column($pdo->query('PRAGMA table_info(alerts)')->fetchAll(PDO::FETCH_ASSOC), 'name');
+if (!in_array('alt', $alertCols, true)) {
+    $pdo->exec('ALTER TABLE alerts ADD COLUMN alt REAL;');
 }
 
 function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
@@ -463,11 +469,12 @@ $stmtUpsertPos = $pdo->prepare('
         is_emergency = excluded.is_emergency
 ');
 $stmtUpsertAlert = $pdo->prepare('
-    INSERT INTO alerts (id, status, lat, lon, raw, last_ts)
-    VALUES (:id, :status, :lat, :lon, :raw, :ts)
+    INSERT INTO alerts (id, status, lat, lon, alt, raw, last_ts)
+    VALUES (:id, :status, :lat, :lon, :alt, :raw, :ts)
     ON CONFLICT(id, status) DO UPDATE SET
         lat = COALESCE(excluded.lat, alerts.lat),
         lon = COALESCE(excluded.lon, alerts.lon),
+        alt = COALESCE(excluded.alt, alerts.alt),
         raw = excluded.raw,
         last_ts = excluded.last_ts
 ');
@@ -596,6 +603,7 @@ function flush_batch(
                 ':status' => $al['status'],
                 ':lat'    => $al['lat'],
                 ':lon'    => $al['lon'],
+                ':alt'    => $al['alt'],
                 ':raw'    => $al['raw'],
                 ':ts'     => $al['ts'],
             ]);
@@ -840,7 +848,16 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     continue;
                 }
 
-                $lastKnownPos[$id] = ['lat' => $lat, 'lon' => $lon];
+                $prevKnown = $lastKnownPos[$id] ?? null;
+                $alertAlt = $alt;
+                if ($alertAlt === null && is_array($prevKnown) && array_key_exists('alt', $prevKnown) && $prevKnown['alt'] !== null) {
+                    $prevLat = (float)($prevKnown['lat'] ?? 0.0);
+                    $prevLon = (float)($prevKnown['lon'] ?? 0.0);
+                    $distM = haversine_km($prevLat, $prevLon, $lat, $lon) * 1000.0;
+                    if ($distM <= 20.0) $alertAlt = (float)$prevKnown['alt'];
+                }
+
+                $lastKnownPos[$id] = ['lat' => $lat, 'lon' => $lon, 'alt' => ($alt !== null ? $alt : ($prevKnown['alt'] ?? null))];
                 $posBatch[$id] = [
                     'ddb_id'       => $ddbId,
                     'lat'          => $lat,
@@ -856,6 +873,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         'status' => $alertStatus,
                         'lat'    => $lat,
                         'lon'    => $lon,
+                        'alt'    => $alertAlt,
                         'raw'    => $line,
                         'ts'     => $now,
                     ];

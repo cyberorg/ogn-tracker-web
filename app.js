@@ -714,17 +714,46 @@ function jumpToAlertAddress(address) {
     const exactTime = new Date(lastSeenMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const outcome = describeAlertOutcome(item, nowMs);
     const lastStatus = item.lastStatus || item.status;
+    const liveA = aircraft.find(x => x.address === key);
+    let altM = Number.isFinite(item.alt) ? item.alt : liveA?.altitude;
+    if (altM == null && item.raw) {
+      const altMatch = item.raw.match(/\/A=(-?\d{6})/);
+      if (altMatch) altM = Math.round(parseInt(altMatch[1], 10) * 0.3048);
+    }
+    if (altM == null) {
+      const lastAlt = lastAltCache.get(key);
+      if (lastAlt) {
+        const d = distMeters(lastAlt.lat, lastAlt.lon, item.lat, item.lon);
+        if (d <= 20) altM = lastAlt.alt;
+      }
+    }
+    const latStr = item.lat.toFixed(6), lonStr = item.lon.toFixed(6);
+    const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
+    const posText = altM != null ? `${latStr},${lonStr},${fmtAlt(altM)}` : `${latStr},${lonStr}`;
+    const shareUrl = `${location.href.replace(/#.*/, '')}#${item.lat.toFixed(4)},${item.lon.toFixed(4)},${Math.max(map.getZoom(), 12)},${encodeURIComponent(item.address)}`;
+    const sarTxt = [
+      `SAR Info: ${item.name}`,
+      `Status: ${item.status || 'Unknown'}`,
+      `Coords: ${latStr}, ${lonStr}`,
+      `Alt: ${altM != null ? fmtAlt(altM) : 'N/A'}`,
+      `Last heard: ${lastSeenAge}`,
+      `Map: ${mapsUrl}`,
+      `Tracker: ${shareUrl}`
+    ].join('\n');
     map.setView([item.lat, item.lon], Math.max(map.getZoom(), 12));
-    L.popup({ maxWidth: 340 })
+    L.popup({ maxWidth: 360 })
       .setLatLng([item.lat, item.lon])
       .setContent(`
         <div class="popup-title">${esc(item.name)}</div>
+        <div class="popup-actions">
+          <button type="button" data-act="alert-sar" data-sar="${esc(sarTxt)}">📋 Copy SAR</button>
+        </div>
         <div class="popup-grid" style="margin-top:6px">
           <div class="popup-value"><span>Alert</span><br><b style="color:var(--red)">${esc(item.status)}</b></div>
           <div class="popup-value"><span>Last status</span><br><b>${esc(lastStatus)}</b></div>
           <div class="popup-value" style="grid-column:1/-1"><span>Last seen</span><br><b>${esc(`${exactTime} (${lastSeenAge})`)}</b></div>
           ${outcome ? `<div class="popup-value" style="grid-column:1/-1"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
-          <div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><b>${esc(`${item.lat.toFixed(6)}, ${item.lon.toFixed(6)}`)}</b></div>
+          <div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(posText)}</a></div>
         </div>
         ${item.raw ? `<div class="popup-section">Last Packet</div><div class="popup-raw">${esc(item.raw)}</div>` : ''}
       `)
@@ -1064,6 +1093,7 @@ function record24hAlerts(list, nowMs) {
         lastStatus: emergText,
         lat: nextLat,
         lon: nextLon,
+        alt: Number.isFinite(a.altitude) ? a.altitude : (prev ? prev.alt : null),
         raw: a.aprsPacket || (prev ? prev.raw : ''),
         tsMs: nextTs,
         latestTsMs: nextLatestTs,
@@ -1257,7 +1287,10 @@ function rebuildAircraftArray() {
     if (a.altitude != null) lastAltCache.set(a.address, { lat: a.lat, lon: a.lon, alt: a.altitude });
     else {
       const lastAlt = lastAltCache.get(a.address);
-      if (lastAlt && Math.abs(a.lat - lastAlt.lat) < 0.0005 && Math.abs(a.lon - lastAlt.lon) < 0.0005) a.altitude = lastAlt.alt;
+      if (lastAlt) {
+        const d = distMeters(lastAlt.lat, lastAlt.lon, a.lat, a.lon);
+        if (d <= 20) a.altitude = lastAlt.alt;
+      }
     }
 
     if (nameCache.has(a.address)) a.streamName = nameCache.get(a.address);
@@ -1361,6 +1394,24 @@ function formatSnrHtml(snr) {
   return `${snr.toFixed(1)} dB <span class="snr-badge ${cls}">${label}</span>`;
 }
 
+function centerPopupInView(marker) {
+  if (!marker || !marker.isPopupOpen()) return;
+  const popup = marker.getPopup();
+  const popupEl = popup?.getElement();
+  if (!popupEl) return;
+  const mapEl = $('map');
+  const mapRect = mapEl.getBoundingClientRect();
+  const popupRect = popupEl.getBoundingClientRect();
+  const popupCenterX = popupRect.left - mapRect.left + popupRect.width / 2;
+  const popupCenterY = popupRect.top - mapRect.top + popupRect.height / 2;
+  const targetX = mapRect.width / 2;
+  const targetY = mapRect.height / 2;
+  const dx = popupCenterX - targetX;
+  const dy = popupCenterY - targetY;
+  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+  map.panBy([dx, dy], { animate: true });
+}
+
 function signalBarsHtml(snr) {
   if (snr == null) return '';
   let bars = 0, cls = 'sig-weak';
@@ -1429,13 +1480,14 @@ function popup(a) {
       primaryFields.push(['Aircraft heard', String(rxStats.count)]);
       if (rxStats.best24h) {
         const ageSec = Math.max(0, Math.floor((serverNow() / 1000) - rxStats.best24h.ts));
-        secondaryFields.push(['Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(ageSec)})`]);
+        primaryFields.push(['Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(ageSec)})`]);
       }
     }
   }
 
   const isFol = followedAddress === a.address;
   const isTracked = selectedTracks.has(a.address);
+  const isStation = getResolvedType(a) === 15;
   const detailRows = [
     popupRow('Over-the-air Name', displayStreamName(a)),
     popupRow('Callsign / CN', a.callsign),
@@ -1448,15 +1500,17 @@ function popup(a) {
   const detailsBlock = (detailRows.replace(/\s+/g, '') || rawSection)
     ? `<details class="popup-details" data-popup-details="1"><summary>Details & raw packet</summary><div class="popup-grid" style="margin-top:6px">${detailRows}</div>${rawSection}</details>`
     : '';
-
-  return `<div class="popup-title">${esc(displayName(a))}</div>
-    <div class="popup-actions">
-      <button type="button" data-act="track" data-addr="${esc(a.address)}">${isTracked ? 'Hide track' : 'Show track'}</button>
+  const actionButtons = isStation
+    ? `<button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Copy link</button>`
+    : `<button type="button" data-act="track" data-addr="${esc(a.address)}">${isTracked ? 'Hide track' : 'Show track'}</button>
       <button type="button" data-act="follow" data-addr="${esc(a.address)}">${isFol ? 'Unfollow' : '◎ Follow'}</button>
       <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 Copy SAR</button>
       <button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Copy link</button>
+      <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>`;
 
-      <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>
+  return `<div class="popup-title">${esc(displayName(a))}</div>
+    <div class="popup-actions">
+      ${actionButtons}
     </div>
     <div class="popup-section">Identification and Status</div>
     <div class="popup-grid">
@@ -1652,8 +1706,9 @@ function render() {
           d.removeEventListener('toggle', d.onTogglePopupDetails);
           d.addEventListener('toggle', d.onTogglePopupDetails);
         }
+        requestAnimationFrame(() => centerPopupInView(m));
       });
-      m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: true, keepInView: true });
+      m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: false, keepInView: false });
       markers.set(key, m);
       if (emerg) emergencyGroup.addLayer(m);
       else clusterGroup.addLayer(m);
@@ -1850,6 +1905,12 @@ document.addEventListener('click', e => {
   const btn = e.target.closest('.popup-actions button');
   if (!btn) return;
   const addr = btn.dataset.addr, act = btn.dataset.act;
+  if (act === 'alert-sar') {
+    const txt = btn.dataset.sar || '';
+    if (!txt) return;
+    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 Copy SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
+    return;
+  }
   const a = aircraft.find(x => x.address === addr);
   if (act === 'track') {
     if (!addr) return;
@@ -1998,6 +2059,7 @@ async function fetchLive(force = false) {
             lastStatus: String(al.last_status || al.status),
             lat: latVal,
             lon: lonVal,
+            alt: Number.isFinite(Number(al.alt)) ? Number(al.alt) : null,
             raw: String(al.raw || ''),
             tsMs: Number(al.ts) * 1000,
             latestTsMs: Number.isFinite(Number(al.latest_ts)) ? Number(al.latest_ts) * 1000 : Number(al.ts) * 1000,
