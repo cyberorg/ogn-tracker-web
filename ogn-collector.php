@@ -215,7 +215,7 @@ function sanitize_weather_array(array $wx): ?array {
         $humidity = null;
     }
 
-    $hasNonTempWx = ($dir !== null || $spdKmh !== null || $gustKmh !== null || pressure !== null || humidity !== null);
+    $hasNonTempWx = ($dir !== null || $spdKmh !== null || $gustKmh !== null || $pressure !== null || $humidity !== null);
     if (!$hasNonTempWx) {
         return null;
     }
