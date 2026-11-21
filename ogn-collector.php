@@ -156,7 +156,8 @@ function sanitize_weather_array(array $wx): ?array {
         $humidity = null;
     }
 
-    if ($dir === null && $spdKmh === null && $gustKmh === null && $tempC === null && $pressure === null && $humidity === null) {
+    $hasNonTempWx = ($dir !== null || $spdKmh !== null || $gustKmh !== null || $pressure !== null || $humidity !== null);
+    if (!$hasNonTempWx) {
         return null;
     }
 
@@ -228,7 +229,35 @@ function parse_aprs_weather_fields(string $line): ?array {
     ]);
 }
 
+function register_station_alias(array &$stationAliases, string $a, string $b): void {
+    $ka = strtolower(trim($a));
+    $kb = strtolower(trim($b));
+    if ($ka === '' || $kb === '' || $ka === $kb) return;
+    if (!isset($stationAliases[$ka])) $stationAliases[$ka] = [];
+    if (!isset($stationAliases[$kb])) $stationAliases[$kb] = [];
+    $stationAliases[$ka][$kb] = true;
+    $stationAliases[$kb][$ka] = true;
+}
+
+function expand_station_keys(array $stationAliases, string $key): array {
+    $root = strtolower(trim($key));
+    if ($root === '') return [];
+    $visited = [$root => true];
+    $queue   = [$root];
+    while ($queue) {
+        $curr = array_shift($queue);
+        foreach ($stationAliases[$curr] ?? [] as $alias => $_) {
+            if (!isset($visited[$alias])) {
+                $visited[$alias] = true;
+                $queue[] = $alias;
+            }
+        }
+    }
+    return array_keys($visited);
+}
+
 $stationState = [];
+$stationAliases = [];
 $cutoff24h = time() - EXPIRE_SECONDS;
 foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts FROM stations') as $row) {
     $validRecord = ((int)$row['farthest_ts'] >= $cutoff24h);
@@ -239,6 +268,11 @@ foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts FROM
         'farthest_id' => $validRecord ? (string)$row['farthest_id'] : '',
         'farthest_ts' => $validRecord ? (int)$row['farthest_ts'] : 0,
     ];
+}
+
+// Seed aliases from existing station names in SQLite
+foreach ($pdo->query('SELECT s.id, n.name FROM stations s INNER JOIN names n ON s.id = n.id WHERE n.name != ""') as $nrow) {
+    register_station_alias($stationAliases, (string)$nrow['id'], (string)$nrow['name']);
 }
 
 $stationWeatherState = [];
@@ -560,6 +594,11 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 $streamName = trim($nm[1]);
                 if ($streamName !== '') {
                     $nameBatch[$id] = $streamName;
+                    if ($ddbId !== '') {
+                        register_station_alias($stationAliases, $id, $ddbId);
+                        register_station_alias($stationAliases, $ddbId, $streamName);
+                    }
+                    register_station_alias($stationAliases, $id, $streamName);
                 }
             }
 
@@ -641,6 +680,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     $stationKeys = [$id];
                     if ($streamName !== '') {
                         $stationKeys[] = strtolower($streamName);
+                        register_station_alias($stationAliases, $id, $streamName);
                     }
                     foreach ($stationKeys as $sk) {
                         $existing = $stationState[$sk] ?? ['max_km' => 0.0, 'farthest_id' => '', 'farthest_ts' => 0];
@@ -657,7 +697,9 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     if (preg_match('/q[A-Z]{2},([^:,]+)[:,]/', $line, $rxm)) {
                         $rxKey = strtolower(trim($rxm[1]));
                         if ($rxKey !== '') {
-                            $heardBatch[$rxKey . '|' . $id] = ['sid' => $rxKey, 'aid' => $id, 'ts' => $now];
+                            foreach (expand_station_keys($stationAliases, $rxKey) as $aliasKey) {
+                                $heardBatch[$aliasKey . '|' . $id] = ['sid' => $aliasKey, 'aid' => $id, 'ts' => $now];
+                            }
                         }
                         if (isset($stationState[$rxKey])) {
                             $st = $stationState[$rxKey];

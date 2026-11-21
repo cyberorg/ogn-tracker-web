@@ -20,6 +20,7 @@ let alertsEnabled = false;
 let savedTypes = ['all'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
+let collectorPaused = false;
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -34,11 +35,17 @@ try {
 } catch (e) {}
 
 function getCurrentTypesArray() {
-  const boxes = [...$('type').querySelectorAll('input[type="checkbox"]')];
+  const boxes = [...$('type').queryAll ? $('type').queryAll('input[type="checkbox"]') : $('type').querySelectorAll('input[type="checkbox"]')];
   const allBox = boxes.find(b => b.value === 'all');
   if (allBox && allBox.checked) return ['all'];
   const chosen = boxes.filter(b => b.value !== 'all' && b.checked).map(b => b.value);
   return chosen.length > 0 ? chosen : ['all'];
+}
+
+function updateFilterBadge() {
+  const activeTypes = getCurrentTypesArray();
+  const hasCustomFilter = !activeTypes.includes('all') || $('markerWindow').value !== '900' || isImperialPreset();
+  $('mapFilterToggle').classList.toggle('has-badge', hasCustomFilter);
 }
 
 function saveMenuPrefs() {
@@ -54,6 +61,7 @@ function saveMenuPrefs() {
       trackWindow: $('trackWindow').value
     }));
   } catch (e) {}
+  updateFilterBadge();
 }
 
 function applySavedMenuPrefs() {
@@ -74,7 +82,8 @@ function applySavedMenuPrefs() {
   }
 
   $('btnNotify').classList.toggle('active', alertsEnabled);
-  $('btnNotify').textContent = alertsEnabled ? '🔔 Alerts: ON' : '🔔 Alerts: OFF';
+  $('btnNotify').textContent = alertsEnabled ? '🔔 ON' : '🔔 OFF';
+  updateFilterBadge();
 }
 
 function isMetricPreset() {
@@ -202,6 +211,7 @@ function syncUnitButtons() {
   $('unitSpeedBtn').textContent = `Wind: ${speedUnit === 'kt' ? 'kt' : 'km/h'}`;
   $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
   $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : 'm/s'}`;
+  updateFilterBadge();
   updateBottomScale();
 }
 
@@ -258,6 +268,7 @@ let wasDisconnected = false;
 let serverClockOffsetMs = 0;
 let userLocationMarker = null;
 let needMeta = true;
+let lastMetaBounds = null;
 const knownIds = new Set();
 
 let followedAddress = null;
@@ -289,6 +300,7 @@ let trackReqSeq = 0, colorSeq = 0;
 const ddbCache = new Map();
 const aprsCache = new Map();
 const telemetryCache = new Map();
+const parsedLineCache = new Map();
 const nameCache = new Map();
 const lastAltCache = new Map();
 const wxCache = new Map();
@@ -357,7 +369,7 @@ function redrawAllTracks() {
   }
 }
 
-function renderBarogram(address) {
+function renderBarogram(address, scrubIdx = null) {
   const entry = selectedTracks.get(address);
   if (!entry || !entry.points || entry.points.length < 2) {
     $('barogram').classList.remove('show');
@@ -383,9 +395,24 @@ function renderBarogram(address) {
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
 
-  $('baroTitle').textContent = `${a ? displayName(a) : address.toUpperCase()} · Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}`;
+  let scrubSvg = '';
+  let scrubSuffix = '';
+  if (scrubIdx != null && scrubIdx >= 0 && scrubIdx < pts.length) {
+    const sp = pts[scrubIdx];
+    const sx = (((sp[3] - t0) / spanT) * 460).toFixed(1);
+    const sy = (65 - (((sp[2] - minAlt) / spanAlt) * 58)).toFixed(1);
+    const timeStr = new Date(sp[3] * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    scrubSvg = `
+      <line x1="${sx}" y1="4" x2="${sx}" y2="68" stroke="#edf4f8" stroke-width="1" stroke-dasharray="2 2" opacity="0.75" />
+      <circle cx="${sx}" cy="${sy}" r="3.5" fill="${entry.color}" stroke="#101923" stroke-width="1.5" />
+    `;
+    scrubSuffix = ` · ${fmtAlt(sp[2])} @ ${timeStr}`;
+  }
+
+  $('baroTitle').textContent = `${a ? displayName(a) : address.toUpperCase()} · Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
   $('baroSvg').innerHTML = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
+    ${scrubSvg}
     <text x="4" y="12" fill="#9aabba" font-size="10">${esc(fmtAlt(maxAlt))}</text>
     <text x="4" y="66" fill="#9aabba" font-size="10">${esc(fmtAlt(minAlt))}</text>
   `;
@@ -393,6 +420,30 @@ function renderBarogram(address) {
   syncBottomBarOffset();
   updateUrlHash();
 }
+
+function scrubBarogramAtClientX(clientX) {
+  if (!activeBaroAddress) return;
+  const entry = selectedTracks.get(activeBaroAddress);
+  if (!entry || !entry.points) return;
+  const pts = entry.points.filter(p => p[2] != null);
+  if (pts.length < 2) return;
+  const rect = $('baroSvg').getBoundingClientRect();
+  if (rect.width <= 0) return;
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  const t0 = pts[0][3], t1 = pts[pts.length - 1][3];
+  const targetTs = t0 + ratio * Math.max(1, t1 - t0);
+  let bestIdx = 0, bestDiff = Math.abs(pts[0][3] - targetTs);
+  for (let i = 1; i < pts.length; i++) {
+    const diff = Math.abs(pts[i][3] - targetTs);
+    if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
+  }
+  renderBarogram(activeBaroAddress, bestIdx);
+}
+
+$('baroSvg').addEventListener('pointermove', e => scrubBarogramAtClientX(e.clientX));
+$('baroSvg').addEventListener('pointerleave', () => {
+  if (activeBaroAddress) renderBarogram(activeBaroAddress, null);
+});
 
 function removeTrack(address) {
   const entry = selectedTracks.get(address);
@@ -535,7 +586,8 @@ function sanitizeWeather(wx) {
   const rawHum = (wx.humidityPct != null && Number.isFinite(Number(wx.humidityPct))) ? Number(wx.humidityPct) : null;
   const humidityPct = (rawHum != null && rawHum >= 0 && rawHum <= 100) ? rawHum : null;
 
-  if (dir == null && spdKmh == null && gustKmh == null && tempC == null && pressureHpa == null && humidityPct == null) {
+  const hasNonTempWx = (dir != null || spdKmh != null || gustKmh != null || pressureHpa != null || humidityPct != null);
+  if (!hasNonTempWx) {
     return null;
   }
   return { dir, spdKmh, gustKmh, tempC, pressureHpa, humidityPct };
@@ -582,6 +634,21 @@ function parseAprsWeather(line) {
   }
 
   return sanitizeWeather({ dir, spdKmh, gustKmh, tempC, pressureHpa, humidityPct });
+}
+
+function parseAprsLineCached(line, timestampMs) {
+  const key = `${line}|${timestampMs}`;
+  if (parsedLineCache.has(key)) {
+    const cached = parsedLineCache.get(key);
+    return cached ? { ...cached, weather: cached.weather ? { ...cached.weather } : null } : null;
+  }
+  const parsed = parseAprsLine(line, timestampMs);
+  parsedLineCache.set(key, parsed);
+  if (parsedLineCache.size > 6000) {
+    const firstKey = parsedLineCache.keys().next().value;
+    parsedLineCache.delete(firstKey);
+  }
+  return parsed ? { ...parsed, weather: parsed.weather ? { ...parsed.weather } : null } : null;
 }
 
 function parseAprsLine(line, timestampMs) {
@@ -815,11 +882,14 @@ function checkPinnedNotifications() {
 }
 
 function getStationKeys(station) {
-  return new Set(
-    [station.id, station.address, station.liveLabel, station.streamName, station.callsign, displayName(station)]
-      .filter(Boolean)
-      .map(s => String(s).trim().toLowerCase())
-  );
+  const rawKeys = [station.id, station.address, station.liveLabel, station.streamName, station.callsign, displayName(station)]
+    .filter(Boolean)
+    .map(s => String(s).trim().toLowerCase());
+  const expanded = new Set(rawKeys);
+  for (const k of rawKeys) {
+    if (nameCache.has(k)) expanded.add(String(nameCache.get(k)).trim().toLowerCase());
+  }
+  return expanded;
 }
 
 function updateWeatherCache(keys, wx, tsMs) {
@@ -867,7 +937,7 @@ function rebuildAircraftArray() {
 
   for (const [id, cached] of aprsCache.entries()) {
     if (now - cached.timestamp > maxAgeMs) { aprsCache.delete(id); continue; }
-    const a = parseAprsLine(cached.raw, cached.timestamp);
+    const a = parseAprsLineCached(cached.raw, cached.timestamp);
     if (!a) continue;
     if (a.__telemetryOnly) {
       telemetryOnly.push(a);
@@ -914,7 +984,7 @@ function rebuildAircraftArray() {
 
   for (const [id, cached] of telemetryCache.entries()) {
     if (now - cached.timestamp > wxTtlMs) { telemetryCache.delete(id); continue; }
-    const tel = parseAprsLine(cached.raw, cached.timestamp);
+    const tel = parseAprsLineCached(cached.raw, cached.timestamp);
     if (tel && tel.__telemetryOnly) telemetryOnly.push(tel);
   }
 
@@ -963,7 +1033,7 @@ function rebuildAircraftArray() {
 
 function getStationReceptionStats(station) {
   const keys = getStationKeys(station);
-  if (keys.size === 0) return null;
+  if (keys.size === 0) return { count: 0, best24h: null };
   let heard24h = 0, best24h = null;
   for (const k of keys) {
     const rec = stationStatsCache.get(k);
@@ -1124,9 +1194,46 @@ function filtered() {
       (selectedTypes.has('para') && rType === 7) ||
       (selectedTypes.has('fanet') && isFanet(a) && rType !== 15) ||
       (selectedTypes.has('other') && rType !== 1 && rType !== 7 && rType !== 15) ||
-      (selectedTypes.has('station') && rType === 15);
+      (selectedTypes.has('station') && rType === 15) ||
+      (selectedTypes.has('wx') && Boolean(a.weather));
     return matches && typeMatch;
   });
+}
+
+function buildRowHtml(a, now) {
+  const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
+  const trackEntry = selectedTracks.get(a.address);
+  const isSelected = trackEntry ? ' selected' : '';
+  const isPinned = pinnedAircraft.has(a.address);
+  const pinnedClass = isPinned ? ' pinned' : '';
+  const emergClass = isEmergency(a) ? ' emergency' : '';
+  const rType = getResolvedType(a);
+  const statusText = getDisplayStatus(a);
+  const barColor = statusColor(a, statusText);
+
+  const wxCompactHtml = a.weather ? formatWeatherHtml(a.weather, true) : '';
+  const metrics = rType === 15
+    ? []
+    : [a.speed != null ? fmtWindSpeed(a.speed) : '', a.climb != null ? fmtClimb(a.climb) : ''].filter(Boolean);
+  const wxListHtml = wxCompactHtml ? `<span class="wx-line">💨 ${wxCompactHtml}</span>` : '';
+  const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
+  const statusHtml = statusText ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>` : '';
+  const trackDotHtml = trackEntry ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>` : '';
+
+  let rightColHtml = `${fmtAlt(a.altitude)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div>`;
+  let altClass = 'alt';
+  if (rType === 15) {
+    altClass = 'alt station-alt';
+    const rxStats = getStationReceptionStats(a);
+    const heardCount = rxStats ? rxStats.count : 0;
+    rightColHtml = `${esc(`24h · ${heardCount}`)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div>`;
+  }
+
+  return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
+    <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'}">📌</button></div>
+    <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
+    <div class="${altClass}">${rightColHtml}</div>
+  </div>`;
 }
 
 function render() {
@@ -1164,13 +1271,15 @@ function render() {
     if (!m) {
       if (isSpiderfied && !emerg) return;
       m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0 });
-      m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon;
+      m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a;
       m.on('click', () => toggleSelection(key, false));
-      m.bindPopup(popup(a), { maxWidth: 360, autoPan: true, keepInView: true });
+      m.on('popupopen', () => m.setPopupContent(popup(m._data)));
+      m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: true, keepInView: true });
       markers.set(key, m);
       if (emerg) emergencyGroup.addLayer(m);
       else clusterGroup.addLayer(m);
     } else {
+      m._data = a;
       const moved = m._trueLat !== a.lat || m._trueLon !== a.lon;
       if ((!isSpiderfied || m._isEmergency) && moved) {
         m.setLatLng([a.lat, a.lon]);
@@ -1195,7 +1304,6 @@ function render() {
         m.setIcon(markerIcon(a)); m.setZIndexOffset(emerg ? 1000 : 0); m._iconSig = iconSig;
       }
       if (m.isPopupOpen()) m.setPopupContent(popup(a));
-      else m.bindPopup(popup(a), { maxWidth: 360, autoPan: true, keepInView: true });
     }
 
     if (followedAddress === key) map.panTo([a.lat, a.lon], { animate: true });
@@ -1212,33 +1320,30 @@ function render() {
     return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   });
 
-  $('aircraftList').innerHTML = sorted.length ? sorted.map(a => {
-    const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
-    const trackEntry = selectedTracks.get(a.address);
-    const isSelected = trackEntry ? ' selected' : '';
-    const isPinned = pinnedAircraft.has(a.address);
-    const pinnedClass = isPinned ? ' pinned' : '';
-    const emergClass = isEmergency(a) ? ' emergency' : '';
-    const rType = getResolvedType(a);
-    const statusText = getDisplayStatus(a);
-    const barColor = statusColor(a, statusText);
+  const listEl = $('aircraftList');
+  if (!sorted.length) {
+    const emptyMsg = collectorPaused
+      ? 'Collector paused (>2m old). No fresh positions available.'
+      : 'No aircraft or stations in current map view / filter.';
+    listEl.innerHTML = `<div class="empty">${esc(emptyMsg)}</div>`;
+  } else {
+    const existingRows = [...listEl.querySelectorAll('.aircraft[data-key]')];
+    const orderMatches = existingRows.length === sorted.length &&
+      existingRows.every((el, idx) => el.dataset.key === sorted[idx].address);
 
-    const wxCompactHtml = a.weather ? formatWeatherHtml(a.weather, true) : '';
-    const metrics = rType === 15
-      ? []
-      : [a.speed != null ? fmtWindSpeed(a.speed) : '', a.climb != null ? fmtClimb(a.climb) : ''].filter(Boolean);
-    const wxListHtml = wxCompactHtml ? `<span class="wx-line">💨 ${wxCompactHtml}</span>` : '';
-    const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
-    const statusHtml = statusText ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>` : '';
-    const trackDotHtml = trackEntry ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>` : '';
-
-    return `
-    <div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0">
-      <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'}">📌</button></div>
-      <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
-      <div class="alt">${fmtAlt(a.altitude)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div></div>
-    </div>`;
-  }).join('') : '<div class="empty">No aircraft match current filters.</div>';
+    if (orderMatches) {
+      sorted.forEach((a, idx) => {
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = buildRowHtml(a, now);
+        const freshRow = tempDiv.firstElementChild;
+        if (freshRow && existingRows[idx].outerHTML !== freshRow.outerHTML) {
+          existingRows[idx].replaceWith(freshRow);
+        }
+      });
+    } else {
+      listEl.innerHTML = sorted.map(a => buildRowHtml(a, now)).join('');
+    }
+  }
 
   if (pendingHashSelect && markers.has(pendingHashSelect)) {
     const target = pendingHashSelect;
@@ -1310,11 +1415,21 @@ map.on('overlayadd', e => {
   if (e.layer === coverageLayer) updateCoverageLayer();
 });
 
+function boundsMovedSignificantly(b) {
+  if (!lastMetaBounds) return true;
+  const c = b.getCenter();
+  const dLat = Math.abs(c.lat - lastMetaBounds.lat);
+  const dLng = Math.abs(c.lng - lastMetaBounds.lng);
+  const dSpan = Math.abs((b.getNorth() - b.getSouth()) - lastMetaBounds.spanLat);
+  return dLat > 0.2 || dLng > 0.2 || dSpan > 0.25;
+}
+
 async function fetchLive(force = false) {
   if (replayActive || fetching || (document.hidden && !force)) return;
   fetching = true;
   try {
     const b = map.getBounds();
+    const shouldFetchMeta = needMeta || boundsMovedSignificantly(b);
     const params = new URLSearchParams({
       live: '1',
       south: (Math.floor(b.getSouth() * 10) / 10).toFixed(1),
@@ -1322,7 +1437,7 @@ async function fetchLive(force = false) {
       west: (Math.floor(b.getWest() * 10) / 10).toFixed(1),
       east: (Math.ceil(b.getEast() * 10) / 10).toFixed(1),
       window: $('markerWindow').value,
-      meta: needMeta ? '1' : '0'
+      meta: shouldFetchMeta ? '1' : '0'
     });
 
     const response = await fetch(`ogn-proxy.php?${params}`);
@@ -1349,26 +1464,37 @@ async function fetchLive(force = false) {
     }
 
     const incoming = payload.packets && typeof payload.packets === 'object' ? payload.packets : {};
+    const incomingIds = new Set(Object.keys(incoming));
     let sawUnknown = false;
-    aprsCache.clear();
+    for (const existingId of aprsCache.keys()) {
+      if (!incomingIds.has(existingId)) aprsCache.delete(existingId);
+    }
     for (const [id, pkt] of Object.entries(incoming)) {
       if (!knownIds.has(id)) { knownIds.add(id); sawUnknown = true; }
       const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
-      aprsCache.set(id, {
-        raw: pkt.raw || '',
-        received_at: new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        timestamp: tsMs
-      });
+      const prev = aprsCache.get(id);
+      const raw = pkt.raw || '';
+      if (!prev || prev.timestamp !== tsMs || prev.raw !== raw) {
+        aprsCache.set(id, {
+          raw,
+          received_at: new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          timestamp: tsMs
+        });
+      }
     }
 
     const incomingTel = payload.telemetry && typeof payload.telemetry === 'object' ? payload.telemetry : {};
-    telemetryCache.clear();
+    const incomingTelIds = new Set(Object.keys(incomingTel));
+    for (const existingTelId of telemetryCache.keys()) {
+      if (!incomingTelIds.has(existingTelId)) telemetryCache.delete(existingTelId);
+    }
     for (const [id, pkt] of Object.entries(incomingTel)) {
       const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
-      telemetryCache.set(id, {
-        raw: pkt.raw || '',
-        timestamp: tsMs
-      });
+      const raw = pkt.raw || '';
+      const prev = telemetryCache.get(id);
+      if (!prev || prev.timestamp !== tsMs || prev.raw !== raw) {
+        telemetryCache.set(id, { raw, timestamp: tsMs });
+      }
     }
 
     const incomingWx = payload.station_weather && typeof payload.station_weather === 'object' ? payload.station_weather : {};
@@ -1380,13 +1506,18 @@ async function fetchLive(force = false) {
     }
 
     needMeta = sawUnknown;
+    if (shouldFetchMeta) {
+      const c = b.getCenter();
+      lastMetaBounds = { lat: c.lat, lng: c.lng, spanLat: b.getNorth() - b.getSouth() };
+    }
+
+    const updatedMs = (Number(payload.updated) || 0) * 1000;
+    collectorPaused = !updatedMs || (serverNow() - updatedMs) > 120000;
 
     rebuildAircraftArray();
     render();
 
-    const updatedMs = (Number(payload.updated) || 0) * 1000;
-    const stale = !updatedMs || (serverNow() - updatedMs) > 120000;
-    if (stale) setStatus('error', 'Collector paused (>2m old)');
+    if (collectorPaused) setStatus('error', 'Collector paused (>2m old)');
     else {
       const identified = aircraft.filter(a => a.callsign || a.registration || a.streamName || !/([0-9A-F]{6})$/i.test(a.liveLabel)).length;
       setStatus('live', `${aircraft.length} tracking · ${identified} identified`);
@@ -1470,7 +1601,6 @@ function parseOpenAirToGeoJson(text) {
 let moveTimer = null;
 map.on('moveend', () => {
   updateUrlHash();
-  needMeta = true;
   clearTimeout(moveTimer);
   moveTimer = setTimeout(() => {
     if (replayActive) loadReplaySlice();
@@ -1613,7 +1743,7 @@ $('btnNotify').addEventListener('click', async () => {
   alertsEnabled = !alertsEnabled;
   saveMenuPrefs();
   $('btnNotify').classList.toggle('active', alertsEnabled);
-  $('btnNotify').textContent = alertsEnabled ? '🔔 Alerts: ON' : '🔔 Alerts: OFF';
+  $('btnNotify').textContent = alertsEnabled ? '🔔 ON' : '🔔 OFF';
 });
 
 $('btnAirspace').addEventListener('click', () => $('airspaceFile').click());

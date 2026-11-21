@@ -26,42 +26,60 @@
     <div class="map-filter-control" id="mapFilterControl">
       <button class="map-filter-toggle" id="mapFilterToggle" type="button" aria-label="Aircraft filters" aria-expanded="false" aria-controls="mapFilterPanel" title="Aircraft filters">☷</button>
       <div class="map-filter-panel" id="mapFilterPanel" aria-label="Aircraft filters" hidden>
-        <span class="group-label">Aircraft type</span>
-        <div class="type-checklist" id="type" role="group" aria-label="Aircraft filter">
-          <label class="type-option"><input type="checkbox" value="all" checked><span>All aircraft</span></label>
-          <label class="type-option"><input type="checkbox" value="glider"><span>Gliders / motorgliders</span></label>
-          <label class="type-option"><input type="checkbox" value="para"><span>Paragliders</span></label>
-          <label class="type-option"><input type="checkbox" value="fanet"><span>FANET</span></label>
-          <label class="type-option"><input type="checkbox" value="other"><span>Other aircrafts</span></label>
-          <label class="type-option"><input type="checkbox" value="station"><span>Stations</span></label>
+        <div class="menu-section">
+          <span class="group-label">Filter</span>
+          <div class="type-checklist" id="type" role="group" aria-label="Aircraft filter">
+            <label class="type-option type-all"><input type="checkbox" value="all" checked><span>All aircraft</span></label>
+            <label class="type-option"><input type="checkbox" value="glider"><span>Gliders</span></label>
+            <label class="type-option"><input type="checkbox" value="para"><span>Paragliders</span></label>
+            <label class="type-option"><input type="checkbox" value="fanet"><span>FANET</span></label>
+            <label class="type-option"><input type="checkbox" value="other"><span>Other</span></label>
+            <label class="type-option"><input type="checkbox" value="station"><span>Stations</span></label>
+            <label class="type-option"><input type="checkbox" value="wx"><span>Wx Stations</span></label>
+          </div>
         </div>
-        <span class="group-label">Units</span>
-        <div class="preset-row" role="group" aria-label="Unit system preset">
-          <button type="button" class="unit-btn" id="presetMetricBtn" title="Set Metric: km/h, m, °C, m/s">Metric</button>
-          <button type="button" class="unit-btn" id="presetImperialBtn" title="Set Imperial: kt, ft, °F, fps">Imperial</button>
+
+        <div class="menu-section">
+          <div class="menu-inline-head">
+            <span class="group-label">Units</span>
+            <div class="preset-row" role="group" aria-label="Unit system preset">
+              <button type="button" class="unit-btn" id="presetMetricBtn" title="Set Metric: km/h, m, °C, m/s">Metric</button>
+              <button type="button" class="unit-btn" id="presetImperialBtn" title="Set Imperial: kt, ft, °F, fps">Imperial</button>
+            </div>
+          </div>
+          <div class="unit-grid" role="group" aria-label="Measurement units">
+            <button type="button" class="unit-btn active" id="unitAltBtn" title="Toggle altitude unit">Alt: m</button>
+            <button type="button" class="unit-btn active" id="unitSpeedBtn" title="Toggle wind speed unit">Wind: km/h</button>
+            <button type="button" class="unit-btn active" id="unitTempBtn" title="Toggle temperature unit">Temp: °C</button>
+            <button type="button" class="unit-btn active" id="unitClimbBtn" title="Toggle climb rate unit">Climb: m/s</button>
+          </div>
         </div>
-        <div class="unit-grid" role="group" aria-label="Measurement units">
-          <button type="button" class="unit-btn active" id="unitAltBtn" title="Toggle altitude unit">Alt: m</button>
-          <button type="button" class="unit-btn active" id="unitSpeedBtn" title="Toggle wind speed unit">Wind: km/h</button>
-          <button type="button" class="unit-btn active" id="unitTempBtn" title="Toggle temperature unit">Temp: °C</button>
-          <button type="button" class="unit-btn active" id="unitClimbBtn" title="Toggle climb rate unit">Climb: m/s</button>
+
+        <div class="menu-section window-grid">
+          <div>
+            <label class="group-label" for="markerWindow">Active</label>
+            <select id="markerWindow" aria-label="Show aircraft active within">
+              <option value="900" selected>15 min</option>
+              <option value="3600">1 hour</option>
+              <option value="21600">6 hours</option>
+              <option value="86400">24 hours</option>
+            </select>
+          </div>
+          <div>
+            <label class="group-label" for="trackWindow">Track</label>
+            <select id="trackWindow" aria-label="Track duration">
+              <option value="900" selected>15 min</option>
+              <option value="3600">1 hour</option>
+              <option value="21600">6 hours</option>
+              <option value="today">Today</option>
+            </select>
+          </div>
         </div>
-        <span class="group-label">Notifications</span>
-        <button type="button" class="menu-full-btn" id="btnNotify" title="Toggle notifications for pinned aircraft">🔔 Alerts: OFF</button>
-        <label class="group-label" for="markerWindow">Aircraft time window</label>
-        <select id="markerWindow" aria-label="Show aircraft active within">
-          <option value="900" selected>Show: 15 min</option>
-          <option value="3600">Show: 1 hour</option>
-          <option value="21600">Show: 6 hours</option>
-          <option value="86400">Show: 24 hours</option>
-        </select>
-        <label class="group-label" for="trackWindow">Track time window</label>
-        <select id="trackWindow" aria-label="Track duration">
-          <option value="900" selected>Track: 15 min</option>
-          <option value="3600">Track: 1 hour</option>
-          <option value="21600">Track: 6 hours</option>
-          <option value="today">Track: Today</option>
-        </select>
+
+        <div class="menu-inline-head">
+          <span class="group-label">Pinned alerts</span>
+          <button type="button" class="menu-compact-btn" id="btnNotify" title="Toggle notifications for pinned aircraft">🔔 OFF</button>
+        </div>
       </div>
     </div>
     <div id="map" aria-label="Map showing live OGN aircraft"></div>
@@ -97,7 +115,7 @@
     </div>
     <div class="section-head"><h2>Aircrafts/Stations</h2><span class="muted" id="listCount">0</span></div>
     <div class="aircraft-list" id="aircraftList"><div class="empty">Waiting for live data...</div></div>
-    <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
+    <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
 </main>
 </div>
