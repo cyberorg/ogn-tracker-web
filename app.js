@@ -2289,6 +2289,24 @@ map.on('overlayremove', e => {
 
 setInterval(() => fetchThermals(true), 600000);
 
+const WIDE_VIEW_AREA = 100;
+let nextLivePollAtMs = 0;
+
+function currentViewArea() {
+  const b = map.getBounds();
+  const spanLat = Math.max(0, b.getNorth() - b.getSouth());
+  let spanLon = b.getEast() - b.getWest();
+  if (spanLon < 0) spanLon += 360;
+  return spanLat * Math.min(spanLon, 360);
+}
+
+function livePollIntervalMs(area) {
+  if (area >= 2000) return 20000;
+  if (area >= 500) return 10000;
+  if (area >= WIDE_VIEW_AREA) return 7000;
+  return 5000;
+}
+
 function boundsMovedSignificantly(b) {
   if (!lastMetaBounds) return true;
   const c = b.getCenter();
@@ -2300,7 +2318,10 @@ function boundsMovedSignificantly(b) {
 
 async function fetchLive(force = false) {
   if (replayActive || fetching || (document.hidden && !force)) return;
-  lastFetchAttemptAtMs = Date.now();
+  const nowAttemptMs = Date.now();
+  if (!force && nowAttemptMs < nextLivePollAtMs) return;
+  nextLivePollAtMs = nowAttemptMs + livePollIntervalMs(currentViewArea());
+  lastFetchAttemptAtMs = nowAttemptMs;
   fetching = true;
   try {
     const b = map.getBounds();
@@ -2431,11 +2452,23 @@ async function fetchLive(force = false) {
   } catch (err) {
     wasDisconnected = true;
     liveFailures++;
-    const stale = lastFetchOkAtMs ? ` · last update ${fmtAge(Math.max(0, Math.floor((Date.now() - lastFetchOkAtMs) / 1000)))}` : '';
-    const label = !lastFetchOkAtMs
-      ? 'Waiting for live data'
-      : liveFailures >= 2 ? 'Reconnecting to live data' : 'Live update delayed';
-    setStatus('error', `${label}${stale}`);
+    const staleAgeMs = lastFetchOkAtMs ? Date.now() - lastFetchOkAtMs : Infinity;
+    const stale = Number.isFinite(staleAgeMs)
+      ? ` · last update ${fmtAge(Math.max(0, Math.floor(staleAgeMs / 1000)))}` : '';
+    const wideHint = currentViewArea() >= WIDE_VIEW_AREA
+      ? ' · wide view: zoom in for faster updates' : '';
+
+    let kind = 'error';
+    let label;
+    if (!Number.isFinite(staleAgeMs)) {
+      label = 'Waiting for live data';
+    } else if (staleAgeMs <= 30000) {
+      kind = 'warning';
+      label = 'Live data delayed';
+    } else {
+      label = 'Reconnecting to live data';
+    }
+    setStatus(kind, `${label}${stale}${wideHint}`);
   } finally {
     fetching = false;
     updateStatusUpdated();
