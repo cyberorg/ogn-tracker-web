@@ -206,6 +206,7 @@ const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
 
 const map = L.map('map', { zoomControl: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
+raisePopupPane();
 
 function updateBottomScale() {
   const y = map.getSize().y / 2;
@@ -257,7 +258,17 @@ function updateBottomScale() {
 
 function syncBottomBarOffset() {
   const hasBar = $('barogram').classList.contains('show') || $('replayBar').classList.contains('show');
-  $('mapWrap').classList.toggle('has-bottom-bar', hasBar);
+  const wrap = $('mapWrap');
+  wrap.classList.toggle('has-bottom-bar', hasBar);
+  if (hasBar) {
+    const bar = visibleBottomBarEl();
+    const safeBottom = bar ? bar.getBoundingClientRect().top - $('map').getBoundingClientRect().top - 8 : null;
+    // Reserve a little room above the bar and for the popup wrapper so the full content can scroll into view.
+    if (safeBottom != null) wrap.style.setProperty('--popup-max-h', `${Math.max(180, Math.floor(safeBottom - 44))}px`);
+  } else {
+    wrap.style.removeProperty('--popup-max-h');
+  }
+  requestAnimationFrame(() => keepPopupAboveBottomBar());
 }
 
 function syncUnitButtons() {
@@ -290,6 +301,14 @@ function applyUnitPreset(mode) {
 }
 
 map.on('zoomend moveend resize', updateBottomScale);
+map.on('zoomend resize', () => keepPopupAboveBottomBar());
+map.on('move zoom zoomanim resize zoomend viewreset', syncRaisedPopupPane);
+window.addEventListener('resize', syncBottomBarOffset);
+// Tracker markers center themselves via centerPopupInView(); keep all other popups clear of the bottom bar.
+map.on('popupopen', e => {
+  if (e.popup?._source?._trackerMarker) return;
+  requestAnimationFrame(() => keepPopupAboveBottomBar(e.popup.getElement()));
+});
 
 const thermalLayer = L.heatLayer([], { radius: 18, blur: 14, maxZoom: 14, gradient: {0.2:'#38bdf8', 0.5:'#f5c451', 0.8:'#f97316', 1.0:'#ef4444'} });
 const coverageLayer = L.layerGroup();
@@ -330,6 +349,7 @@ const knownIds = new Set();
 let followedAddress = null;
 let varioTrackMode = false;
 let activeBaroAddress = null;
+let baroDismissedAddress = null;
 const lastPinnedStatus = new Map();
 const alerts24hHistory = new Map();
 let replayActive = false, replayTimer = null;
@@ -397,6 +417,7 @@ const telemetryCache = new Map();
 const parsedLineCache = new Map();
 const nameCache = new Map();
 const lastAltCache = new Map();
+const lastClimbCache = new Map();
 const wxCache = new Map();
 const stationStatsCache = new Map();
 
@@ -517,7 +538,28 @@ function redrawAllTracks() {
   }
 }
 
+function toggleVarioMode() {
+  varioTrackMode = !varioTrackMode;
+  redrawAllTracks();
+}
+
+function toggleFollow(address) {
+  if (!address) return;
+  followedAddress = (followedAddress === address) ? null : address;
+  document.querySelectorAll('.follow-btn[data-follow]').forEach(btn => {
+    const active = btn.dataset.follow === followedAddress;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+    btn.textContent = active ? '◎ Unfollow' : '◎ Follow';
+    const a = aircraft.find(x => x.address === btn.dataset.follow);
+    btn.title = `${active ? 'Unfollow' : 'Follow'} ${a ? displayName(a) : btn.dataset.follow}`;
+  });
+  updateListHint();
+}
+
 function renderBarogram(address, scrubIdx = null) {
+  // Keep the barogram closed after the user dismisses it until a track is selected again.
+  if (baroDismissedAddress === address) return;
   const entry = selectedTracks.get(address);
   if (!entry || !entry.points || entry.points.length < 2) {
     $('barogram').classList.remove('show');
@@ -531,7 +573,6 @@ function renderBarogram(address, scrubIdx = null) {
     return;
   }
   activeBaroAddress = address;
-  const a = aircraft.find(x => x.address === address);
   const minAlt = Math.min(...pts.map(p => p[2]));
   const maxAlt = Math.max(...pts.map(p => p[2]));
   const spanAlt = Math.max(10, maxAlt - minAlt);
@@ -557,10 +598,9 @@ function renderBarogram(address, scrubIdx = null) {
     scrubSuffix = ` · ${fmtAlt(sp[2])} @ ${timeStr}`;
   }
 
-  const title = `${a ? displayName(a) : address.toUpperCase()} · Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
+  const title = `Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
   $('baroTitle').textContent = title;
-  $('baroSvg').setAttribute('aria-label', `Altitude profile for ${title}`);
-  $('trackModeHint').textContent = varioTrackMode ? 'Vario-colored' : 'Flat';
+  $('baroSvg').setAttribute('aria-label', `Altitude profile: ${title}`);
   $('baroSvg').innerHTML = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
     ${scrubSvg}
@@ -604,6 +644,7 @@ function removeTrack(address) {
     selectedTracks.delete(address);
   }
   if (activeBaroAddress === address) {
+    baroDismissedAddress = null;
     const next = [...selectedTracks.keys()].pop() || null;
     activeBaroAddress = next;
     if (next) renderBarogram(next);
@@ -624,6 +665,7 @@ function clearAllTracks() {
   }
   selectedTracks.clear();
   activeBaroAddress = null;
+  baroDismissedAddress = null;
   $('barogram').classList.remove('show');
   syncBottomBarOffset();
   updateListHint();
@@ -656,7 +698,7 @@ async function loadTrack(address) {
     current.points = Array.isArray(data.points) ? data.points : [];
     current.layer = buildTrackLayer(current.points, current.color);
     if (current.layer) current.layer.addTo(map);
-    renderBarogram(address);
+    if (activeBaroAddress === address) renderBarogram(address);
   } catch (err) {
     console.warn('Track fetch failed:', err);
   }
@@ -746,7 +788,7 @@ function jumpToAlertAddress(address) {
       .setContent(`
         <div class="popup-title">${esc(item.name)}</div>
         <div class="popup-actions">
-          <button type="button" data-act="alert-sar" data-sar="${esc(sarTxt)}">📋 Copy SAR</button>
+          <button type="button" data-act="alert-sar" data-sar="${esc(sarTxt)}">📋 SAR</button>
         </div>
         <div class="popup-grid" style="margin-top:6px">
           <div class="popup-value"><span>Alert</span><br><b style="color:var(--red)">${esc(item.status)}</b></div>
@@ -755,7 +797,7 @@ function jumpToAlertAddress(address) {
           ${outcome ? `<div class="popup-value" style="grid-column:1/-1"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
           <div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(posText)}</a></div>
         </div>
-        ${item.raw ? `<div class="popup-section">Last Packet</div><div class="popup-raw">${esc(item.raw)}</div>` : ''}
+        ${item.raw ? `<div class="popup-raw">${esc(item.raw)}</div>` : ''}
       `)
       .openOn(map);
   }
@@ -772,6 +814,7 @@ function toggleSelection(address, openOnMap = false) {
     removeTrack(address);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
+    baroDismissedAddress = null;
     activeBaroAddress = address;
     loadTrack(address);
     if (openOnMap) {
@@ -1293,6 +1336,9 @@ function rebuildAircraftArray() {
       }
     }
 
+    if (a.climb != null) lastClimbCache.set(a.address, a.climb);
+    else if (lastClimbCache.has(a.address)) a.climb = lastClimbCache.get(a.address);
+
     if (nameCache.has(a.address)) a.streamName = nameCache.get(a.address);
     else if (nameCache.has(a.ddbId)) a.streamName = nameCache.get(a.ddbId);
 
@@ -1394,22 +1440,78 @@ function formatSnrHtml(snr) {
   return `${snr.toFixed(1)} dB <span class="snr-badge ${cls}">${label}</span>`;
 }
 
+// Leaflet's map pane is its own stacking context, which traps popups under map controls.
+// Move the popup pane next to the other map overlays and follow the map pane's transform.
+function raisePopupPane() {
+  const pane = map.getPane('popupPane');
+  const container = map.getContainer();
+  if (!pane || !container || pane.parentElement === container) return;
+  pane.classList.add('popup-pane-raised');
+  container.appendChild(pane);
+  syncRaisedPopupPane();
+}
+
+function syncRaisedPopupPane() {
+  const pane = map.getPane('popupPane');
+  const mapPane = map.getPane('mapPane');
+  if (!pane || !mapPane) return;
+  const transform = getComputedStyle(mapPane).transform;
+  if (pane.style.transform !== transform) pane.style.transform = transform;
+}
+
+function visibleBottomBarEl() {
+  const baro = $('barogram');
+  if (baro?.classList.contains('show')) return baro;
+  const replay = $('replayBar');
+  if (replay?.classList.contains('show')) return replay;
+  return null;
+}
+
+// Bottom edge of the map area that is safe for popups (above the barogram/replay bar).
+function popupSafeBottom(mapRect) {
+  const bar = visibleBottomBarEl();
+  if (!bar) return null;
+  return bar.getBoundingClientRect().top - mapRect.top - 8;
+}
+
+function panPopupInView(popupEl, center) {
+  if (!popupEl) return;
+  const mapRect = $('map').getBoundingClientRect();
+  const popupRect = popupEl.getBoundingClientRect();
+  const safeBottom = popupSafeBottom(mapRect);
+  const margin = 8;
+  let dx = 0, dy = 0;
+  if (center) {
+    const popupCenterX = popupRect.left - mapRect.left + popupRect.width / 2;
+    const popupCenterY = popupRect.top - mapRect.top + popupRect.height / 2;
+    const targetX = mapRect.width / 2;
+    const targetY = safeBottom == null ? mapRect.height / 2
+      : Math.max(popupRect.height / 2 + margin, Math.min(safeBottom / 2, safeBottom - popupRect.height / 2 - margin));
+    dx = popupCenterX - targetX;
+    dy = popupCenterY - targetY;
+  } else if (safeBottom != null) {
+    const overflow = popupRect.bottom - mapRect.top - safeBottom;
+    if (overflow > 2) dy = overflow;
+  }
+  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+  // Centering on open animates; later corrections apply immediately so the popup never sits over the bar.
+  map.panBy([dx, dy], { animate: center });
+}
+
 function centerPopupInView(marker) {
   if (!marker || !marker.isPopupOpen()) return;
-  const popup = marker.getPopup();
-  const popupEl = popup?.getElement();
-  if (!popupEl) return;
-  const mapEl = $('map');
-  const mapRect = mapEl.getBoundingClientRect();
-  const popupRect = popupEl.getBoundingClientRect();
-  const popupCenterX = popupRect.left - mapRect.left + popupRect.width / 2;
-  const popupCenterY = popupRect.top - mapRect.top + popupRect.height / 2;
-  const targetX = mapRect.width / 2;
-  const targetY = mapRect.height / 2;
-  const dx = popupCenterX - targetX;
-  const dy = popupCenterY - targetY;
-  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
-  map.panBy([dx, dy], { animate: true });
+  panPopupInView(marker.getPopup()?.getElement(), true);
+}
+
+function keepPopupAboveBottomBar(popupEl = $('map').querySelector('.leaflet-popup')) {
+  panPopupInView(popupEl, false);
+}
+
+function keepOpenPopupAboveBar(marker) {
+  if (!marker?.isPopupOpen()) return;
+  requestAnimationFrame(() => {
+    if (marker.isPopupOpen()) keepPopupAboveBottomBar(marker.getPopup()?.getElement());
+  });
 }
 
 function signalBarsHtml(snr) {
@@ -1453,73 +1555,70 @@ function popupRowHtml(label, html) {
 
 function popup(a) {
   const latStr = a.lat.toFixed(6), lonStr = a.lon.toFixed(6);
-  const locText = a.altitude != null ? `${latStr},${lonStr},${fmtAlt(a.altitude)}` : `${latStr},${lonStr}`;
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
-  const locationRow = `<div class="popup-value" style="grid-column:1/-1"><span>Location</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(locText)}</a></div>`;
+  const positionRow = `<div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(`${latStr},${lonStr}`)}</a></div>`;
   const statusText = getDisplayStatus(a);
-  const statusHtml = statusText ? `<span style="color:${statusColor(a, statusText)}">${esc(statusText)}</span>` : '';
   const wxText = formatWeatherHtml(a.weather, false);
   const weatherRow = wxText
     ? `<div class="popup-value" style="grid-column:1/-1"><span>Weather</span><br><b>${wxText}</b></div>`
     : '';
   const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
   const lastSeenText = a.aprsReceivedAt ? `${a.aprsReceivedAt} (${fmtAge(ageSec)})` : fmtAge(ageSec);
+  const course = a.course != null && Number.isFinite(Number(a.course)) ? Number(a.course) : null;
+  const courseValue = course != null
+    ? `${Math.round(course)}° <span class="popup-course-arrow" style="transform:rotate(${course}deg)" aria-hidden="true">↑</span>`
+    : null;
 
-  const primaryFields = [
-    ['Last seen', lastSeenText],
-    ['Track (°)', a.course],
-    ['Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null],
-    ['Climb', a.climb != null ? fmtClimb(a.climb) : null],
-    ['Receiver', a.receiver],
-  ];
-  const secondaryFields = [];
-
-  if (getResolvedType(a) === 15) {
+  const isStation = getResolvedType(a) === 15;
+  const stationRows = [];
+  if (isStation) {
     const rxStats = getStationReceptionStats(a);
     if (rxStats) {
-      primaryFields.push(['Aircraft heard', String(rxStats.count)]);
+      stationRows.push(popupRow('Aircraft heard', String(rxStats.count)));
       if (rxStats.best24h) {
-        const ageSec = Math.max(0, Math.floor((serverNow() / 1000) - rxStats.best24h.ts));
-        primaryFields.push(['Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(ageSec)})`]);
+        const bestAgeSec = Math.max(0, Math.floor((serverNow() / 1000) - rxStats.best24h.ts));
+        stationRows.push(popupRow('Farthest heard (24h)', `${rxStats.best24h.max_km.toFixed(1)} km (${rxStats.best24h.label} · ${fmtAge(bestAgeSec)})`));
       }
     }
   }
 
-  const isFol = followedAddress === a.address;
   const isTracked = selectedTracks.has(a.address);
-  const isStation = getResolvedType(a) === 15;
   const detailRows = [
+    popupRow('Aircraft type', typeName(a)),
     popupRow('Over-the-air Name', displayStreamName(a)),
     popupRow('Callsign / CN', a.callsign),
     popupRow('Registration', displayRegistration(a)),
-    popupRow('Aircraft model', displayModel(a)),
-    secondaryFields.map(([l, v]) => popupRow(l, v)).join('')
+    popupRow('Aircraft model', displayModel(a))
   ].join('');
   const rawSection = a.aprsPacket
-    ? `<div class="popup-section">Raw Packet</div><div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}` : '';
+    ? `<div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}` : '';
   const detailsBlock = (detailRows.replace(/\s+/g, '') || rawSection)
     ? `<details class="popup-details" data-popup-details="1"><summary>Details & raw packet</summary><div class="popup-grid" style="margin-top:6px">${detailRows}</div>${rawSection}</details>`
     : '';
   const actionButtons = isStation
-    ? `<button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Copy link</button>`
-    : `<button type="button" data-act="track" data-addr="${esc(a.address)}">${isTracked ? 'Hide track' : 'Show track'}</button>
-      <button type="button" data-act="follow" data-addr="${esc(a.address)}">${isFol ? 'Unfollow' : '◎ Follow'}</button>
-      <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 Copy SAR</button>
-      <button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Copy link</button>
+    ? `<button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>`
+    : `<button type="button" data-act="track" data-addr="${esc(a.address)}" class="${isTracked ? 'active' : ''}" aria-pressed="${isTracked}">Track</button>
+      <button type="button" data-act="vario" data-addr="${esc(a.address)}" class="${varioTrackMode ? 'active' : ''}" aria-pressed="${varioTrackMode}" title="Toggle vario-colored tracks">Vario</button>
+      <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 SAR</button>
+      <button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>
       <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>`;
 
-  return `<div class="popup-title">${esc(displayName(a))}</div>
-    <div class="popup-actions">
-      ${actionButtons}
-    </div>
-    <div class="popup-section">Identification and Status</div>
-    <div class="popup-grid">
-      ${popupRow('Aircraft type', typeName(a))}
-      ${popupRowHtml('Status / Alert', statusHtml)}
-      ${popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr))}
-    </div>
-    <div class="popup-section">Live APRS Data</div>
-    <div class="popup-grid">${locationRow}${weatherRow}${primaryFields.map(([l,v]) => popupRow(l,v)).join('')}</div>
+  const telemetryRows = [
+    positionRow,
+    popupRow('Altitude', a.altitude != null ? fmtAlt(a.altitude) : null),
+    popupRow('Climb', a.climb != null ? fmtClimb(a.climb) : null),
+    popupRow('Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null),
+    popupRowHtml('Track Direction', courseValue),
+    popupRow('Last seen', lastSeenText),
+    popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr)),
+    weatherRow,
+    popupRow('Receiver', a.receiver),
+    ...stationRows
+  ].join('');
+
+  return `<div class="popup-title"><span class="popup-name">${esc(displayName(a))}</span>${statusText ? `<span class="popup-status" style="color:${statusColor(a, statusText)}" title="${esc(statusText)}">${esc(statusText)}</span>` : ''}</div>
+    <div class="popup-actions">${actionButtons}</div>
+    <div class="popup-grid">${telemetryRows}</div>
     ${detailsBlock}`;
 }
 
@@ -1606,6 +1705,10 @@ function buildRowHtml(a, now) {
     const heardCount = rxStats ? rxStats.count : 0;
     rightColHtml = `${esc(`24h · ${heardCount}`)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div>`;
   }
+  if (rType !== 15) {
+    const isFollowed = followedAddress === a.address;
+    rightColHtml += `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${esc(displayName(a))}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
+  }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
   return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0" role="option" aria-selected="${trackEntry ? 'true' : 'false'}" aria-label="${esc(label)}">
@@ -1689,7 +1792,7 @@ function render() {
     if (!m) {
       if (isSpiderfied && !emerg) return;
       m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0 });
-      m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a;
+      m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a; m._trackerMarker = true;
       m.on('click', () => toggleSelection(key, false));
       m._detailsOpen = false;
       m._popupSig = '';
@@ -1702,7 +1805,7 @@ function render() {
         const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
         if (d) {
           d.open = !!m._detailsOpen;
-          d.onTogglePopupDetails = d.onTogglePopupDetails || (() => { m._detailsOpen = d.open; });
+          d.onTogglePopupDetails = d.onTogglePopupDetails || (() => { m._detailsOpen = d.open; keepOpenPopupAboveBar(m); });
           d.removeEventListener('toggle', d.onTogglePopupDetails);
           d.addEventListener('toggle', d.onTogglePopupDetails);
         }
@@ -1745,11 +1848,12 @@ function render() {
         if (m._popupSig !== html) {
           m._popupSig = html;
           m.setPopupContent(html);
+          keepOpenPopupAboveBar(m);
         }
         const newDetails = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
         if (newDetails) {
           newDetails.open = !!m._detailsOpen;
-          newDetails.onTogglePopupDetails = newDetails.onTogglePopupDetails || (() => { m._detailsOpen = newDetails.open; });
+          newDetails.onTogglePopupDetails = newDetails.onTogglePopupDetails || (() => { m._detailsOpen = newDetails.open; keepOpenPopupAboveBar(m); });
           newDetails.removeEventListener('toggle', newDetails.onTogglePopupDetails);
           newDetails.addEventListener('toggle', newDetails.onTogglePopupDetails);
         }
@@ -1875,6 +1979,12 @@ $('aircraftList').addEventListener('click', e => {
     togglePin(pinBtn.dataset.pin);
     return;
   }
+  const followBtn = e.target.closest('.follow-btn');
+  if (followBtn) {
+    e.stopPropagation();
+    toggleFollow(followBtn.dataset.follow);
+    return;
+  }
   const row = e.target.closest('.aircraft');
   if (row) toggleSelection(row.dataset.key, true);
 });
@@ -1887,6 +1997,12 @@ $('aircraftList').addEventListener('keydown', e => {
     if (pinBtn) {
       e.preventDefault();
       togglePin(pinBtn.dataset.pin);
+      return;
+    }
+    const followBtn = e.target.closest('.follow-btn');
+    if (followBtn) {
+      e.preventDefault();
+      toggleFollow(followBtn.dataset.follow);
       return;
     }
     e.preventDefault();
@@ -1908,7 +2024,7 @@ document.addEventListener('click', e => {
   if (act === 'alert-sar') {
     const txt = btn.dataset.sar || '';
     if (!txt) return;
-    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 Copy SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
+    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
     return;
   }
   const a = aircraft.find(x => x.address === addr);
@@ -1921,7 +2037,7 @@ document.addEventListener('click', e => {
       const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
       if (d) m._detailsOpen = d.open;
       const html = popup(aa);
-      if (m._popupSig !== html) { m._popupSig = html; m.setPopupContent(html); }
+      if (m._popupSig !== html) { m._popupSig = html; m.setPopupContent(html); keepOpenPopupAboveBar(m); }
       const nd = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
       if (nd) {
         nd.open = !!m._detailsOpen;
@@ -1930,22 +2046,10 @@ document.addEventListener('click', e => {
         nd.addEventListener('toggle', nd.onTogglePopupDetails);
       }
     }
-  } else if (act === 'follow') {
-    followedAddress = (followedAddress === addr) ? null : addr;
-    const m = markers.get(addr);
-    if (m && a && m.isPopupOpen()) {
-      const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
-      if (d) m._detailsOpen = d.open;
-      const html = popup(a);
-      if (m._popupSig !== html) { m._popupSig = html; m.setPopupContent(html); }
-      const nd = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
-      if (nd) {
-        nd.open = !!m._detailsOpen;
-        nd.onTogglePopupDetails = nd.onTogglePopupDetails || (() => { m._detailsOpen = nd.open; });
-        nd.removeEventListener('toggle', nd.onTogglePopupDetails);
-        nd.addEventListener('toggle', nd.onTogglePopupDetails);
-      }
-    }
+  } else if (act === 'vario') {
+    toggleVarioMode();
+    btn.classList.toggle('active', varioTrackMode);
+    btn.setAttribute('aria-pressed', String(varioTrackMode));
   } else if (act === 'share') {
     const base = getShareUrl();
     const url = addr ? `${base.replace(/#.*/, '')}#${map.getCenter().lat.toFixed(4)},${map.getCenter().lng.toFixed(4)},${map.getZoom()},${encodeURIComponent(addr)}` : base;
@@ -1962,7 +2066,7 @@ document.addEventListener('click', e => {
       `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`,
       `Tracker: ${shareUrl}`
     ].join('\n');
-    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 Copy SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
+    navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
   } else if (act === 'igc') {
     if (!selectedTracks.has(addr)) {
       selectedTracks.set(addr, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
@@ -2357,16 +2461,11 @@ $('emergencyJump').addEventListener('click', () => {
   if (addr) jumpToAlertAddress(addr);
 });
 
-$('toggleTrackMode').addEventListener('click', () => {
-  varioTrackMode = !varioTrackMode;
-  $('toggleTrackMode').textContent = `Vario: ${varioTrackMode ? 'ON' : 'OFF'}`;
-  $('toggleTrackMode').classList.toggle('active', varioTrackMode);
-  $('toggleTrackMode').setAttribute('aria-pressed', String(varioTrackMode));
-  $('trackModeHint').textContent = varioTrackMode ? 'Vario-colored' : 'Flat';
-  redrawAllTracks();
+$('btnCloseBaro').addEventListener('click', () => {
+  baroDismissedAddress = activeBaroAddress;
+  $('barogram').classList.remove('show');
+  syncBottomBarOffset();
 });
-$('btnDownloadIgc').addEventListener('click', () => { if (activeBaroAddress) downloadIgc(activeBaroAddress); });
-$('btnCloseBaro').addEventListener('click', () => { $('barogram').classList.remove('show'); syncBottomBarOffset(); });
 
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
