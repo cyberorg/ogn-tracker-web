@@ -2254,6 +2254,8 @@ map.on('overlayadd', e => {
   if (e.layer === coverageLayer) updateCoverageLayer();
 });
 
+setInterval(() => fetchThermals(), 60000);
+
 function boundsMovedSignificantly(b) {
   if (!lastMetaBounds) return true;
   const c = b.getCenter();

@@ -346,39 +346,30 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
             $params[':east'] = $e;
         }
 
+        $hasThermals = (bool)$pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='thermals'")->fetchColumn();
+        if (!$hasThermals) {
+            echo json_encode(['points' => []]);
+            exit;
+        }
+
         $stmt = $pdo->prepare("
-            SELECT t.id, t.lat, t.lon, t.alt, t.ts
-            FROM tracks t
-            INNER JOIN aircraft a ON t.id = a.id
-            LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
-            WHERE t.ts >= :cutoff
-              AND t.alt IS NOT NULL
-              AND t.lat BETWEEN :south AND :north
+            SELECT lat, lon, intensity
+            FROM thermals
+            WHERE ts >= :cutoff
+              AND lat BETWEEN :south AND :north
               AND {$lonClause}
-              AND CAST(COALESCE(NULLIF(d.aircraft_type, ''), '0') AS INTEGER) IN (1, 6, 7)
-            ORDER BY t.id ASC, t.ts ASC
-            LIMIT 40000
+            ORDER BY ts DESC
+            LIMIT 3000
         ");
         $stmt->execute($params);
 
         $heat = [];
-        $prev = null;
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            if ($prev !== null && $prev['id'] === $row['id']) {
-                $dt = (int)$row['ts'] - (int)$prev['ts'];
-                if ($dt >= 3 && $dt <= 120) {
-                    $climb = ((float)$row['alt'] - (float)$prev['alt']) / $dt;
-                    if ($climb >= 1.5 && $climb <= 15.0) {
-                        $heat[] = [
-                            round((float)$row['lat'], 4),
-                            round((float)$row['lon'], 4),
-                            round(min(1.0, $climb / 5.0), 2),
-                        ];
-                        if (count($heat) >= 3000) break;
-                    }
-                }
-            }
-            $prev = $row;
+            $heat[] = [
+                round((float)$row['lat'], 4),
+                round((float)$row['lon'], 4),
+                round((float)$row['intensity'], 2),
+            ];
         }
 
         $json = json_encode(['points' => $heat]);
@@ -387,6 +378,7 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
             echo $json;
         }
     } catch (Throwable $e) {
+        error_log('ogn-proxy thermal error: ' . $e->getMessage() . ' at ' . basename($e->getFile()) . ':' . $e->getLine());
         http_response_code(500);
         echo json_encode(['error' => 'Thermal query error']);
     }

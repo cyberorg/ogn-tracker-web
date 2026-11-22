@@ -86,6 +86,16 @@ $pdo->exec('
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_tracks_ts ON tracks (ts);
 
+    CREATE TABLE IF NOT EXISTS thermals (
+        id TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        lat REAL NOT NULL,
+        lon REAL NOT NULL,
+        intensity REAL NOT NULL,
+        PRIMARY KEY (id, ts)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_thermals_ts ON thermals (ts);
+
     CREATE TABLE IF NOT EXISTS stations (
         id TEXT PRIMARY KEY,
         lat REAL NOT NULL,
@@ -556,6 +566,18 @@ $stmtInsertTrack = $pdo->prepare('
     INSERT OR IGNORE INTO tracks (id, ts, lat, lon, alt)
     VALUES (:id, :ts, :lat, :lon, :alt)
 ');
+$stmtInsertThermal = $pdo->prepare('
+    INSERT OR REPLACE INTO thermals (id, ts, lat, lon, intensity)
+    VALUES (:id, :ts, :lat, :lon, :intensity)
+');
+$stmtThermalAllowed = $pdo->prepare("
+    SELECT 1
+    FROM aircraft a
+    INNER JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+    WHERE a.id = :id
+      AND CAST(COALESCE(NULLIF(d.aircraft_type, ''), '0') AS INTEGER) IN (1, 6, 7)
+    LIMIT 1
+");
 $stmtTouchPos = $pdo->prepare('UPDATE aircraft SET timestamp = :ts WHERE id = :id');
 $stmtUpsertName = $pdo->prepare('
     INSERT INTO names (id, name, updated)
@@ -616,6 +638,8 @@ function flush_batch(
     PDOStatement $stmtUpsertStationWx,
     PDOStatement $stmtUpsertHeard,
     PDOStatement $stmtInsertTrack,
+    PDOStatement $stmtInsertThermal,
+    PDOStatement $stmtThermalAllowed,
     PDOStatement $stmtTouchPos,
     PDOStatement $stmtUpsertName,
     PDOStatement $stmtUpsertStation,
@@ -626,6 +650,7 @@ function flush_batch(
     array &$stationWxBatch,
     array &$heardBatch,
     array &$trackBatch,
+    array &$thermalBatch,
     array &$touchBatch,
     array &$nameBatch,
     array &$stationBatch,
@@ -697,6 +722,21 @@ function flush_batch(
                 ':alt' => $t['alt'],
             ]);
         }
+        foreach ($thermalBatch as $th) {
+            $allowed = $th['typeKnown'] ? in_array($th['type'], [1, 6, 7], true) : null;
+            if ($allowed === null) {
+                $stmtThermalAllowed->execute([':id' => $th['id']]);
+                $allowed = (bool)$stmtThermalAllowed->fetchColumn();
+            }
+            if (!$allowed) continue;
+            $stmtInsertThermal->execute([
+                ':id'        => $th['id'],
+                ':ts'        => $th['ts'],
+                ':lat'       => $th['lat'],
+                ':lon'       => $th['lon'],
+                ':intensity' => $th['intensity'],
+            ]);
+        }
         foreach ($touchBatch as $id => $ts) {
             if (!isset($posBatch[$id])) {
                 $stmtTouchPos->execute([':id' => $id, ':ts' => $ts]);
@@ -713,6 +753,7 @@ function flush_batch(
                 'DELETE FROM station_weather WHERE updated < ' . $cutoff,
                 'DELETE FROM station_heard WHERE last_ts < ' . $cutoff,
                 'DELETE FROM tracks WHERE ts < ' . ($now - TRACK_EXPIRE_SECONDS),
+                'DELETE FROM thermals WHERE ts < ' . ($now - TRACK_EXPIRE_SECONDS),
                 'UPDATE stations SET max_km = 0, farthest_id = "", farthest_ts = 0 WHERE farthest_ts > 0 AND farthest_ts < ' . $cutoff,
                 'DELETE FROM stations WHERE updated < ' . $cutoff,
             ];
@@ -769,6 +810,7 @@ function flush_batch(
     $stationWxBatch = [];
     $heardBatch     = [];
     $trackBatch     = [];
+    $thermalBatch   = [];
     $touchBatch     = [];
     $nameBatch      = [];
     $stationBatch   = [];
@@ -797,10 +839,12 @@ $telemetryBatch = [];
 $stationWxBatch = [];
 $heardBatch     = [];
 $trackBatch     = [];
+$thermalBatch   = [];
 $touchBatch     = [];
 $nameBatch      = [];
 $stationBatch   = [];
 $lastTrackPoint = [];
+$lastThermalPoint = [];
 $lastKnownPos   = [];
 $lastPruneTs    = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_prune_ts"')->fetchColumn();
 $lastVacuumTs   = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_vacuum_ts"')->fetchColumn();
@@ -997,6 +1041,30 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         ];
                         $lastTrackPoint[$id] = ['lat' => $lat, 'lon' => $lon, 'ts' => $now];
                     }
+
+                    // Precompute thermal climbs so the heatmap never scans the tracks table.
+                    // Packet type wins; DDB is only consulted when the packet has no type.
+                    if ($alt !== null) {
+                        $thermalPrev = $lastThermalPoint[$id] ?? null;
+                        if ($thermalPrev !== null) {
+                            $dt = $now - $thermalPrev['ts'];
+                            if ($dt >= 3 && $dt <= 120) {
+                                $climb = ($alt - $thermalPrev['alt']) / $dt;
+                                if ($climb >= 1.5 && $climb <= 15.0) {
+                                    $thermalBatch[$id . '|' . $now] = [
+                                        'id'        => $id,
+                                        'ts'        => $now,
+                                        'lat'       => $lat,
+                                        'lon'       => $lon,
+                                        'intensity' => round(min(1.0, $climb / 5.0), 2),
+                                        'type'      => (int)$type,
+                                        'typeKnown' => $type > 0,
+                                    ];
+                                }
+                            }
+                        }
+                        $lastThermalPoint[$id] = ['ts' => $now, 'alt' => $alt];
+                    }
                 }
             } else {
                 $touchBatch[$id] = $now;
@@ -1029,7 +1097,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
         $nowTs = time();
         $doPrune = ($nowTs - $lastPruneTs) >= 3600;
-        $flushStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doPrune);
+        $flushStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doPrune);
         if ($doPrune) {
             $lastPruneTs = $nowTs;
             $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
@@ -1052,7 +1120,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
 fclose($socket);
 $nowTs = time();
 $doFinalPrune = ($nowTs - $lastPruneTs) >= 3600;
-$finalStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doFinalPrune);
+$finalStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doFinalPrune);
 if ($doFinalPrune) {
     $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
     $stmtMetaKey->execute([':k' => 'last_prune_ts', ':v' => (string)$nowTs]);
