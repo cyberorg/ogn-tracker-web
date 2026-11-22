@@ -233,6 +233,10 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function distMeters(lat1, lon1, lat2, lon2) {
+  return haversineKm(lat1, lon1, lat2, lon2) * 1000;
+}
+
 let initialCenter = BIR, initialZoom = 11, pendingHashSelect = null;
 if (location.hash.length > 1) {
   const parts = location.hash.slice(1).split(',');
@@ -2437,11 +2441,20 @@ async function fetchLive(force = false) {
     const updatedMs = (Number(payload.updated) || 0) * 1000;
     collectorPaused = !updatedMs || (nowTick - updatedMs) > 120000;
 
-    rebuildAircraftArray();
-    render();
-
+    // The payload is already cached here. A rendering failure must not be
+    // reported as a live-data disconnect.
     lastFetchOkAtMs = Date.now();
     liveFailures = 0;
+
+    try {
+      rebuildAircraftArray();
+      render();
+    } catch (err) {
+      console.error('ogn-tracker render error', err);
+      setStatus('warning', 'Live data received · display refresh issue');
+      return;
+    }
+
     const updatedSecAgo = updatedMs ? Math.max(0, Math.floor((nowTick - updatedMs) / 1000)) : null;
     if (collectorPaused) {
       setStatus('error', updatedSecAgo != null ? `Collector paused (${fmtAge(updatedSecAgo).replace(' ago', '')} old)` : 'Collector paused (>2m old)');
@@ -2450,19 +2463,22 @@ async function fetchLive(force = false) {
       setStatus('live', `${aircraft.length} tracking · ${identified} identified`);
     }
   } catch (err) {
+    console.warn('ogn-tracker live fetch failed', err);
     wasDisconnected = true;
     liveFailures++;
+    const viewArea = currentViewArea();
     const staleAgeMs = lastFetchOkAtMs ? Date.now() - lastFetchOkAtMs : Infinity;
+    const reconnectAfterMs = Math.max(60000, livePollIntervalMs(viewArea) * 4);
     const stale = Number.isFinite(staleAgeMs)
       ? ` · last update ${fmtAge(Math.max(0, Math.floor(staleAgeMs / 1000)))}` : '';
-    const wideHint = currentViewArea() >= WIDE_VIEW_AREA
+    const wideHint = viewArea >= WIDE_VIEW_AREA
       ? ' · wide view: zoom in for faster updates' : '';
 
     let kind = 'error';
     let label;
     if (!Number.isFinite(staleAgeMs)) {
       label = 'Waiting for live data';
-    } else if (staleAgeMs <= 30000) {
+    } else if (staleAgeMs <= reconnectAfterMs) {
       kind = 'warning';
       label = 'Live data delayed';
     } else {
