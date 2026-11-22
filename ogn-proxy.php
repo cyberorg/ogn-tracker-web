@@ -8,6 +8,8 @@
  */
 declare(strict_types=1);
 
+const THERMAL_CACHE_TTL = 600;
+
 if (!ob_start('ob_gzhandler')) {
     ob_start();
 }
@@ -38,7 +40,8 @@ function cache_set(string $cacheDir, string $key, string $payload): void {
     if (mt_rand(1, 100) === 1) {
         $now = time();
         foreach (glob($cacheDir . '/*.json') ?: [] as $old) {
-            if (($now - (int)@filemtime($old)) > 120) {
+            $ttl = str_starts_with(basename($old), 'thm_') ? THERMAL_CACHE_TTL : 120;
+            if (($now - (int)@filemtime($old)) > $ttl) {
                 @unlink($old);
             }
         }
@@ -322,9 +325,9 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
     }
     [$south, $north, $w, $e, $fullWorld] = $bounds;
 
-    header('Cache-Control: public, max-age=60');
+    header('Cache-Control: public, max-age=' . THERMAL_CACHE_TTL);
     $cacheKey = 'thm_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0));
-    if (($cached = cache_get($cacheDir, $cacheKey, 60)) !== null) {
+    if (($cached = cache_get($cacheDir, $cacheKey, THERMAL_CACHE_TTL)) !== null) {
         echo $cached;
         exit;
     }

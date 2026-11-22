@@ -35,6 +35,9 @@ let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
 let savedVarioTrackMode = false;
 let savedBarogramEnabled = false;
+let savedBaseLayer = 'terrain';
+let savedOverlays = [];
+let applyingSavedLayers = false;
 let barogramEnabled = false;
 let collectorPaused = false;
 let lastFetchOkAtMs = 0;
@@ -57,6 +60,8 @@ try {
     savedBarogramEnabled = prefs.barogramEnabled;
     barogramEnabled = prefs.barogramEnabled;
   }
+  if (typeof prefs.baseLayer === 'string' && prefs.baseLayer) savedBaseLayer = prefs.baseLayer;
+  if (Array.isArray(prefs.overlays)) savedOverlays = prefs.overlays.filter(v => typeof v === 'string');
 } catch (e) {}
 
 function getCurrentTypesArray() {
@@ -92,6 +97,9 @@ function updateSearchUi() {
 }
 
 function saveMenuPrefs() {
+  const layers = currentLayerSelection();
+  savedBaseLayer = layers.baseLayer;
+  savedOverlays = layers.overlays;
   try {
     localStorage.setItem(MENU_PREFS_STORAGE_KEY, JSON.stringify({
       altUnit,
@@ -103,7 +111,9 @@ function saveMenuPrefs() {
       markerWindow: $('markerWindow').value,
       trackWindow: $('trackWindow').value,
       varioTrackMode,
-      barogramEnabled
+      barogramEnabled,
+      baseLayer: savedBaseLayer,
+      overlays: savedOverlays
     }));
   } catch (e) {}
   updateFilterBadge();
@@ -249,77 +259,6 @@ const map = L.map('map', { zoomControl: false, layers: [terrainLayer] }).setView
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
 raisePopupPane();
 
-function updateBottomScale() {
-  const y = map.getSize().y / 2;
-  const p1 = map.containerPointToLatLng([0, y]);
-  const p2 = map.containerPointToLatLng([100, y]);
-  const metersPer100px = map.distance(p1, p2);
-  if (!Number.isFinite(metersPer100px) || metersPer100px <= 0) return;
-
-  const useImperial = isImperialPreset() || altUnit === 'ft' || speedUnit === 'kt';
-  const steps = [1, 2, 5];
-  let bestLabel = '', bestPx = 70;
-
-  if (useImperial) {
-    const feetPer100px = metersPer100px * 3.28084;
-    const rawFeet = feetPer100px * 0.85;
-    const pow10 = Math.pow(10, Math.floor(Math.log10(Math.max(1, rawFeet))));
-    let niceFeet = pow10;
-    for (const s of steps) {
-      const cand = s * pow10;
-      if (cand <= feetPer100px * 1.15) niceFeet = cand;
-    }
-    bestPx = Math.max(36, Math.min(150, Math.round((niceFeet / feetPer100px) * 100)));
-    if (niceFeet >= 5280) {
-      const miles = niceFeet / 5280;
-      bestLabel = `${miles >= 10 ? Math.round(miles) : Number(miles.toFixed(1))} mi`;
-    } else {
-      bestLabel = `${Math.round(niceFeet).toLocaleString()} ft`;
-    }
-  } else {
-    const rawMeters = metersPer100px * 0.85;
-    const pow10 = Math.pow(10, Math.floor(Math.log10(Math.max(1, rawMeters))));
-    let niceMeters = pow10;
-    for (const s of steps) {
-      const cand = s * pow10;
-      if (cand <= metersPer100px * 1.15) niceMeters = cand;
-    }
-    bestPx = Math.max(36, Math.min(150, Math.round((niceMeters / metersPer100px) * 100)));
-    if (niceMeters >= 1000) {
-      const km = niceMeters / 1000;
-      bestLabel = `${km >= 10 ? Math.round(km) : Number(km.toFixed(1))} km`;
-    } else {
-      bestLabel = `${Math.round(niceMeters)} m`;
-    }
-  }
-
-  $('mapScaleLabel').textContent = bestLabel;
-  $('mapScaleBar').style.width = `${bestPx}px`;
-  updateScalePosition();
-}
-
-// Keep the scale directly above the layers control, and above any visible bottom bar.
-function updateScalePosition() {
-  const scale = $('mapScale');
-  if (!scale) return;
-  const mapRect = $('map').getBoundingClientRect();
-  let bottom = 46;
-
-  const layersControl = document.querySelector('.leaflet-control-layers');
-  if (layersControl) {
-    const rect = layersControl.getBoundingClientRect();
-    if (rect.height > 0) bottom = Math.max(bottom, Math.ceil(mapRect.bottom - rect.top + 6));
-  }
-
-  const bar = visibleBottomBarEl();
-  if (bar) {
-    const rect = bar.getBoundingClientRect();
-    if (rect.height > 0) bottom = Math.max(bottom, Math.ceil(mapRect.bottom - rect.top + 8));
-  }
-
-  scale.style.bottom = `${bottom}px`;
-}
-
 function syncBottomBarOffset() {
   const hasBar = $('barogram').classList.contains('show') || $('replayBar').classList.contains('show');
   const wrap = $('mapWrap');
@@ -332,7 +271,6 @@ function syncBottomBarOffset() {
   } else {
     wrap.style.removeProperty('--popup-max-h');
   }
-  updateScalePosition();
   requestAnimationFrame(() => keepPopupAboveBottomBar());
 }
 
@@ -344,7 +282,7 @@ function syncUnitButtons() {
   $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
   $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : 'm/s'}`;
   updateFilterBadge();
-  updateBottomScale();
+  syncScaleControl();
 }
 
 function applyUnitPreset(mode) {
@@ -365,7 +303,6 @@ function applyUnitPreset(mode) {
   if (activeBaroAddress) renderBarogram(activeBaroAddress);
 }
 
-map.on('zoomend moveend resize', updateBottomScale);
 map.on('zoomend moveend resize', updateMarkerLabels);
 map.on('zoomend resize', () => keepPopupAboveBottomBar());
 map.on('move zoom zoomanim resize zoomend viewreset', syncRaisedPopupPane);
@@ -390,7 +327,77 @@ const airspaceLayer = L.geoJSON(null, {
 const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
 const overlayMaps = { "Thermals (Today)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
 const layersControl = L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
-layersControl.getContainer()?.addEventListener('click', () => requestAnimationFrame(updateScalePosition));
+
+let scaleControl = null;
+let scaleControlImperial = null;
+
+function reorderBottomRightControls() {
+  const scaleEl = scaleControl?.getContainer();
+  const layersEl = layersControl.getContainer();
+  const corner = layersEl?.parentElement;
+  if (!corner || !scaleEl) return;
+
+  const attributionEl = corner.querySelector('.leaflet-control-attribution');
+  if (attributionEl) {
+    // Leaflet adds attribution first; reorder to Layers → scale → attribution.
+    corner.insertBefore(layersEl, attributionEl);
+    corner.insertBefore(scaleEl, attributionEl);
+  } else {
+    corner.appendChild(scaleEl);
+  }
+}
+
+function syncScaleControl() {
+  const useImperial = isImperialPreset() || altUnit === 'ft' || speedUnit === 'kt';
+  if (scaleControl && scaleControlImperial === useImperial) return;
+  if (scaleControl) map.removeControl(scaleControl);
+
+  scaleControl = L.control.scale({
+    position: 'bottomright',
+    metric: !useImperial,
+    imperial: useImperial,
+    maxWidth: 100,
+    imperialMaxWidth: 100
+  }).addTo(map);
+  scaleControlImperial = useImperial;
+  reorderBottomRightControls();
+}
+
+const BASE_LAYER_KEYS = { terrain: terrainLayer, satellite: satelliteLayer, osm: osmLayer };
+const OVERLAY_KEYS = { thermals: thermalLayer, coverage: coverageLayer, airspace: airspaceLayer };
+
+function currentLayerSelection() {
+  const baseLayer = Object.keys(BASE_LAYER_KEYS).find(key => map.hasLayer(BASE_LAYER_KEYS[key])) || 'terrain';
+  const overlays = Object.keys(OVERLAY_KEYS).filter(key => map.hasLayer(OVERLAY_KEYS[key]));
+  return { baseLayer, overlays };
+}
+
+function applySavedLayers() {
+  applyingSavedLayers = true;
+  try {
+    const baseKey = BASE_LAYER_KEYS[savedBaseLayer] ? savedBaseLayer : 'terrain';
+    for (const [key, layer] of Object.entries(BASE_LAYER_KEYS)) {
+      if (key === baseKey) {
+        if (!map.hasLayer(layer)) map.addLayer(layer);
+      } else if (map.hasLayer(layer)) {
+        map.removeLayer(layer);
+      }
+    }
+
+    const wanted = new Set(savedOverlays);
+    for (const [key, layer] of Object.entries(OVERLAY_KEYS)) {
+      const has = map.hasLayer(layer);
+      if (wanted.has(key) && !has) map.addLayer(layer);
+      else if (!wanted.has(key) && has) map.removeLayer(layer);
+    }
+  } finally {
+    applyingSavedLayers = false;
+  }
+}
+
+map.on('baselayerchange overlayadd overlayremove', () => {
+  if (!applyingSavedLayers) saveMenuPrefs();
+});
 
 const clusterGroup = L.markerClusterGroup({
   maxClusterRadius: 35, spiderfyOnMaxZoom: true, showCoverageOnHover: false, zoomToBoundsOnClick: true, spiderfyDistanceMultiplier: 1.5,
@@ -2232,16 +2239,37 @@ document.addEventListener('click', e => {
   }
 });
 
-async function fetchThermals() {
-  if (!map.hasLayer(thermalLayer)) return;
-  const b = map.getBounds();
-  const params = new URLSearchParams({
+let lastThermalBoundsKey = '';
+
+function thermalNormLon(lon) {
+  return ((((lon + 180) % 360) + 360) % 360) - 180;
+}
+
+// Mirror ogn-proxy.php parse_bounds() so panning inside the same 0.1° cell
+// doesn't trigger another request.
+function thermalParamsForBounds(b) {
+  const south = Math.max(-90, Math.min(90, Math.floor(b.getSouth() * 10) / 10));
+  const north = Math.max(-90, Math.min(90, Math.ceil(b.getNorth() * 10) / 10));
+  const rawWest = b.getWest(), rawEast = b.getEast();
+  const fullWorld = (rawEast - rawWest) >= 360;
+  const west = fullWorld ? -180 : thermalNormLon(Math.floor(rawWest * 10) / 10);
+  const east = fullWorld ? 180 : thermalNormLon(Math.ceil(rawEast * 10) / 10);
+  return new URLSearchParams({
     thermals: '1',
-    south: b.getSouth().toFixed(1), north: b.getNorth().toFixed(1),
-    west: b.getWest().toFixed(1), east: b.getEast().toFixed(1)
+    south: south.toFixed(1), north: north.toFixed(1),
+    west: west.toFixed(1), east: east.toFixed(1)
   });
+}
+
+async function fetchThermals(force = false) {
+  if (!map.hasLayer(thermalLayer)) return;
+  const params = thermalParamsForBounds(map.getBounds());
+  const key = params.toString();
+  if (!force && key === lastThermalBoundsKey) return;
+  lastThermalBoundsKey = key;
+
   try {
-    const res = await fetch(`ogn-proxy.php?${params}`);
+    const res = await fetch(`ogn-proxy.php?${params}`, { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
       thermalLayer.setLatLngs(Array.isArray(data.points) ? data.points : []);
@@ -2250,11 +2278,15 @@ async function fetchThermals() {
 }
 
 map.on('overlayadd', e => {
-  if (e.layer === thermalLayer) fetchThermals();
+  if (e.layer === thermalLayer) fetchThermals(true);
   if (e.layer === coverageLayer) updateCoverageLayer();
 });
 
-setInterval(() => fetchThermals(), 60000);
+map.on('overlayremove', e => {
+  if (e.layer === thermalLayer) lastThermalBoundsKey = '';
+});
+
+setInterval(() => fetchThermals(true), 600000);
 
 function boundsMovedSignificantly(b) {
   if (!lastMetaBounds) return true;
@@ -2540,6 +2572,7 @@ $('type').addEventListener('change', e => {
   render();
 });
 
+applySavedLayers();
 applySavedMenuPrefs();
 syncUnitButtons();
 
@@ -2718,7 +2751,6 @@ $('locate').addEventListener('click', () => {
 });
 
 render24hAlertsSummary(serverNow());
-updateBottomScale();
 syncUnitButtons();
 updateSearchUi();
 fetchLive(true);
