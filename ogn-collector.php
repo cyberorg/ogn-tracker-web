@@ -575,7 +575,7 @@ $stmtThermalAllowed = $pdo->prepare("
     FROM aircraft a
     INNER JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
     WHERE a.id = :id
-      AND CAST(COALESCE(NULLIF(d.aircraft_type, ''), '0') AS INTEGER) IN (1, 6, 7)
+      AND CAST(COALESCE(NULLIF(d.aircraft_type, ''), '0') AS INTEGER) IN (1, 7)
     LIMIT 1
 ");
 $stmtTouchPos = $pdo->prepare('UPDATE aircraft SET timestamp = :ts WHERE id = :id');
@@ -723,7 +723,7 @@ function flush_batch(
             ]);
         }
         foreach ($thermalBatch as $th) {
-            $allowed = $th['typeKnown'] ? in_array($th['type'], [1, 6, 7], true) : null;
+            $allowed = $th['typeKnown'] ? in_array($th['type'], [1, 7], true) : null;
             if ($allowed === null) {
                 $stmtThermalAllowed->execute([':id' => $th['id']]);
                 $allowed = (bool)$stmtThermalAllowed->fetchColumn();
