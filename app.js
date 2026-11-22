@@ -414,6 +414,7 @@ const markers = new Map();
 let aircraft = [];
 let fetching = false;
 let wasDisconnected = false;
+let liveFailures = 0;
 let serverClockOffsetMs = 0;
 let userLocationMarker = null;
 let needMeta = true;
@@ -2419,6 +2420,7 @@ async function fetchLive(force = false) {
     render();
 
     lastFetchOkAtMs = Date.now();
+    liveFailures = 0;
     const updatedSecAgo = updatedMs ? Math.max(0, Math.floor((nowTick - updatedMs) / 1000)) : null;
     if (collectorPaused) {
       setStatus('error', updatedSecAgo != null ? `Collector paused (${fmtAge(updatedSecAgo).replace(' ago', '')} old)` : 'Collector paused (>2m old)');
@@ -2428,8 +2430,12 @@ async function fetchLive(force = false) {
     }
   } catch (err) {
     wasDisconnected = true;
+    liveFailures++;
     const stale = lastFetchOkAtMs ? ` · last update ${fmtAge(Math.max(0, Math.floor((Date.now() - lastFetchOkAtMs) / 1000)))}` : '';
-    setStatus('error', `Waiting for live data${stale}`);
+    const label = !lastFetchOkAtMs
+      ? 'Waiting for live data'
+      : liveFailures >= 2 ? 'Reconnecting to live data' : 'Live update delayed';
+    setStatus('error', `${label}${stale}`);
   } finally {
     fetching = false;
     updateStatusUpdated();

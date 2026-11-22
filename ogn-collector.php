@@ -29,13 +29,35 @@ if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
     exit(0);
 }
 
-$pdo = new PDO('sqlite:' . $dbFile, null, null, [
-    PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-]);
-$pdo->exec('PRAGMA auto_vacuum=INCREMENTAL;');
-$pdo->exec('PRAGMA journal_mode=WAL;');
-$pdo->exec('PRAGMA synchronous=NORMAL;');
-$pdo->exec('PRAGMA busy_timeout=3000;');
+if (file_exists($dbFile) && !is_writable($dbFile)) {
+    $euid = function_exists('posix_geteuid') ? posix_geteuid() : '?';
+    error_log("ogn-collector DB is not writable: {$dbFile} (euid={$euid})");
+    exit(1);
+}
+
+try {
+    $pdo = new PDO('sqlite:' . $dbFile, null, null, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+    ]);
+
+    // These are persistent DB settings. Only issue the write forms when needed,
+    // so a transient read-only/open failure does not kill the collector.
+    $journalMode = strtolower((string)$pdo->query('PRAGMA journal_mode;')->fetchColumn());
+    if ($journalMode !== 'wal') {
+        $pdo->exec('PRAGMA journal_mode=WAL;');
+    }
+    $autoVacuum = (int)$pdo->query('PRAGMA auto_vacuum;')->fetchColumn();
+    if ($autoVacuum !== 2) {
+        $pdo->exec('PRAGMA auto_vacuum=INCREMENTAL;');
+    }
+
+    $pdo->exec('PRAGMA synchronous=NORMAL;');
+    $pdo->exec('PRAGMA busy_timeout=3000;');
+} catch (Throwable $e) {
+    $euid = function_exists('posix_geteuid') ? posix_geteuid() : '?';
+    error_log("ogn-collector DB init failed (euid={$euid}): " . $e->getMessage());
+    exit(1);
+}
 
 $pdo->exec('
     CREATE TABLE IF NOT EXISTS aircraft (
@@ -49,6 +71,7 @@ $pdo->exec('
     );
     CREATE INDEX IF NOT EXISTS idx_aircraft_coords ON aircraft (lat, lon);
     CREATE INDEX IF NOT EXISTS idx_aircraft_ts ON aircraft (timestamp);
+    CREATE INDEX IF NOT EXISTS idx_aircraft_ts_lat_lon ON aircraft (timestamp, lat, lon);
 
     CREATE TABLE IF NOT EXISTS alerts (
         id TEXT NOT NULL,

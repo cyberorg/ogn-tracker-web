@@ -9,6 +9,7 @@
 declare(strict_types=1);
 
 const THERMAL_CACHE_TTL = 600;
+const STALE_CACHE_MAX_AGE = 300;
 
 if (!ob_start('ob_gzhandler')) {
     ob_start();
@@ -40,7 +41,14 @@ function cache_set(string $cacheDir, string $key, string $payload): void {
     if (mt_rand(1, 100) === 1) {
         $now = time();
         foreach (glob($cacheDir . '/*.json') ?: [] as $old) {
-            $ttl = str_starts_with(basename($old), 'thm_') ? THERMAL_CACHE_TTL : 120;
+            $name = basename($old);
+            if (str_starts_with($name, 'thm_')) {
+                $ttl = THERMAL_CACHE_TTL;
+            } elseif (str_starts_with($name, 'live_')) {
+                $ttl = STALE_CACHE_MAX_AGE;
+            } else {
+                $ttl = 120;
+            }
             if (($now - (int)@filemtime($old)) > $ttl) {
                 @unlink($old);
             }
@@ -120,7 +128,7 @@ function open_db(string $dbFile): PDO {
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
     ]);
     $pdo->exec('PRAGMA query_only=ON;');
-    $pdo->exec('PRAGMA busy_timeout=2000;');
+    $pdo->exec('PRAGMA busy_timeout=10000;');
     return $pdo;
 }
 
@@ -382,6 +390,13 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
         }
     } catch (Throwable $e) {
         error_log('ogn-proxy thermal error: ' . $e->getMessage() . ' at ' . basename($e->getFile()) . ':' . $e->getLine());
+        $stale = cache_get($cacheDir, $cacheKey, THERMAL_CACHE_TTL);
+        if ($stale !== null) {
+            header('X-OGN-Stale: 1');
+            header('Cache-Control: public, max-age=60');
+            echo $stale;
+            exit;
+        }
         http_response_code(500);
         echo json_encode(['error' => 'Thermal query error']);
     }
@@ -494,10 +509,23 @@ $window = max(60, min(86400, $window));
 
 $includeMeta = (!isset($_GET['meta']) || $_GET['meta'] !== '0');
 
-header('Cache-Control: public, max-age=4');
+// Large views are expensive and change slowly; cache them longer so a browser
+// left zoomed out cannot force a fresh DB query on every 5s poll.
+$spanLat = max(0.0, $north - $south);
+$spanLon = $fullWorld ? 360.0 : fmod($e - $w + 360.0, 360.0);
+$viewArea = $spanLat * $spanLon;
+if ($fullWorld || $viewArea >= 2000) {
+    $liveTtl = 30;
+} elseif ($viewArea >= 500) {
+    $liveTtl = 15;
+} else {
+    $liveTtl = 7;
+}
+
+header('Cache-Control: public, max-age=' . $liveTtl);
 
 $cacheKey = 'live_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0));
-if (($cached = cache_get($cacheDir, $cacheKey, 3)) !== null) {
+if (($cached = cache_get($cacheDir, $cacheKey, $liveTtl)) !== null) {
     echo $cached;
     exit;
 }
@@ -524,6 +552,10 @@ try {
     $cutoff24 = $now - 86400;
     $wxCutoff = $now - max($window, 1800);
     $params = [':south' => $south, ':north' => $north, ':cutoff' => $cutoff];
+    $aircraftIndex = '';
+    if ($pdo->query("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_aircraft_ts_lat_lon'")->fetchColumn()) {
+        $aircraftIndex = 'INDEXED BY idx_aircraft_ts_lat_lon';
+    }
 
     if ($fullWorld) {
         $lonClauseA = '1=1';
@@ -566,7 +598,7 @@ try {
         $sql = "
             SELECT a.id, a.ddb_id, a.raw, a.timestamp, n.name,
                    d.callsign, d.registration, d.model, d.aircraft_type
-            FROM aircraft a
+            FROM aircraft a {$aircraftIndex}
             LEFT JOIN names n ON a.id = n.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE a.lat BETWEEN :south AND :north
@@ -578,7 +610,7 @@ try {
     } else {
         $sql = "
             SELECT a.id, a.raw, a.timestamp
-            FROM aircraft a
+            FROM aircraft a {$aircraftIndex}
             WHERE a.lat BETWEEN :south AND :north
               AND {$lonClauseA}
               AND a.timestamp >= :cutoff
@@ -759,47 +791,81 @@ try {
         }
     }
 
-    // Telemetry / status packets
+    // Telemetry / status packets are global, so share one short-lived cache
+    // across all viewport cache keys instead of re-querying for every area.
     $telemetry = [];
-    try {
-        $stmtTel = $pdo->prepare('
-            SELECT id, raw, timestamp
-            FROM telemetry
-            WHERE timestamp >= :cutoff
-            ORDER BY timestamp DESC
-            LIMIT 1000
-        ');
-        $stmtTel->execute([':cutoff' => $cutoff]);
-        while ($tr = $stmtTel->fetch(PDO::FETCH_ASSOC)) {
-            $telemetry[$tr['id']] = [
-                'raw'       => $tr['raw'],
-                'timestamp' => (int)$tr['timestamp'],
-            ];
+    $telemetryCacheKey = 'tel_' . $window;
+    $telemetryCached = cache_get($cacheDir, $telemetryCacheKey, 5);
+    $telemetryFromCache = false;
+    if ($telemetryCached !== null) {
+        $decodedTelemetry = json_decode($telemetryCached, true);
+        if (is_array($decodedTelemetry)) {
+            $telemetry = $decodedTelemetry;
+            $telemetryFromCache = true;
         }
-    } catch (Throwable $e) {
     }
-
-    // Persisted station weather cache across reloads and multi-minute intervals
-    $stationWeather = [];
-    try {
-        $stmtWx = $pdo->prepare('
-            SELECT id, wx_json, updated
-            FROM station_weather
-            WHERE updated >= :cutoff
-            ORDER BY updated DESC
-            LIMIT 1000
-        ');
-        $stmtWx->execute([':cutoff' => $wxCutoff]);
-        while ($wr = $stmtWx->fetch(PDO::FETCH_ASSOC)) {
-            $decodedWx = json_decode((string)$wr['wx_json'], true);
-            if (is_array($decodedWx)) {
-                $stationWeather[$wr['id']] = [
-                    'wx'        => $decodedWx,
-                    'timestamp' => (int)$wr['updated'],
+    if (!$telemetryFromCache) {
+        try {
+            $stmtTel = $pdo->prepare('
+                SELECT id, raw, timestamp
+                FROM telemetry
+                WHERE timestamp >= :cutoff
+                ORDER BY timestamp DESC
+                LIMIT 1000
+            ');
+            $stmtTel->execute([':cutoff' => $cutoff]);
+            while ($tr = $stmtTel->fetch(PDO::FETCH_ASSOC)) {
+                $telemetry[$tr['id']] = [
+                    'raw'       => $tr['raw'],
+                    'timestamp' => (int)$tr['timestamp'],
                 ];
             }
+            $telemetryJson = json_encode($telemetry, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+            if ($telemetryJson !== false) {
+                cache_set($cacheDir, $telemetryCacheKey, $telemetryJson);
+            }
+        } catch (Throwable $e) {
         }
-    } catch (Throwable $e) {
+    }
+
+    // Station weather is global; bucket the cutoff so one cache serves all viewports.
+    $stationWeather = [];
+    $wxBucket = (int)(floor($wxCutoff / 30) * 30);
+    $wxCacheKey = 'wx_' . $wxBucket;
+    $wxCached = cache_get($cacheDir, $wxCacheKey, 30);
+    $wxFromCache = false;
+    if ($wxCached !== null) {
+        $decodedWxCache = json_decode($wxCached, true);
+        if (is_array($decodedWxCache)) {
+            $stationWeather = $decodedWxCache;
+            $wxFromCache = true;
+        }
+    }
+    if (!$wxFromCache) {
+        try {
+            $stmtWx = $pdo->prepare('
+                SELECT id, wx_json, updated
+                FROM station_weather
+                WHERE updated >= :cutoff
+                ORDER BY updated DESC
+                LIMIT 1000
+            ');
+            $stmtWx->execute([':cutoff' => $wxBucket]);
+            while ($wr = $stmtWx->fetch(PDO::FETCH_ASSOC)) {
+                $decodedWx = json_decode((string)$wr['wx_json'], true);
+                if (is_array($decodedWx)) {
+                    $stationWeather[$wr['id']] = [
+                        'wx'        => $decodedWx,
+                        'timestamp' => (int)$wr['updated'],
+                    ];
+                }
+            }
+            $wxJson = json_encode($stationWeather, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+            if ($wxJson !== false) {
+                cache_set($cacheDir, $wxCacheKey, $wxJson);
+            }
+        } catch (Throwable $e) {
+        }
     }
 
     // 24-hour farthest aircraft heard & unique aircraft heard count per ground station in viewport
@@ -861,6 +927,13 @@ try {
     }
 } catch (Throwable $e) {
     error_log('ogn-proxy DB error: ' . $e->getMessage() . ' at ' . basename($e->getFile()) . ':' . $e->getLine());
+    $stale = cache_get($cacheDir, $cacheKey, STALE_CACHE_MAX_AGE);
+    if ($stale !== null) {
+        header('X-OGN-Stale: 1');
+        header('Cache-Control: public, max-age=2');
+        echo $stale;
+        exit;
+    }
     http_response_code(500);
     header('Cache-Control: no-store');
     echo json_encode(['error' => 'Database read error']);
