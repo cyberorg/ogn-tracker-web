@@ -2,6 +2,7 @@
 /*
  * OGN Viewport, Track, Thermal & Replay API (SQLite + local DDB + Gzip + Cache)
  *   Live viewport: ogn-proxy.php?live=1&north=...&south=...&east=...&west=...&window=<sec>&meta=<0|1>
+ *   Last known:    ogn-proxy.php?info=1&id=<aircraft_id> (24-hour last-known position for shared links)
  *   Track:         ogn-proxy.php?track=1&id=<aircraft_id>&window=<sec> (or &since=<unix_ts>)
  *   Thermals:      ogn-proxy.php?thermals=1&north=...&south=...&east=...&west=...
  *   Replay:        ogn-proxy.php?replay=1&ts=<unix_ts>&north=...&south=...&east=...&west=...
@@ -239,7 +240,82 @@ function extract_altitude_from_raw(string $raw): ?float
     return null;
 }
 
-// --- 1. Track Endpoint ---
+// --- 1. Last-known aircraft info (for shared links) ---
+if (isset($_GET['info']) && $_GET['info'] === '1') {
+    $id = strtolower(trim((string)($_GET['id'] ?? '')));
+    if ($id === '' || !preg_match('/^[a-z0-9_-]{1,20}$/', $id)) {
+        http_response_code(400);
+        header('Cache-Control: no-store');
+        echo json_encode(['id' => $id, 'found' => false, 'error' => 'Invalid aircraft id']);
+        exit;
+    }
+
+    header('Cache-Control: public, max-age=5');
+    $cacheKey = 'info_' . md5($id);
+    if (($cached = cache_get($cacheDir, $cacheKey, 5)) !== null) {
+        echo $cached;
+        exit;
+    }
+
+    if (!is_file($dbFile)) {
+        echo json_encode(['id' => $id, 'found' => false]);
+        exit;
+    }
+
+    try {
+        $pdo = open_db($dbFile);
+        $stmt = $pdo->prepare('
+            SELECT a.id, a.ddb_id, a.raw, a.timestamp, a.lat, a.lon,
+                   n.name,
+                   d.callsign, d.registration, d.model, d.aircraft_type
+            FROM aircraft a
+            LEFT JOIN names n ON a.id = n.id
+            LEFT JOIN ddb d ON a.ddb_id != \'\' AND a.ddb_id = d.id
+            WHERE a.id = :id AND a.timestamp >= :cutoff
+            LIMIT 1
+        ');
+        $stmt->execute([':id' => $id, ':cutoff' => time() - 86400]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$row) {
+            $json = json_encode(['id' => $id, 'found' => false]);
+            if ($json !== false) cache_set($cacheDir, $cacheKey, $json);
+            echo $json !== false ? $json : '{"id":"' . $id . '","found":false}';
+            exit;
+        }
+
+        $raw = (string)$row['raw'];
+        $name = extract_ogn_stream_name($raw) ?: clean_ogn_name($row['name'] ?? '');
+        $ddbId = strtolower((string)($row['ddb_id'] ?? ''));
+        $json = json_encode([
+            'id'          => $id,
+            'found'       => true,
+            'raw'         => $raw,
+            'timestamp'   => (int)$row['timestamp'],
+            'lat'         => (float)$row['lat'],
+            'lon'         => (float)$row['lon'],
+            'name'        => $name,
+            'ddb_id'      => $ddbId,
+            'callsign'    => (string)($row['callsign'] ?? ''),
+            'registration'=> (string)($row['registration'] ?? ''),
+            'model'       => (string)($row['model'] ?? ''),
+            'aircraft_type'=> (string)($row['aircraft_type'] ?? ''),
+        ], JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json !== false) {
+            cache_set($cacheDir, $cacheKey, $json);
+            echo $json;
+        } else {
+            echo json_encode(['id' => $id, 'found' => false]);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        header('Cache-Control: no-store');
+        echo json_encode(['id' => $id, 'found' => false, 'error' => 'Last-known read error']);
+    }
+    exit;
+}
+
+// --- 2. Track Endpoint ---
 if (isset($_GET['track']) && $_GET['track'] === '1') {
     $id = strtolower(trim((string)($_GET['id'] ?? '')));
     if ($id === '' || !preg_match('/^[a-z0-9_-]{1,20}$/', $id)) {
@@ -323,7 +399,7 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
     exit;
 }
 
-// --- 2. Today's Thermal Heatmap Endpoint ---
+// --- 3. Today's Thermal Heatmap Endpoint ---
 if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
     $bounds = parse_bounds();
     if (!$bounds) {
@@ -403,7 +479,7 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
     exit;
 }
 
-// --- 3. 24-Hour Time-Lapse Replay Endpoint ---
+// --- 4. 24-Hour Time-Lapse Replay Endpoint ---
 if (isset($_GET['replay']) && $_GET['replay'] === '1') {
     $bounds = parse_bounds();
     $ts = filter_input(INPUT_GET, 'ts', FILTER_VALIDATE_INT);
@@ -486,7 +562,7 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
     exit;
 }
 
-// --- 4. Live Viewport Endpoint ---
+// --- 5. Live Viewport Endpoint ---
 if (!isset($_GET['live']) || $_GET['live'] !== '1') {
     http_response_code(400);
     header('Cache-Control: no-store');

@@ -44,6 +44,8 @@ let lastFetchOkAtMs = 0;
 let lastFetchAttemptAtMs = 0;
 let lastStatusKind = 'connecting';
 let lastStatusText = 'Connecting…';
+let hashLookupMessageUntilMs = 0;
+let hashMessagePopup = null;
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -237,14 +239,17 @@ function distMeters(lat1, lon1, lat2, lon2) {
   return haversineKm(lat1, lon1, lat2, lon2) * 1000;
 }
 
-let initialCenter = BIR, initialZoom = 11, pendingHashSelect = null;
+let initialCenter = BIR, initialZoom = 11, pendingHashSelect = null, hashSelectAddress = null;
 if (location.hash.length > 1) {
   const parts = location.hash.slice(1).split(',');
   const lat = parseFloat(parts[0]), lon = parseFloat(parts[1]), z = parseInt(parts[2], 10);
   if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(z)) {
     initialCenter = [lat, lon];
     initialZoom = Math.max(2, Math.min(18, z));
-    if (parts[3]) pendingHashSelect = decodeURIComponent(parts[3]).toLowerCase();
+    if (parts[3]) {
+      pendingHashSelect = decodeURIComponent(parts[3]).toLowerCase();
+      hashSelectAddress = pendingHashSelect;
+    }
   }
 }
 
@@ -492,6 +497,7 @@ let trackReqSeq = 0, colorSeq = 0;
 
 const ddbCache = new Map();
 const aprsCache = new Map();
+const lastKnownCache = new Map();
 const telemetryCache = new Map();
 const parsedLineCache = new Map();
 const nameCache = new Map();
@@ -530,7 +536,7 @@ function setStatus(kind, text) {
   updateStatusUpdated();
 }
 
-function showToast(msg) {
+function showToast(msg, durationMs = 1800) {
   let t = document.getElementById('appToast');
   if (!t) {
     t = document.createElement('div');
@@ -543,7 +549,89 @@ function showToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(showToast._timer);
-  showToast._timer = setTimeout(() => t.classList.remove('show'), 1800);
+  showToast._timer = setTimeout(() => t.classList.remove('show'), durationMs);
+}
+
+function showMessagePopup(msg) {
+  if (hashMessagePopup) {
+    map.closePopup(hashMessagePopup);
+    hashMessagePopup = null;
+  }
+  const latlng = Array.isArray(initialCenter) &&
+    Number.isFinite(initialCenter[0]) && Number.isFinite(initialCenter[1])
+    ? initialCenter
+    : map.getCenter();
+
+  hashMessagePopup = L.popup({ maxWidth: 320, autoPan: false, keepInView: false })
+    .setLatLng(latlng)
+    .setContent(`<div class="message-popup"><div class="popup-title"><span class="popup-name">${esc(msg)}</span></div></div>`)
+    .openOn(map);
+
+  requestAnimationFrame(() => {
+    if (hashMessagePopup) keepPopupAboveBottomBar(hashMessagePopup.getElement());
+  });
+}
+
+function showHashLookupMessage(msg) {
+  hashLookupMessageUntilMs = Date.now() + 6000;
+  setStatus('error', msg);
+  showToast(msg, 6000);
+  showMessagePopup(msg);
+}
+
+async function loadHashAircraft(id) {
+  if (!id) return;
+  try {
+    const res = await fetch(`ogn-proxy.php?info=1&id=${encodeURIComponent(id)}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    // Live data may have arrived while this lookup was in flight.
+    if (markers.has(id)) {
+      if (pendingHashSelect === id) {
+        pendingHashSelect = null;
+        toggleSelection(id, true);
+      }
+      return;
+    }
+
+    if (!data.found) {
+      showHashLookupMessage('Aircraft not seen in last 24 hours');
+      return;
+    }
+
+    const tsMs = (Number(data.timestamp) || 0) * 1000;
+    if (!Number.isFinite(tsMs) || !data.raw) {
+      showHashLookupMessage('Could not load last known position');
+      return;
+    }
+
+    lastKnownCache.set(id, {
+      raw: data.raw,
+      received_at: new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      timestamp: tsMs
+    });
+    if (data.name) nameCache.set(id, String(data.name));
+    const ddbId = String(data.ddb_id || '').toLowerCase();
+    if (ddbId) {
+      ddbCache.set(ddbId, {
+        callsign: String(data.callsign || ''),
+        registration: String(data.registration || ''),
+        model: String(data.model || ''),
+        ddbAircraftType: String(data.aircraft_type || '')
+      });
+    }
+
+    rebuildAircraftArray();
+    render();
+    if (markers.has(id) && pendingHashSelect === id) {
+      pendingHashSelect = null;
+      toggleSelection(id, true);
+    }
+  } catch (err) {
+    console.warn('ogn-tracker hash aircraft lookup failed', err);
+    showHashLookupMessage('Could not load last known position');
+  }
 }
 
 function updateUrlHash() {
@@ -1431,6 +1519,19 @@ function readCachedWeather(keys, nowMs, ttlMs) {
   return combined;
 }
 
+function applyCachedAircraftMeta(a) {
+  if (nameCache.has(a.address)) a.streamName = nameCache.get(a.address);
+  else if (nameCache.has(a.ddbId)) a.streamName = nameCache.get(a.ddbId);
+
+  const details = ddbCache.get(a.ddbId);
+  if (details) {
+    if (details.callsign) a.callsign = details.callsign;
+    if (details.registration) a.registration = details.registration;
+    if (details.model) a.model = details.model;
+    if (details.ddbAircraftType !== '') a.ddbAircraftType = details.ddbAircraftType;
+  }
+}
+
 function rebuildAircraftArray() {
   const now = serverNow();
   const maxAgeMs = (Number($('markerWindow').value) || 900) * 1000;
@@ -1462,16 +1563,7 @@ function rebuildAircraftArray() {
     if (a.climb != null) lastClimbCache.set(a.address, a.climb);
     else if (lastClimbCache.has(a.address)) a.climb = lastClimbCache.get(a.address);
 
-    if (nameCache.has(a.address)) a.streamName = nameCache.get(a.address);
-    else if (nameCache.has(a.ddbId)) a.streamName = nameCache.get(a.ddbId);
-
-    const details = ddbCache.get(a.ddbId);
-    if (details) {
-      if (details.callsign) a.callsign = details.callsign;
-      if (details.registration) a.registration = details.registration;
-      if (details.model) a.model = details.model;
-      if (details.ddbAircraftType !== '') a.ddbAircraftType = details.ddbAircraftType;
-    }
+    applyCachedAircraftMeta(a);
 
     if (getResolvedType(a) === 15) {
       const dispName = displayName(a), coordKey = a.lat.toFixed(4) + '_' + a.lon.toFixed(4);
@@ -1489,6 +1581,20 @@ function rebuildAircraftArray() {
       }
       seenStations.set(dispName, a); seenStations.set(coordKey, a);
     }
+    aircraft.push(a);
+  }
+
+  for (const [id, cached] of lastKnownCache.entries()) {
+    // Once live data for this aircraft arrives, the live packet supersedes it.
+    if (aprsCache.has(id) || aircraft.some(a => a.address === id)) continue;
+    const a = parseAprsLineCached(cached.raw, cached.timestamp);
+    if (!a) continue;
+    a.id = id;
+    a.address = id;
+    a.aprsPacket = cached.raw;
+    a.aprsReceivedAt = cached.received_at;
+    a.__lastKnown = true;
+    applyCachedAircraftMeta(a);
     aircraft.push(a);
   }
 
@@ -1831,6 +1937,7 @@ function filtered() {
   const q = $('search').value.trim().toLowerCase();
   const selectedTypes = getSelectedTypes();
   return aircraft.filter(a => {
+    if (a.address === pendingHashSelect || lastKnownCache.has(a.address)) return true;
     const matches = !q || `${displayName(a)} ${a.id} ${a.callsign} ${a.registration} ${a.model} ${a.ognId} ${a.address}`.toLowerCase().includes(q);
     if (isEmergency(a)) return matches;
     if (!selectedTypes) return matches;
@@ -2455,6 +2562,9 @@ async function fetchLive(force = false) {
       return;
     }
 
+    // Keep a shared-link lookup message visible briefly even if live data lands.
+    if (Date.now() < hashLookupMessageUntilMs) return;
+
     const updatedSecAgo = updatedMs ? Math.max(0, Math.floor((nowTick - updatedMs) / 1000)) : null;
     if (collectorPaused) {
       setStatus('error', updatedSecAgo != null ? `Collector paused (${fmtAge(updatedSecAgo).replace(' ago', '')} old)` : 'Collector paused (>2m old)');
@@ -2808,6 +2918,7 @@ $('locate').addEventListener('click', () => {
 render24hAlertsSummary(serverNow());
 syncUnitButtons();
 updateSearchUi();
+if (hashSelectAddress) loadHashAircraft(hashSelectAddress);
 fetchLive(true);
 setInterval(() => fetchLive(false), 5000);
 
