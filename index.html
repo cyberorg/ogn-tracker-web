@@ -9,7 +9,7 @@
 <title>OGN Glider Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261122f">
+<link rel="stylesheet" href="style.css?v=20261122g">
 </head>
 <body>
 <div class="app">
@@ -19,6 +19,7 @@
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
     <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
+    <a class="tool-link" href="insights.php" title="24-hour network insights">📊 Insights</a>
     <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
   <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
