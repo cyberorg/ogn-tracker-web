@@ -143,6 +143,73 @@ if (!in_array('alt', $alertCols, true)) {
     $pdo->exec('ALTER TABLE alerts ADD COLUMN alt REAL;');
 }
 
+function normalize_ogn_name_encoding($value): string {
+    $raw = (string)$value;
+    if ($raw === '' || preg_match('//u', $raw)) return $raw;
+
+    $out = '';
+    $len = strlen($raw);
+    for ($i = 0; $i < $len;) {
+        $b = ord($raw[$i]);
+        if ($b < 0x80) {
+            $out .= $raw[$i++];
+            continue;
+        }
+
+        $seq = null;
+        if ($b >= 0xC2 && $b <= 0xDF && $i + 1 < $len) {
+            $b1 = ord($raw[$i + 1]);
+            if ($b1 >= 0x80 && $b1 <= 0xBF) $seq = substr($raw, $i, 2);
+        } elseif ($b >= 0xE0 && $b <= 0xEF && $i + 2 < $len) {
+            $b1 = ord($raw[$i + 1]);
+            $b2 = ord($raw[$i + 2]);
+            if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF &&
+                !($b === 0xE0 && $b1 < 0xA0) && !($b === 0xED && $b1 > 0x9F)) {
+                $seq = substr($raw, $i, 3);
+            }
+        } elseif ($b >= 0xF0 && $b <= 0xF4 && $i + 3 < $len) {
+            $b1 = ord($raw[$i + 1]);
+            $b2 = ord($raw[$i + 2]);
+            $b3 = ord($raw[$i + 3]);
+            if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF && $b3 >= 0x80 && $b3 <= 0xBF &&
+                !($b === 0xF0 && $b1 < 0x90) && !($b === 0xF4 && $b1 > 0x8F)) {
+                $seq = substr($raw, $i, 4);
+            }
+        }
+
+        if ($seq !== null) {
+            $out .= $seq;
+            $i += strlen($seq);
+            continue;
+        }
+
+        $byte = $raw[$i];
+        if (function_exists('iconv')) {
+            $converted = @iconv('Windows-1252', 'UTF-8//IGNORE', $byte);
+            $out .= ($converted !== false && $converted !== '') ? $converted : '?';
+        } elseif (function_exists('mb_convert_encoding')) {
+            $converted = @mb_convert_encoding($byte, 'UTF-8', 'Windows-1252');
+            $out .= (is_string($converted) && $converted !== '') ? $converted : '?';
+        } else {
+            $out .= '?';
+        }
+        $i++;
+    }
+    return $out;
+}
+
+function clean_ogn_name($value): string {
+    $raw = normalize_ogn_name_encoding($value);
+    if ($raw === '' || !preg_match('//u', $raw)) return '';
+    if (preg_match('/[\x00-\x1F\x7F\x{80}-\x{9F}]/u', $raw) || preg_match('/[\x{2400}-\x{243F}\x{FFFD}]/u', $raw)) return '';
+    return trim(preg_replace('/\s+/u', ' ', $raw) ?? $raw);
+}
+
+function extract_ogn_stream_name(string $line): string {
+    if (!preg_match('/Name="([^"]*)"/', $line, $m)) return '';
+    return clean_ogn_name($m[1]);
+}
+
 function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
     $dLat = deg2rad($lat2 - $lat1);
     $dLon = deg2rad($lon2 - $lon1);
@@ -172,16 +239,7 @@ function detect_alert_status(string $line): ?string {
     if (preg_match('/\bFNT7([0-9a-f])\b/i', $line, $fm)) {
         $hex = strtolower($fm[1]);
         if (isset($fanetLabels[$hex])) {
-            $reason = $fanetLabels[$hex];
-            $colonPos = strpos($line, ':');
-            if ($colonPos !== false) {
-                $tail = preg_replace('/\bFNT[0-9a-f]{2}\b/i', '', substr($line, $colonPos + 1));
-                $tail = trim(preg_replace('/\s+/', ' ', (string)$tail));
-                if ($tail !== '' && !preg_match('/^[\d.NSWE\s\/+-]+$/', $tail)) {
-                    $reason .= ': ' . substr($tail, 0, 48);
-                }
-            }
-            return $reason;
+            return $fanetLabels[$hex];
         }
     }
     if (preg_match('/\bsq(7700|7600|7500)\b/i', $line, $sm)) {
@@ -193,17 +251,13 @@ function detect_alert_status(string $line): ?string {
         return $map[$sm[1]];
     }
     if (preg_match('/^[^>]+>EMERGENCY[,:]/i', $line)) {
-        $colonPos = strpos($line, ':');
-        $detail = $colonPos !== false ? trim(substr($line, $colonPos + 1)) : '';
-        return $detail !== '' ? 'APRS Emergency: ' . substr($detail, 0, 48) : 'APRS Emergency';
+        return 'APRS Emergency';
     }
     $colonPos = strpos($line, ':');
     if ($colonPos !== false) {
         $payload = trim(substr($line, $colonPos + 1));
         if (preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $payload, $km)) {
-            $tag = strtoupper($km[1]);
-            $cleanNote = trim(preg_replace('/\b(MAYDAY|SOS|EMERGENCY)\b[:\s-]*/i', '', $payload));
-            return $cleanNote !== '' ? "Alert ({$tag}): " . substr($cleanNote, 0, 44) : "Alert ({$tag})";
+            return 'Alert (' . strtoupper($km[1]) . ')';
         }
     }
     return null;
@@ -775,17 +829,14 @@ while (microtime(true) < $deadline && !feof($socket)) {
 
             $now = time();
 
-            $streamName = '';
-            if (preg_match('/Name="([^"]+)"/', $line, $nm)) {
-                $streamName = trim($nm[1]);
-                if ($streamName !== '') {
-                    $nameBatch[$id] = $streamName;
-                    if ($ddbId !== '') {
-                        register_station_alias($stationAliases, $id, $ddbId);
-                        register_station_alias($stationAliases, $ddbId, $streamName);
-                    }
-                    register_station_alias($stationAliases, $id, $streamName);
+            $streamName = extract_ogn_stream_name($line);
+            if ($streamName !== '') {
+                $nameBatch[$id] = $streamName;
+                if ($ddbId !== '') {
+                    register_station_alias($stationAliases, $id, $ddbId);
+                    register_station_alias($stationAliases, $ddbId, $streamName);
                 }
+                register_station_alias($stationAliases, $id, $streamName);
             }
 
             $wxFields = parse_aprs_weather_fields($line);

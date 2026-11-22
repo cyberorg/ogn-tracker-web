@@ -15,10 +15,10 @@ button{cursor:pointer;font-size:13px}button:hover{border-color:var(--accent)}but
 main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .map-wrap{position:relative;height:100%;width:100%;min-height:0}
 #map{height:100%;width:100%;background:#dce5e8}
-.map-scale{position:absolute;bottom:10px;left:50%;transform:translateX(-50%);z-index:590;display:flex;flex-direction:column;align-items:center;pointer-events:none;background:#17232fe6;border:1px solid var(--line);border-radius:7px;padding:3px 9px 4px;box-shadow:0 2px 8px #0007;transition:bottom .18s ease}
+.map-scale{position:absolute;right:10px;bottom:46px;z-index:590;display:flex;flex-direction:column;align-items:flex-end;pointer-events:none;background:#17232fe6;border:1px solid var(--line);border-radius:7px;padding:3px 9px 4px;box-shadow:0 2px 8px #0007;transition:bottom .18s ease}
 .map-scale-label{font-size:10px;font-weight:700;color:var(--text);line-height:1.15;margin-bottom:3px;white-space:nowrap}
 .map-scale-bar{height:5px;border-left:2px solid var(--accent);border-right:2px solid var(--accent);border-bottom:2px solid var(--accent);min-width:44px}
-.map-wrap.has-bottom-bar .map-scale{bottom:106px}
+.map-wrap.has-bottom-bar .map-scale{bottom:118px}
 .emerg-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:600;background:#3d1118f2;border:1px solid var(--red);color:#ffe5e5;padding:7px 12px;border-radius:9px;display:none;align-items:center;gap:10px;box-shadow:0 4px 16px #000a;font-size:12px;max-width:calc(100% - 24px)}
 .emerg-banner.show{display:flex}
 .emerg-banner button{background:var(--red);color:#1a070a;border:0;font-weight:700;padding:4px 9px;font-size:11px;border-radius:6px}
@@ -96,7 +96,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .popup-details[open] summary{margin-bottom:4px}
 .snr-badge{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle}
 .snr-strong{background:#1b4d3e;color:#57d3b0;border:1px solid #2d7a63}.snr-good{background:#4a3d1a;color:#f5c451;border:1px solid #7d672a}.snr-weak{background:#4d2024;color:#f07878;border:1px solid #80333a}
-.glider-icon{background:transparent;border:0}.glider-wrap{width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid #57d3b0;display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000);fill:#57d3b0;stroke:#d9fff4;stroke-width:0.7}
+.glider-icon{background:transparent;border:0;overflow:visible}.glider-wrap{--marker-color:#57d3b0;position:relative;width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid var(--marker-color);display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000);fill:var(--marker-color);stroke:#d9fff4;stroke-width:0.7}
+.glider-label{position:absolute;top:calc(100% + 5px);left:50%;transform:translateX(-50%);max-width:150px;padding:1px 5px;border:1px solid #2b3d4c;border-radius:5px;background:#0c1620e6;color:#edf4f8;font:600 10px/1.2 system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;opacity:0;visibility:hidden;box-shadow:0 1px 5px #0009}
+.glider-icon.show-name .glider-label{opacity:1;visibility:visible}
 .glider-wrap.emergency{background:#3d1118ee;border:2px solid var(--red);animation:emergency-pulse 1.4s ease-out infinite}
 .glider-wrap.emergency svg{fill:#ff6b6b;stroke:#ffe0e0}
 @keyframes emergency-pulse{0%{box-shadow:0 0 0 0 rgba(240,120,120,.85)}70%{box-shadow:0 0 0 14px rgba(240,120,120,0)}100%{box-shadow:0 0 0 0 rgba(240,120,120,0)}}
@@ -149,6 +151,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
   .aircraft-list{display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow:visible}
   .aircraft{padding:9px}.pin-btn{opacity:.85}
   .barogram,.replay-bar{width:calc(100% - 20px);bottom:54px}
-  .map-wrap.has-bottom-bar .map-scale{bottom:146px}
+  .map-wrap.has-bottom-bar .map-scale{bottom:162px}
 }
 @media(max-width:480px){.aircraft-list{grid-template-columns:1fr}.toolbar button{padding:6px 8px;font-size:12px}}

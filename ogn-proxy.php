@@ -45,6 +45,73 @@ function cache_set(string $cacheDir, string $key, string $payload): void {
     }
 }
 
+function normalize_ogn_name_encoding($value): string {
+    $raw = (string)$value;
+    if ($raw === '' || preg_match('//u', $raw)) return $raw;
+
+    $out = '';
+    $len = strlen($raw);
+    for ($i = 0; $i < $len;) {
+        $b = ord($raw[$i]);
+        if ($b < 0x80) {
+            $out .= $raw[$i++];
+            continue;
+        }
+
+        $seq = null;
+        if ($b >= 0xC2 && $b <= 0xDF && $i + 1 < $len) {
+            $b1 = ord($raw[$i + 1]);
+            if ($b1 >= 0x80 && $b1 <= 0xBF) $seq = substr($raw, $i, 2);
+        } elseif ($b >= 0xE0 && $b <= 0xEF && $i + 2 < $len) {
+            $b1 = ord($raw[$i + 1]);
+            $b2 = ord($raw[$i + 2]);
+            if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF &&
+                !($b === 0xE0 && $b1 < 0xA0) && !($b === 0xED && $b1 > 0x9F)) {
+                $seq = substr($raw, $i, 3);
+            }
+        } elseif ($b >= 0xF0 && $b <= 0xF4 && $i + 3 < $len) {
+            $b1 = ord($raw[$i + 1]);
+            $b2 = ord($raw[$i + 2]);
+            $b3 = ord($raw[$i + 3]);
+            if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF && $b3 >= 0x80 && $b3 <= 0xBF &&
+                !($b === 0xF0 && $b1 < 0x90) && !($b === 0xF4 && $b1 > 0x8F)) {
+                $seq = substr($raw, $i, 4);
+            }
+        }
+
+        if ($seq !== null) {
+            $out .= $seq;
+            $i += strlen($seq);
+            continue;
+        }
+
+        $byte = $raw[$i];
+        if (function_exists('iconv')) {
+            $converted = @iconv('Windows-1252', 'UTF-8//IGNORE', $byte);
+            $out .= ($converted !== false && $converted !== '') ? $converted : '?';
+        } elseif (function_exists('mb_convert_encoding')) {
+            $converted = @mb_convert_encoding($byte, 'UTF-8', 'Windows-1252');
+            $out .= (is_string($converted) && $converted !== '') ? $converted : '?';
+        } else {
+            $out .= '?';
+        }
+        $i++;
+    }
+    return $out;
+}
+
+function clean_ogn_name($value): string {
+    $raw = normalize_ogn_name_encoding($value);
+    if ($raw === '' || !preg_match('//u', $raw)) return '';
+    if (preg_match('/[\x00-\x1F\x7F\x{80}-\x{9F}]/u', $raw) || preg_match('/[\x{2400}-\x{243F}\x{FFFD}]/u', $raw)) return '';
+    return trim(preg_replace('/\s+/u', ' ', $raw) ?? $raw);
+}
+
+function extract_ogn_stream_name(string $line): string {
+    if (!preg_match('/Name="([^"]*)"/', $line, $m)) return '';
+    return clean_ogn_name($m[1]);
+}
+
 function open_db(string $dbFile): PDO {
     $pdo = new PDO('sqlite:' . $dbFile, null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
@@ -109,6 +176,12 @@ function expand_station_alias_set(array $aliasGraph, string $key): array {
     return array_keys($visited);
 }
 
+function clean_alert_status($value): string {
+    $status = trim((string)$value);
+    $colon = strpos($status, ':');
+    return $colon === false ? $status : rtrim(substr($status, 0, $colon));
+}
+
 function format_packet_status(string $line, string $fallback = 'Normal'): string {
     static $fanetMap = [
         '0' => 'Other',
@@ -126,20 +199,7 @@ function format_packet_status(string $line, string $fallback = 'Normal'): string
     if (preg_match('/\bFNT([17])([0-9a-f])\b/i', $line, $fm)) {
         if ($fm[1] === '1') return 'Airborne';
         $hex = strtolower($fm[2]);
-        if (isset($fanetMap[$hex])) {
-            $label = $fanetMap[$hex];
-            if (in_array($hex, ['c', 'd', 'e', 'f'], true)) {
-                $colonPos = strpos($line, ':');
-                if ($colonPos !== false) {
-                    $tail = preg_replace('/\bFNT[0-9a-f]{2}\b/i', '', substr($line, $colonPos + 1));
-                    $tail = trim(preg_replace('/\s+/', ' ', (string)$tail));
-                    if ($tail !== '' && !preg_match('/^[\d.NSWE\s\/+-]+$/', $tail)) {
-                        $label .= ': ' . substr($tail, 0, 48);
-                    }
-                }
-            }
-            return $label;
-        }
+        if (isset($fanetMap[$hex])) return $fanetMap[$hex];
     }
     if (preg_match('/\bsq(7700|7600|7500)\b/i', $line, $sm)) {
         $sqMap = [
@@ -149,21 +209,15 @@ function format_packet_status(string $line, string $fallback = 'Normal'): string
         ];
         return $sqMap[$sm[1]];
     }
-    if (preg_match('/^[^>]+>EMERGENCY[,:]/i', $line)) {
-        $colonPos = strpos($line, ':');
-        $detail = $colonPos !== false ? trim(substr($line, $colonPos + 1)) : '';
-        return $detail !== '' ? 'APRS Emergency: ' . substr($detail, 0, 48) : 'APRS Emergency';
-    }
+    if (preg_match('/^[^>]+>EMERGENCY[,:]/i', $line)) return 'APRS Emergency';
     $colonPos = strpos($line, ':');
     if ($colonPos !== false) {
         $payload = trim(substr($line, $colonPos + 1));
         if (preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $payload, $km)) {
-            $tag = strtoupper($km[1]);
-            $note = trim(preg_replace('/\b(MAYDAY|SOS|EMERGENCY)\b[:\s-]*/i', '', $payload));
-            return $note !== '' ? "Alert ({$tag}): " . substr($note, 0, 44) : "Alert ({$tag})";
+            return 'Alert (' . strtoupper($km[1]) . ')';
         }
     }
-    return $fallback;
+    return clean_alert_status($fallback);
 }
 
 function extract_altitude_from_raw(string $raw): ?float
@@ -399,7 +453,7 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
 
         $out = [];
         while ($r = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $label = $r['name'] ?: ($r['callsign'] ?: ($r['registration'] ?: strtoupper($r['id'])));
+            $label = clean_ogn_name($r['name']) ?: (clean_ogn_name($r['callsign']) ?: (clean_ogn_name($r['registration']) ?: strtoupper((string)$r['id'])));
             $out[] = [
                 'id'    => $r['id'],
                 'label' => $label,
@@ -498,9 +552,10 @@ try {
         ];
         if ($includeMeta) {
             $ddbId = $row['ddb_id'] ?? '';
-            if (!empty($row['name'])) {
-                $names[$id] = $row['name'];
-            }
+            $rawName = extract_ogn_stream_name((string)($row['raw'] ?? ''));
+            $storedName = clean_ogn_name($row['name'] ?? '');
+            if ($rawName !== '') $names[$id] = $rawName;
+            elseif ($storedName !== '') $names[$id] = $storedName;
             if ($ddbId !== '' && (isset($row['callsign']) || isset($row['registration']) || isset($row['model']) || isset($row['aircraft_type']))) {
                 $ddb[$ddbId] = [
                     'callsign'        => (string)($row['callsign'] ?? ''),
@@ -578,11 +633,17 @@ try {
 
     // 24-hour alerts (excluding routine 'Need a ride' / FNT78) with alert reason, last-seen coords/time, and post-alert state
     $alerts24h = [];
-    $alertsCacheKey = 'alerts24h_v8';
+    $alertsCacheKey = 'alerts24h_v9';
     $alertsCached = cache_get($cacheDir, $alertsCacheKey, 10);
     if ($alertsCached !== null) {
         $decodedAlerts = json_decode($alertsCached, true);
         if (is_array($decodedAlerts)) {
+            foreach ($decodedAlerts as &$cachedAlert) {
+                if (!is_array($cachedAlert)) continue;
+                $cachedAlert['status'] = clean_alert_status($cachedAlert['status'] ?? '');
+                $cachedAlert['last_status'] = clean_alert_status($cachedAlert['last_status'] ?? ($cachedAlert['status'] ?? ''));
+            }
+            unset($cachedAlert);
             $alerts24h = $decodedAlerts;
         }
     } else {
@@ -619,10 +680,10 @@ try {
                     $subsequentNormal = ($latestTs > $alertTs) && !$latestHasAlert;
                     $stillAlertOnLast = !$subsequentNormal && $latestHasAlert;
 
-                    $storedStatus = trim((string)$ar['status']);
+                    $storedStatus = clean_alert_status($ar['status'] ?? '');
                     $decodedAlertStatus = format_packet_status($alertRaw, $storedStatus !== '' ? $storedStatus : 'Alert');
-                    if (($storedStatus === '' || $storedStatus === 'Alert') && $decodedAlertStatus !== 'Alert') {
-                        $storedStatus = $decodedAlertStatus;
+                    if ($decodedAlertStatus !== 'Alert') {
+                        $storedStatus = clean_alert_status($decodedAlertStatus);
                     }
                     $lastStatus = $subsequentNormal
                         ? format_packet_status($latestRaw, 'Normal packet')
@@ -635,7 +696,7 @@ try {
                     if ($alertAlt === null) $alertAlt = extract_altitude_from_raw($rawForAlt);
                     if ($alertAlt === null) $alertAlt = extract_altitude_from_raw($alertRaw);
 
-                    $label = $ar['name'] ?: ($ar['callsign'] ?: ($ar['registration'] ?: strtoupper((string)$ar['id'])));
+                    $label = extract_ogn_stream_name($rawForAlt) ?: (clean_ogn_name($ar['name']) ?: (clean_ogn_name($ar['callsign']) ?: (clean_ogn_name($ar['registration']) ?: strtoupper((string)$ar['id']))));
                     $byAddr[$addr] = [
                         'address'        => $addr,
                         'name'           => $label,
@@ -676,7 +737,7 @@ try {
                 if (isset($byAddr[$addr]) && $byAddr[$addr]['ts'] >= $ts) continue;
                 $raw = (string)$ar['raw'];
                 $status = format_packet_status($raw, 'Alert');
-                $label = $ar['name'] ?: ($ar['callsign'] ?: ($ar['registration'] ?: strtoupper((string)$ar['id'])));
+                $label = extract_ogn_stream_name($raw) ?: (clean_ogn_name($ar['name']) ?: (clean_ogn_name($ar['callsign']) ?: (clean_ogn_name($ar['registration']) ?: strtoupper((string)$ar['id']))));
                 $byAddr[$addr] = [
                     'address'        => $addr,
                     'name'           => $label,
@@ -771,7 +832,7 @@ try {
             $sid = strtolower((string)$r['id']);
             $farthestTs = (int)$r['farthest_ts'];
             $hasFarthest = $farthestTs >= $cutoff24 && (float)$r['max_km'] > 0;
-            $label = $r['name'] ?: ($r['callsign'] ?: ($r['registration'] ?: strtoupper((string)$r['farthest_id'])));
+            $label = clean_ogn_name($r['name']) ?: (clean_ogn_name($r['callsign']) ?: (clean_ogn_name($r['registration']) ?: strtoupper((string)$r['farthest_id'])));
             $stationStats[$r['id']] = [
                 'heard_24h' => max(0, (int)($r['heard_24h'] ?? 0)),
                 'max_km'    => $hasFarthest ? round((float)$r['max_km'], 1) : 0.0,
@@ -804,6 +865,7 @@ try {
         echo $json;
     }
 } catch (Throwable $e) {
+    error_log('ogn-proxy DB error: ' . $e->getMessage() . ' at ' . basename($e->getFile()) . ':' . $e->getLine());
     http_response_code(500);
     header('Cache-Control: no-store');
     echo json_encode(['error' => 'Database read error']);

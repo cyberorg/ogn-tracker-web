@@ -13,6 +13,16 @@ const TRACK_COLORS = ['#38bdf8','#f97316','#a855f7','#22c55e','#f43f5e','#eab308
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const cleanName = s => {
+  const raw = String(s ?? '');
+  if (!raw || /[\u0000-\u001F\u007F-\u009F\uFFFD]/.test(raw) || /[\u2400-\u243F]/.test(raw)) return '';
+  return raw.replace(/\s+/g, ' ').trim();
+};
+const cleanAlertStatus = s => {
+  const raw = String(s ?? '').trim();
+  const colon = raw.indexOf(':');
+  return (colon === -1 ? raw : raw.slice(0, colon)).trim();
+};
 
 // Persistent menu preferences across reloads & reconnects
 let altUnit = 'm';
@@ -23,6 +33,9 @@ let alertsEnabled = false;
 let savedTypes = ['para', 'wx'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
+let savedVarioTrackMode = false;
+let savedBarogramEnabled = false;
+let barogramEnabled = false;
 let collectorPaused = false;
 let lastFetchOkAtMs = 0;
 let lastFetchAttemptAtMs = 0;
@@ -39,6 +52,11 @@ try {
   if (Array.isArray(prefs.types) && prefs.types.length > 0) savedTypes = prefs.types;
   if (typeof prefs.markerWindow === 'string' && prefs.markerWindow) savedMarkerWindow = prefs.markerWindow;
   if (typeof prefs.trackWindow === 'string' && prefs.trackWindow) savedTrackWindow = prefs.trackWindow;
+  if (typeof prefs.varioTrackMode === 'boolean') savedVarioTrackMode = prefs.varioTrackMode;
+  if (typeof prefs.barogramEnabled === 'boolean') {
+    savedBarogramEnabled = prefs.barogramEnabled;
+    barogramEnabled = prefs.barogramEnabled;
+  }
 } catch (e) {}
 
 function getCurrentTypesArray() {
@@ -58,6 +76,8 @@ function isDefaultFilterState() {
     !searchQ &&
     $('markerWindow').value === '900' &&
     $('trackWindow').value === '900' &&
+    !varioTrackMode &&
+    !barogramEnabled &&
     isMetricPreset();
 }
 
@@ -81,7 +101,9 @@ function saveMenuPrefs() {
       alertsEnabled,
       types: getCurrentTypesArray(),
       markerWindow: $('markerWindow').value,
-      trackWindow: $('trackWindow').value
+      trackWindow: $('trackWindow').value,
+      varioTrackMode,
+      barogramEnabled
     }));
   } catch (e) {}
   updateFilterBadge();
@@ -107,6 +129,16 @@ function applySavedMenuPrefs() {
   $('btnNotify').classList.toggle('active', alertsEnabled);
   $('btnNotify').textContent = alertsEnabled ? '🔔 ON' : '🔔 OFF';
   $('btnNotify').setAttribute('aria-pressed', String(alertsEnabled));
+  varioTrackMode = savedVarioTrackMode;
+  syncTrackModeButtons();
+  barogramEnabled = savedBarogramEnabled;
+  syncBarogramButton();
+  if (!barogramEnabled) {
+    $('barogram').classList.remove('show');
+    syncBottomBarOffset();
+  } else if (activeBaroAddress && baroDismissedAddress !== activeBaroAddress) {
+    renderBarogram(activeBaroAddress);
+  }
   updateSearchUi();
   updateFilterBadge();
 }
@@ -116,8 +148,12 @@ function resetFilters() {
   savedTypes = ['para', 'wx'];
   savedMarkerWindow = '900';
   savedTrackWindow = '900';
+  savedVarioTrackMode = false;
+  savedBarogramEnabled = false;
+  barogramEnabled = false;
   altUnit = 'm'; speedUnit = 'kmh'; tempUnit = 'c'; climbUnit = 'mps';
   applySavedMenuPrefs();
+  redrawAllTracks();
   saveMenuPrefs();
   syncUnitButtons();
   $('listHint').textContent = '';
@@ -156,6 +192,11 @@ function fmtAltValue(meters) {
   return `${Math.round(meters).toLocaleString()} m`;
 }
 const fmtAlt = v => fmtAltValue(v);
+function fmtAltCompact(meters) {
+  if (meters == null) return '';
+  if (altUnit === 'ft') return `${Math.round(meters * 3.28084)}ft`;
+  return `${Math.round(meters)}m`;
+}
 
 function fmtWindSpeed(kmh) {
   if (kmh == null) return '';
@@ -254,6 +295,29 @@ function updateBottomScale() {
 
   $('mapScaleLabel').textContent = bestLabel;
   $('mapScaleBar').style.width = `${bestPx}px`;
+  updateScalePosition();
+}
+
+// Keep the scale directly above the layers control, and above any visible bottom bar.
+function updateScalePosition() {
+  const scale = $('mapScale');
+  if (!scale) return;
+  const mapRect = $('map').getBoundingClientRect();
+  let bottom = 46;
+
+  const layersControl = document.querySelector('.leaflet-control-layers');
+  if (layersControl) {
+    const rect = layersControl.getBoundingClientRect();
+    if (rect.height > 0) bottom = Math.max(bottom, Math.ceil(mapRect.bottom - rect.top + 6));
+  }
+
+  const bar = visibleBottomBarEl();
+  if (bar) {
+    const rect = bar.getBoundingClientRect();
+    if (rect.height > 0) bottom = Math.max(bottom, Math.ceil(mapRect.bottom - rect.top + 8));
+  }
+
+  scale.style.bottom = `${bottom}px`;
 }
 
 function syncBottomBarOffset() {
@@ -268,6 +332,7 @@ function syncBottomBarOffset() {
   } else {
     wrap.style.removeProperty('--popup-max-h');
   }
+  updateScalePosition();
   requestAnimationFrame(() => keepPopupAboveBottomBar());
 }
 
@@ -301,6 +366,7 @@ function applyUnitPreset(mode) {
 }
 
 map.on('zoomend moveend resize', updateBottomScale);
+map.on('zoomend moveend resize', updateMarkerLabels);
 map.on('zoomend resize', () => keepPopupAboveBottomBar());
 map.on('move zoom zoomanim resize zoomend viewreset', syncRaisedPopupPane);
 window.addEventListener('resize', syncBottomBarOffset);
@@ -323,7 +389,8 @@ const airspaceLayer = L.geoJSON(null, {
 
 const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
 const overlayMaps = { "Thermals (Today)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
-L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
+const layersControl = L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
+layersControl.getContainer()?.addEventListener('click', () => requestAnimationFrame(updateScalePosition));
 
 const clusterGroup = L.markerClusterGroup({
   maxClusterRadius: 35, spiderfyOnMaxZoom: true, showCoverageOnHover: false, zoomToBoundsOnClick: true, spiderfyDistanceMultiplier: 1.5,
@@ -347,7 +414,7 @@ let lastMetaBounds = null;
 const knownIds = new Set();
 
 let followedAddress = null;
-let varioTrackMode = false;
+let varioTrackMode = savedVarioTrackMode;
 let activeBaroAddress = null;
 let baroDismissedAddress = null;
 const lastPinnedStatus = new Map();
@@ -364,8 +431,8 @@ try {
           alerts24hHistory.set(String(item.address).toLowerCase(), {
             address: String(item.address).toLowerCase(),
             name: String(item.name || item.address).toUpperCase(),
-            status: String(item.status),
-            lastStatus: String(item.lastStatus || item.status),
+            status: cleanAlertStatus(item.status),
+            lastStatus: cleanAlertStatus(item.lastStatus || item.status),
             lat: Number.isFinite(Number(item.lat)) ? Number(item.lat) : null,
             lon: Number.isFinite(Number(item.lon)) ? Number(item.lon) : null,
             raw: String(item.raw || ''),
@@ -538,9 +605,46 @@ function redrawAllTracks() {
   }
 }
 
-function toggleVarioMode() {
-  varioTrackMode = !varioTrackMode;
+function syncTrackModeButtons() {
+  const flatBtn = $('btnTrackFlat');
+  const varioBtn = $('btnTrackVario');
+  if (!flatBtn || !varioBtn) return;
+  flatBtn.classList.toggle('active', !varioTrackMode);
+  varioBtn.classList.toggle('active', varioTrackMode);
+  flatBtn.setAttribute('aria-pressed', String(!varioTrackMode));
+  varioBtn.setAttribute('aria-pressed', String(varioTrackMode));
+}
+
+function setTrackColorMode(vario) {
+  if (varioTrackMode === vario) return;
+  varioTrackMode = vario;
+  savedVarioTrackMode = vario;
+  syncTrackModeButtons();
+  saveMenuPrefs();
   redrawAllTracks();
+}
+
+function syncBarogramButton() {
+  const btn = $('btnBarogram');
+  if (!btn) return;
+  btn.classList.toggle('active', barogramEnabled);
+  btn.setAttribute('aria-pressed', String(barogramEnabled));
+  btn.textContent = `📈 ${barogramEnabled ? 'ON' : 'OFF'}`;
+}
+
+function setBarogramEnabled(on) {
+  if (barogramEnabled === on) return;
+  barogramEnabled = on;
+  savedBarogramEnabled = on;
+  syncBarogramButton();
+  saveMenuPrefs();
+  if (!on) {
+    $('barogram').classList.remove('show');
+    syncBottomBarOffset();
+  } else {
+    baroDismissedAddress = null;
+    if (activeBaroAddress) renderBarogram(activeBaroAddress);
+  }
 }
 
 function toggleFollow(address) {
@@ -558,8 +662,12 @@ function toggleFollow(address) {
 }
 
 function renderBarogram(address, scrubIdx = null) {
-  // Keep the barogram closed after the user dismisses it until a track is selected again.
-  if (baroDismissedAddress === address) return;
+  // Keep the barogram closed when disabled, or after the user dismisses it, until a track is selected again.
+  if (!barogramEnabled || baroDismissedAddress === address) {
+    $('barogram').classList.remove('show');
+    syncBottomBarOffset();
+    return;
+  }
   const entry = selectedTracks.get(address);
   if (!entry || !entry.points || entry.points.length < 2) {
     $('barogram').classList.remove('show');
@@ -771,7 +879,7 @@ function jumpToAlertAddress(address) {
     }
     const latStr = item.lat.toFixed(6), lonStr = item.lon.toFixed(6);
     const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
-    const posText = altM != null ? `${latStr},${lonStr},${fmtAlt(altM)}` : `${latStr},${lonStr}`;
+    const posText = altM != null ? `${latStr},${lonStr},${fmtAltCompact(altM)}` : `${latStr},${lonStr}`;
     const shareUrl = `${location.href.replace(/#.*/, '')}#${item.lat.toFixed(4)},${item.lon.toFixed(4)},${Math.max(map.getZoom(), 12)},${encodeURIComponent(item.address)}`;
     const sarTxt = [
       `SAR Info: ${item.name}`,
@@ -1042,16 +1150,19 @@ function displayModel(a) {
   return (!m || m.toLowerCase() === t.toLowerCase()) ? '' : m;
 }
 function displayName(a) {
-  if (!/([0-9A-F]{6})$/i.test(a.liveLabel)) return a.liveLabel;
-  if (a.streamName) return a.streamName;
-  if (a.callsign) return a.callsign;
-  if (a.registration) return a.registration;
-  if (a.ddbId && a.ddbId.length === 6 && /^[0-9a-f]{6}$/i.test(a.ddbId)) return a.ddbId.toUpperCase();
-  if (a.ognId) return a.ognId.toUpperCase();
-  return a.liveLabel || 'Unknown';
+  const candidates = /([0-9A-F]{6})$/i.test(a.liveLabel)
+    ? [a.streamName, a.callsign, a.registration,
+       a.ddbId && a.ddbId.length === 6 && /^[0-9a-f]{6}$/i.test(a.ddbId) ? a.ddbId.toUpperCase() : '',
+       a.ognId ? a.ognId.toUpperCase() : '', a.liveLabel]
+    : [a.liveLabel];
+  for (const candidate of candidates) {
+    const name = cleanName(candidate);
+    if (name) return name;
+  }
+  return 'Unknown';
 }
 function displayStreamName(a) {
-  const s = (a.streamName || '').trim(), n = (displayName(a) || '').trim();
+  const s = cleanName(a.streamName), n = displayName(a);
   return (!s || s.toLowerCase() === n.toLowerCase()) ? '' : s;
 }
 function displayRegistration(a) {
@@ -1529,6 +1640,8 @@ function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
   const emergClass = isEmergency(a) ? ' emergency' : '';
+  const trackColor = selectedTracks.get(a.address)?.color || '#57d3b0';
+  const name = esc(displayName(a));
   let svgPath = ICONS.default;
   switch(type) {
     case 2: case 5: case 8: case 9: case 13: case 16: svgPath = ICONS.airplane; break;
@@ -1539,9 +1652,54 @@ function markerIcon(a) {
     case 15: svgPath = ICONS.tower; break;
   }
   return L.divIcon({
-    className: 'glider-icon', iconSize: [30, 30], iconAnchor: [15, 15],
-    html: `<div class="glider-wrap${emergClass}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg></div>`
+    className: 'glider-icon', iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
+    html: `<div class="glider-wrap${emergClass}" style="--marker-color:${trackColor}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div></div>`
   });
+}
+
+function markerRectsOverlap(a, b, pad = 0) {
+  return !(a.right + pad < b.left || b.right + pad < a.left ||
+           a.bottom + pad < b.top || b.bottom + pad < a.top);
+}
+
+function updateMarkerLabels() {
+  const showNames = map.getZoom() >= 12;
+  const mapRect = $('map').getBoundingClientRect();
+  const barRect = visibleBottomBarEl()?.getBoundingClientRect();
+  const candidates = [];
+
+  for (const m of markers.values()) {
+    const el = m.getElement?.();
+    if (!el) continue;
+    el.classList.remove('show-name');
+    if (!showNames || !m._data) continue;
+    const iconRect = el.getBoundingClientRect();
+    if (iconRect.width <= 0 || iconRect.height <= 0) continue;
+    const label = el.querySelector('.glider-label');
+    if (!label) continue;
+    const labelRect = label.getBoundingClientRect();
+    if (labelRect.width <= 0 || labelRect.height <= 0) continue;
+    if (labelRect.left < mapRect.left + 2 || labelRect.right > mapRect.right - 2 ||
+        labelRect.top < mapRect.top + 2 || labelRect.bottom > mapRect.bottom - 2) continue;
+    if (barRect && markerRectsOverlap(labelRect, barRect, 4)) continue;
+
+    const a = m._data;
+    const priority = (isEmergency(a) ? 4 : 0) + (selectedTracks.has(a.address) ? 2 : 0) +
+      (pinnedAircraft.has(a.address) ? 1 : 0);
+    candidates.push({ el, iconRect, labelRect, priority });
+  }
+
+  if (!candidates.length) return;
+  candidates.sort((a, b) => b.priority - a.priority ||
+    a.labelRect.left - b.labelRect.left || a.labelRect.top - b.labelRect.top);
+
+  const shown = [];
+  for (const c of candidates) {
+    if (candidates.some(o => o !== c && markerRectsOverlap(c.labelRect, o.iconRect, 2))) continue;
+    if (shown.some(rect => markerRectsOverlap(c.labelRect, rect, 3))) continue;
+    c.el.classList.add('show-name');
+    shown.push(c.labelRect);
+  }
 }
 
 function popupRow(label, value) {
@@ -1556,7 +1714,8 @@ function popupRowHtml(label, html) {
 function popup(a) {
   const latStr = a.lat.toFixed(6), lonStr = a.lon.toFixed(6);
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
-  const positionRow = `<div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(`${latStr},${lonStr}`)}</a></div>`;
+  const posText = [latStr, lonStr, a.altitude != null ? fmtAltCompact(a.altitude) : ''].filter(Boolean).join(', ');
+  const positionRow = `<div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(posText)}</a></div>`;
   const statusText = getDisplayStatus(a);
   const wxText = formatWeatherHtml(a.weather, false);
   const weatherRow = wxText
@@ -1598,14 +1757,12 @@ function popup(a) {
   const actionButtons = isStation
     ? `<button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>`
     : `<button type="button" data-act="track" data-addr="${esc(a.address)}" class="${isTracked ? 'active' : ''}" aria-pressed="${isTracked}">Track</button>
-      <button type="button" data-act="vario" data-addr="${esc(a.address)}" class="${varioTrackMode ? 'active' : ''}" aria-pressed="${varioTrackMode}" title="Toggle vario-colored tracks">Vario</button>
       <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 SAR</button>
       <button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>
       <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>`;
 
   const telemetryRows = [
     positionRow,
-    popupRow('Altitude', a.altitude != null ? fmtAlt(a.altitude) : null),
     popupRow('Climb', a.climb != null ? fmtClimb(a.climb) : null),
     popupRow('Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null),
     popupRowHtml('Track Direction', courseValue),
@@ -1786,7 +1943,8 @@ function render() {
   visible.forEach(a => {
     const key = a.address;
     const emerg = isEmergency(a);
-    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}_${emerg ? 1 : 0}`;
+    const trackColor = selectedTracks.get(key)?.color || '';
+    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}_${emerg ? 1 : 0}_${trackColor}_${displayName(a)}`;
     let m = markers.get(key);
 
     if (!m) {
@@ -1948,6 +2106,7 @@ function render() {
     pendingHashSelect = null;
     toggleSelection(target, true);
   }
+  updateMarkerLabels();
 }
 
 $('alertsToggle').addEventListener('click', () => {
@@ -2046,10 +2205,6 @@ document.addEventListener('click', e => {
         nd.addEventListener('toggle', nd.onTogglePopupDetails);
       }
     }
-  } else if (act === 'vario') {
-    toggleVarioMode();
-    btn.classList.toggle('active', varioTrackMode);
-    btn.setAttribute('aria-pressed', String(varioTrackMode));
   } else if (act === 'share') {
     const base = getShareUrl();
     const url = addr ? `${base.replace(/#.*/, '')}#${map.getCenter().lat.toFixed(4)},${map.getCenter().lng.toFixed(4)},${map.getZoom()},${encodeURIComponent(addr)}` : base;
@@ -2140,7 +2295,7 @@ async function fetchLive(force = false) {
     const nowTick = serverNow();
 
     if (payload.names && typeof payload.names === 'object') {
-      for (const [id, name] of Object.entries(payload.names)) nameCache.set(id, name);
+      for (const [id, name] of Object.entries(payload.names)) nameCache.set(id, cleanName(name));
     }
     if (payload.ddb && typeof payload.ddb === 'object') {
       for (const [id, info] of Object.entries(payload.ddb)) ddbCache.set(id, info);
@@ -2159,8 +2314,8 @@ async function fetchLive(force = false) {
           alerts24hHistory.set(addrKey, {
             address: addrKey,
             name: String(al.name || al.address).toUpperCase(),
-            status: String(al.status),
-            lastStatus: String(al.last_status || al.status),
+            status: cleanAlertStatus(al.status),
+            lastStatus: cleanAlertStatus(al.last_status || al.status),
             lat: latVal,
             lon: lonVal,
             alt: Number.isFinite(Number(al.alt)) ? Number(al.alt) : null,
@@ -2388,6 +2543,9 @@ syncUnitButtons();
 
 $('presetMetricBtn').addEventListener('click', () => applyUnitPreset('metric'));
 $('presetImperialBtn').addEventListener('click', () => applyUnitPreset('imperial'));
+$('btnTrackFlat').addEventListener('click', () => setTrackColorMode(false));
+$('btnTrackVario').addEventListener('click', () => setTrackColorMode(true));
+$('btnBarogram').addEventListener('click', () => setBarogramEnabled(!barogramEnabled));
 $('unitAltBtn').addEventListener('click', () => {
   altUnit = altUnit === 'm' ? 'ft' : 'm';
   saveMenuPrefs();
