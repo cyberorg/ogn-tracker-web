@@ -19,10 +19,6 @@ const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
 const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB (and PureTrack labels) every 6 hours
 const PURETRACK_LABELS_URL = 'https://puretrack.io/api/labels.json';
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
-// Software gateways that relay packets from many physical receivers. Their station
-// coordinate is not a real reception limit, so range-checking against it would drop
-// legitimate long-distance traffic.
-const AGGREGATOR_RECEIVERS  = ['sktmqtt', 'skxfwd', 'ogrffffff'];
 const POS_JUMP_TOLERANCE_KM = 2.0;  // Allow small GPS jitter between closely spaced fixes
 const POS_SEED_MAX_AGE     = 600;   // Seed continuity state from recent last-known positions
 const MIN_VALID_TEMP_C     = -50.0;
@@ -472,21 +468,6 @@ foreach ($pdo->query('SELECT id, lat, lon, max_km, farthest_id, farthest_ts, hea
         'farthest_ts' => $validRecord ? (int)$row['farthest_ts'] : 0,
         'heard_24h'   => max(0, (int)($row['heard_24h'] ?? 0)),
     ];
-}
-
-// Receiver coordinates used to reject fixes that could not physically have been heard by the
-// gateway in the APRS path. stations is the primary source; some gateways only exist in the
-// last-known aircraft cache, so seed those too (station symbol in the parsed APRS position).
-$receiverPos = [];
-foreach ($stationState as $sid => $st) {
-    $receiverPos[strtolower($sid)] = ['lat' => (float)$st['lat'], 'lon' => (float)$st['lon']];
-}
-foreach ($pdo->query('SELECT id, lat, lon, raw FROM aircraft') as $row) {
-    if (!preg_match('/\d{6}h\d{2}\d{2}\.\d+[NS].\d{3}\d{2}\.\d+[EW]([_&#r])/', (string)$row['raw'])) continue;
-    $key = strtolower((string)$row['id']);
-    if (!isset($receiverPos[$key])) {
-        $receiverPos[$key] = ['lat' => (float)$row['lat'], 'lon' => (float)$row['lon']];
-    }
 }
 
 foreach ($pdo->query('SELECT s.id, n.name FROM stations s INNER JOIN names n ON s.id = n.id WHERE n.name != ""') as $nrow) {
@@ -1034,23 +1015,6 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     continue;
                 }
 
-                // Reject fixes that the gateway in the APRS path could not have received.
-                // This catches one-off corrupted/spoofed packets for unseen IDs that the
-                // continuity jump guard cannot see because they have no prior position.
-                $rxKey = '';
-                if (preg_match('/q[A-Z]{2},([^:,]+)[:,]/', $line, $rxm)) {
-                    $rxKey = strtolower(trim($rxm[1]));
-                }
-                if ($rxKey !== '' && !in_array($rxKey, AGGREGATOR_RECEIVERS, true)) {
-                    $rxPos = $receiverPos[$rxKey] ?? null;
-                    if ($rxPos === null && isset($stationState[$rxKey])) {
-                        $rxPos = ['lat' => (float)$stationState[$rxKey]['lat'], 'lon' => (float)$stationState[$rxKey]['lon']];
-                    }
-                    if ($rxPos !== null && haversine_km($rxPos['lat'], $rxPos['lon'], $lat, $lon) > MAX_RX_RANGE_KM) {
-                        continue;
-                    }
-                }
-
                 $sym = $bm[9][0];
                 $isStation = ($sym === '_' || $sym === '&' || $sym === '#' || $sym === 'r');
                 $type = $isStation ? 15 : 0;
@@ -1161,9 +1125,12 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         $stationBatch[$sk] = $stationState[$sk];
                     }
                 } else {
-                    if ($rxKey !== '') {
-                        foreach (expand_station_keys($stationAliases, $rxKey) as $aliasKey) {
-                            $heardBatch[$aliasKey . '|' . $id] = ['sid' => $aliasKey, 'aid' => $id, 'ts' => $now];
+                    if (preg_match('/q[A-Z]{2},([^:,]+)[:,]/', $line, $rxm)) {
+                        $rxKey = strtolower(trim($rxm[1]));
+                        if ($rxKey !== '') {
+                            foreach (expand_station_keys($stationAliases, $rxKey) as $aliasKey) {
+                                $heardBatch[$aliasKey . '|' . $id] = ['sid' => $aliasKey, 'aid' => $id, 'ts' => $now];
+                            }
                         }
                         if (isset($stationState[$rxKey])) {
                             $st = $stationState[$rxKey];
