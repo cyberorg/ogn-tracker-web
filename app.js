@@ -50,9 +50,10 @@ let hashMessagePopup = null;
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
   if (prefs.altUnit === 'ft') altUnit = 'ft';
-  if (prefs.speedUnit === 'kt') speedUnit = 'kt';
+  if (prefs.speedUnit === 'kt' || prefs.speedUnit === 'mph') speedUnit = prefs.speedUnit;
   if (prefs.tempUnit === 'f') tempUnit = 'f';
-  if (prefs.climbUnit === 'fps') climbUnit = 'fps';
+  // Old Imperial preferences used fps; the Aviation/US presets now use fpm.
+  if (prefs.climbUnit === 'fps' || prefs.climbUnit === 'fpm') climbUnit = 'fpm';
   if (typeof prefs.alertsEnabled === 'boolean') alertsEnabled = prefs.alertsEnabled;
   if (Array.isArray(prefs.types) && prefs.types.length > 0) savedTypes = prefs.types;
   if (typeof prefs.markerWindow === 'string' && prefs.markerWindow) savedMarkerWindow = prefs.markerWindow;
@@ -194,8 +195,12 @@ function isMetricPreset() {
   return altUnit === 'm' && speedUnit === 'kmh' && tempUnit === 'c' && climbUnit === 'mps';
 }
 
-function isImperialPreset() {
-  return altUnit === 'ft' && speedUnit === 'kt' && tempUnit === 'f' && climbUnit === 'fps';
+function isAviationPreset() {
+  return altUnit === 'ft' && speedUnit === 'kt' && tempUnit === 'f' && climbUnit === 'fpm';
+}
+
+function isUsPreset() {
+  return altUnit === 'ft' && speedUnit === 'mph' && tempUnit === 'f' && climbUnit === 'fpm';
 }
 
 function fmtAltValue(meters) {
@@ -213,6 +218,7 @@ function fmtAltCompact(meters) {
 function fmtWindSpeed(kmh) {
   if (kmh == null) return '';
   if (speedUnit === 'kt') return `${Math.round(kmh * 0.539957)} kt`;
+  if (speedUnit === 'mph') return `${Math.round(kmh * 0.621371)} mph`;
   return `${Math.round(kmh)} km/h`;
 }
 
@@ -225,6 +231,7 @@ function fmtTemp(c) {
 function fmtClimb(mps) {
   if (mps == null) return '';
   if (climbUnit === 'fps') return `${(mps * 3.28084).toFixed(1)} fps`;
+  if (climbUnit === 'fpm') return `${Math.round(mps * 196.850394).toLocaleString()} fpm`;
   return `${Number(mps).toFixed(1)} m/s`;
 }
 
@@ -285,26 +292,23 @@ function syncBottomBarOffset() {
 
 function syncUnitButtons() {
   $('presetMetricBtn').classList.toggle('active', isMetricPreset());
-  $('presetImperialBtn').classList.toggle('active', isImperialPreset());
+  $('presetAviationBtn').classList.toggle('active', isAviationPreset());
+  $('presetUsBtn').classList.toggle('active', isUsPreset());
   $('unitAltBtn').textContent = `Alt: ${altUnit === 'ft' ? 'ft' : 'm'}`;
-  $('unitSpeedBtn').textContent = `Wind: ${speedUnit === 'kt' ? 'kt' : 'km/h'}`;
+  $('unitSpeedBtn').textContent = `Wind: ${speedUnit === 'kt' ? 'kt' : speedUnit === 'mph' ? 'mph' : 'km/h'}`;
   $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
-  $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : 'm/s'}`;
+  $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : climbUnit === 'fpm' ? 'fpm' : 'm/s'}`;
   updateFilterBadge();
   syncScaleControl();
 }
 
 function applyUnitPreset(mode) {
-  if (mode === 'imperial') {
-    altUnit = 'ft';
-    speedUnit = 'kt';
-    tempUnit = 'f';
-    climbUnit = 'fps';
+  if (mode === 'aviation') {
+    altUnit = 'ft'; speedUnit = 'kt'; tempUnit = 'f'; climbUnit = 'fpm';
+  } else if (mode === 'us') {
+    altUnit = 'ft'; speedUnit = 'mph'; tempUnit = 'f'; climbUnit = 'fpm';
   } else {
-    altUnit = 'm';
-    speedUnit = 'kmh';
-    tempUnit = 'c';
-    climbUnit = 'mps';
+    altUnit = 'm'; speedUnit = 'kmh'; tempUnit = 'c'; climbUnit = 'mps';
   }
   saveMenuPrefs();
   syncUnitButtons();
@@ -357,7 +361,7 @@ function reorderBottomRightControls() {
 }
 
 function syncScaleControl() {
-  const useImperial = isImperialPreset() || altUnit === 'ft' || speedUnit === 'kt';
+  const useImperial = isAviationPreset() || isUsPreset() || altUnit === 'ft' || speedUnit === 'kt' || speedUnit === 'mph';
   if (scaleControl && scaleControlImperial === useImperial) return;
   if (scaleControl) map.removeControl(scaleControl);
 
@@ -2742,7 +2746,8 @@ applySavedMenuPrefs();
 syncUnitButtons();
 
 $('presetMetricBtn').addEventListener('click', () => applyUnitPreset('metric'));
-$('presetImperialBtn').addEventListener('click', () => applyUnitPreset('imperial'));
+$('presetAviationBtn').addEventListener('click', () => applyUnitPreset('aviation'));
+$('presetUsBtn').addEventListener('click', () => applyUnitPreset('us'));
 $('btnTrackFlat').addEventListener('click', () => setTrackColorMode(false));
 $('btnTrackVario').addEventListener('click', () => setTrackColorMode(true));
 $('btnBarogram').addEventListener('click', () => setBarogramEnabled(!barogramEnabled));
@@ -2766,7 +2771,7 @@ $('unitTempBtn').addEventListener('click', () => {
   render();
 });
 $('unitClimbBtn').addEventListener('click', () => {
-  climbUnit = climbUnit === 'mps' ? 'fps' : 'mps';
+  climbUnit = climbUnit === 'mps' ? 'fpm' : 'mps';
   saveMenuPrefs();
   syncUnitButtons();
   render();
