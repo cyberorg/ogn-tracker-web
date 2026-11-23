@@ -14,10 +14,13 @@ $cacheDir = rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache';
 $cacheFile = $cacheDir . '/insights_page.html';
 $cacheMeta = $cacheDir . '/insights_page.meta.json';
 
-// Match SQLite's localtime modifier used in the aggregate queries.
+// SQLite's 'localtime' modifier follows the process TZ env var, which can differ
+// from PHP's timezone. Use an explicit offset in the SQL so hour grouping always
+// matches the timezone used for the server-side labels and epoch conversion.
 $serverTz = trim((string)@file_get_contents('/etc/timezone'));
 if ($serverTz === '' || !in_array($serverTz, timezone_identifiers_list(), true)) $serverTz = 'Asia/Kolkata';
 date_default_timezone_set($serverTz);
+$tzOffset = (new DateTimeZone($serverTz))->getOffset(new DateTimeImmutable('@' . time()));
 
 $cliGenerate  = PHP_SAPI === 'cli' && in_array('--generate', $_SERVER['argv'] ?? [], true);
 $forceGenerate = isset($_GET['fresh']);
@@ -346,7 +349,8 @@ try {
     $hourly = [];
     $trackAircraft = 0; $trackPoints = 0; $maxAlt = null;
     // PK (id, ts) scan is much faster here than random lookups via idx_tracks_ts.
-    $tracksStmt = $pdo->prepare("SELECT strftime('%Y-%m-%d %H:00', datetime(ts, 'unixepoch', 'localtime')) AS hr, COUNT(DISTINCT id) AS ac, COUNT(*) AS pts, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff GROUP BY hr ORDER BY hr");
+    $hourExpr = "strftime('%Y-%m-%d %H:00', datetime(ts + " . $tzOffset . ", 'unixepoch'))";
+    $tracksStmt = $pdo->prepare("SELECT $hourExpr AS hr, COUNT(DISTINCT id) AS ac, COUNT(*) AS pts, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff GROUP BY hr ORDER BY hr");
     $tracksStmt->execute([':cutoff' => $cutoff]);
     foreach ($tracksStmt as $r) {
         $hourly[] = [(string)$r['hr'], (int)$r['ac'], (int)$r['pts']];
