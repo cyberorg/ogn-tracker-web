@@ -1555,13 +1555,16 @@ function record24hAlerts(list, nowMs) {
 }
 
 function buildAlertRowHtml(it, nowMs) {
-  const ageSec = Math.max(0, Math.floor((nowMs - (it.latestTsMs || it.tsMs)) / 1000));
+  const lastSeenMs = it.latestTsMs || it.tsMs;
+  const ageSec = Math.max(0, Math.floor((nowMs - lastSeenMs) / 1000));
   const outcome = describeAlertOutcome(it, nowMs);
   const statusText = it.status || 'Emergency alert';
   const lastStatus = it.lastStatus || statusText;
   const outcomeHtml = outcome ? `<br><span style="color:var(--yellow);font-weight:600">${esc(outcome)}</span>` : '';
   const lastStatusHtml = (lastStatus && lastStatus !== statusText) ? `<br><span style="color:var(--muted)">Last: ${esc(lastStatus)}</span>` : '';
-  const exactTime = new Date(it.latestTsMs || it.tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  // Show when the alert itself was received; the age below stays "last seen",
+  // matching the age shown for aircraft in the main list.
+  const alertTime = new Date(it.tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const label = `${it.name} - ${statusText}`;
   return `<div class="aircraft emergency" data-alert-addr="${esc(it.address)}" data-key="${esc(it.address)}" tabindex="0" role="option" aria-selected="false" aria-label="${esc(label)}">
     <div class="stripe" style="background:var(--red)"></div>
@@ -1569,7 +1572,7 @@ function buildAlertRowHtml(it, nowMs) {
       <div class="callsign">${esc(it.name)}</div>
       <div class="meta"><span style="color:var(--red);font-weight:600">${esc(statusText)}</span>${lastStatusHtml}${outcomeHtml}</div>
     </div>
-    <div class="alt station-alt">${esc(exactTime)}<div class="age-row"><span class="age" data-ts="${it.latestTsMs || it.tsMs}">${fmtAge(ageSec)}</span></div></div>
+    <div class="alt station-alt" title="Alert received"><span data-ts="${it.tsMs}">${esc(alertTime)}</span><div class="age-row"><span class="age" data-ts="${lastSeenMs}" title="Last seen">${fmtAge(ageSec)}</span></div></div>
   </div>`;
 }
 

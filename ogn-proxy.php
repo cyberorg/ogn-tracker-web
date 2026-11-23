@@ -57,63 +57,11 @@ function cache_set(string $cacheDir, string $key, string $payload): void {
     }
 }
 
-function normalize_ogn_name_encoding($value): string {
-    $raw = (string)$value;
-    if ($raw === '' || preg_match('//u', $raw)) return $raw;
-
-    $out = '';
-    $len = strlen($raw);
-    for ($i = 0; $i < $len;) {
-        $b = ord($raw[$i]);
-        if ($b < 0x80) {
-            $out .= $raw[$i++];
-            continue;
-        }
-
-        $seq = null;
-        if ($b >= 0xC2 && $b <= 0xDF && $i + 1 < $len) {
-            $b1 = ord($raw[$i + 1]);
-            if ($b1 >= 0x80 && $b1 <= 0xBF) $seq = substr($raw, $i, 2);
-        } elseif ($b >= 0xE0 && $b <= 0xEF && $i + 2 < $len) {
-            $b1 = ord($raw[$i + 1]);
-            $b2 = ord($raw[$i + 2]);
-            if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF &&
-                !($b === 0xE0 && $b1 < 0xA0) && !($b === 0xED && $b1 > 0x9F)) {
-                $seq = substr($raw, $i, 3);
-            }
-        } elseif ($b >= 0xF0 && $b <= 0xF4 && $i + 3 < $len) {
-            $b1 = ord($raw[$i + 1]);
-            $b2 = ord($raw[$i + 2]);
-            $b3 = ord($raw[$i + 3]);
-            if ($b1 >= 0x80 && $b1 <= 0xBF && $b2 >= 0x80 && $b2 <= 0xBF && $b3 >= 0x80 && $b3 <= 0xBF &&
-                !($b === 0xF0 && $b1 < 0x90) && !($b === 0xF4 && $b1 > 0x8F)) {
-                $seq = substr($raw, $i, 4);
-            }
-        }
-
-        if ($seq !== null) {
-            $out .= $seq;
-            $i += strlen($seq);
-            continue;
-        }
-
-        $byte = $raw[$i];
-        if (function_exists('iconv')) {
-            $converted = @iconv('Windows-1252', 'UTF-8//IGNORE', $byte);
-            $out .= ($converted !== false && $converted !== '') ? $converted : '?';
-        } elseif (function_exists('mb_convert_encoding')) {
-            $converted = @mb_convert_encoding($byte, 'UTF-8', 'Windows-1252');
-            $out .= (is_string($converted) && $converted !== '') ? $converted : '?';
-        } else {
-            $out .= '?';
-        }
-        $i++;
-    }
-    return $out;
-}
-
 function clean_ogn_name($value): string {
-    $raw = normalize_ogn_name_encoding($value);
+    $raw = (string)$value;
+    // APRS name fields can carry bytes from legacy or corrupted encodings. Reject
+    // anything that is not valid UTF-8 instead of converting it: the previous
+    // Windows-1252 fallback produced visible mojibake such as "Aˆ".
     if ($raw === '' || !preg_match('//u', $raw)) return '';
     if (preg_match('/[\x00-\x1F\x7F\x{80}-\x{9F}]/u', $raw) || preg_match('/[\x{2400}-\x{243F}\x{FFFD}]/u', $raw)) return '';
     return trim(preg_replace('/\s+/u', ' ', $raw) ?? $raw);
