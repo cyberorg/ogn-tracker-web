@@ -20,6 +20,7 @@ const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB (and PureTrack labels) e
 const PURETRACK_LABELS_URL = 'https://puretrack.io/api/labels.json';
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
 const POS_JUMP_TOLERANCE_KM = 2.0;  // Allow small GPS jitter between closely spaced fixes
+const ALT_JUMP_TOLERANCE_M  = 300.0; // Allow barometric/GPS altitude noise between fixes
 const POS_SEED_MAX_AGE     = 600;   // Seed continuity state from recent last-known positions
 const MIN_VALID_TEMP_C     = -50.0;
 const MAX_VALID_TEMP_C     = 55.0;
@@ -225,6 +226,23 @@ function is_implausible_position_jump(?array $prev, float $lat, float $lon, int 
     $km = haversine_km((float)($prev['lat'] ?? 0.0), (float)($prev['lon'] ?? 0.0), $lat, $lon);
     $allowedKm = max_plausible_speed_kmh($type) * $dt / 3600.0 + POS_JUMP_TOLERANCE_KM;
     return $km > $allowedKm;
+}
+
+/** Credible vertical-speed ceiling (m/s), mirroring the per-type speed caps. */
+function max_plausible_climb_mps(int $type): float {
+    if (in_array($type, [4, 6, 7, 13], true)) return 40.0; // parachutist / hang glider / paraglider / drone
+    if ($type === 1) return 40.0;                          // glider (strong lift / wave)
+    return 50.0;                                           // powered and other aircraft
+}
+
+/** True when an altitude would need impossible climb/descent since the last accepted altitude. */
+function is_implausible_altitude_jump(?array $prev, ?float $alt, int $ts, int $type): bool {
+    if ($prev === null || $alt === null) return false;
+    $prevAlt = $prev['alt'] ?? null;
+    if ($prevAlt === null) return false;
+    $dt = max(0, $ts - (int)($prev['ts'] ?? 0));
+    $allowedM = max_plausible_climb_mps($type) * $dt + ALT_JUMP_TOLERANCE_M;
+    return abs($alt - (float)$prevAlt) > $allowedM;
 }
 
 function is_emergency_packet(string $line): int {
@@ -901,17 +919,25 @@ $lastTrackPoint = [];
 $lastThermalPoint = [];
 $lastKnownPos   = [];
 $lastValidPos   = [];
+$lastValidAlt   = [];
 
-// Seed continuity tracking from recent last-known positions so the jump guard also
-// covers the first packet of each 1-minute collector run.
-$seedStmt = $pdo->prepare('SELECT id, lat, lon, timestamp FROM aircraft WHERE timestamp >= :cutoff');
+// Seed continuity tracking from recent last-known positions so the jump guards also
+// cover the first packet of each 1-minute collector run.
+$seedStmt = $pdo->prepare('SELECT id, lat, lon, timestamp, raw FROM aircraft WHERE timestamp >= :cutoff');
 $seedStmt->execute([':cutoff' => time() - POS_SEED_MAX_AGE]);
 while ($r = $seedStmt->fetch(PDO::FETCH_ASSOC)) {
-    $lastValidPos[(string)$r['id']] = [
+    $id = (string)$r['id'];
+    $lastValidPos[$id] = [
         'lat' => (float)$r['lat'],
         'lon' => (float)$r['lon'],
         'ts'  => (int)$r['timestamp'],
     ];
+    if (preg_match('/\/A=(-?\d{6})/', (string)($r['raw'] ?? ''), $am)) {
+        $seedAlt = round((int)$am[1] * 0.3048, 1);
+        if ($seedAlt >= -500.0 && $seedAlt <= 18000.0) {
+            $lastValidAlt[$id] = ['alt' => $seedAlt, 'ts' => (int)$r['timestamp']];
+        }
+    }
 }
 
 $lastPruneTs    = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_prune_ts"')->fetchColumn();
@@ -1024,6 +1050,13 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 // survives and the next valid packet is accepted normally.
                 if (is_implausible_position_jump($lastValidPos[$id] ?? null, $lat, $lon, $now, $type)) {
                     continue;
+                }
+                // A corrupt altitude must not poison tracks, thermals or the next reference
+                // point. Drop just the altitude and keep the otherwise valid position.
+                if (is_implausible_altitude_jump($lastValidAlt[$id] ?? null, $alt, $now, $type)) {
+                    $alt = null;
+                } elseif ($alt !== null) {
+                    $lastValidAlt[$id] = ['alt' => $alt, 'ts' => $now];
                 }
                 $lastValidPos[$id] = ['lat' => $lat, 'lon' => $lon, 'ts' => $now];
 
