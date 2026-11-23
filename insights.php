@@ -406,7 +406,7 @@ $genDuration = microtime(true) - $generationStarted;
 <link rel="stylesheet" href="style.css">
 <style>
   main{display:block!important}
-  .ins-page{max-width:1500px;margin:0 auto;padding:18px 18px 36px}
+  .ins-page{max-width:800px;margin:0 auto;padding:12px 12px 36px}
   .ins-headline{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;justify-content:space-between;margin-bottom:10px}
   .ins-headline h2{font-size:20px;margin:0}
   .ins-headline p{margin:3px 0 0;color:var(--muted);font-size:12px}
@@ -427,9 +427,8 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-kpis-secondary .ins-kpi-value{font-size:20px}
   .ins-kpis-secondary .ins-kpi-sub{font-size:10px}
   .ins-kpi-sub{font-size:11px;color:#b7c7d2;margin-top:3px}
-  .ins-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:12px;align-items:start}
+  .ins-grid{display:grid;grid-template-columns:1fr;gap:12px;align-items:start}
   .ins-section{grid-column:1/-1;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:6px 0 -2px;padding-bottom:6px;border-bottom:1px solid var(--line)}
-  .ins-span-2{grid-column:span 2}
   .ins-card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;min-width:0}
   .ins-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line);background:#14202b}
   .ins-card-head h2{font-size:13px;margin:0;font-weight:800}
@@ -470,8 +469,6 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-error{background:#3d1118;border:1px solid var(--red);color:#ffe5e5;padding:14px;border-radius:10px;margin:20px auto;max-width:700px}
   @media(max-width:800px){
     .ins-split{grid-template-columns:1fr}
-    .ins-span-2{grid-column:auto}
-    .ins-page{padding:12px}
     .ins-nav{margin-bottom:12px}
     .ins-col-val{font-size:12px}
     .ins-col-date,.ins-col-hour{font-size:11px}
@@ -567,7 +564,7 @@ $genDuration = microtime(true) - $generationStarted;
     $chart = scrollChart($hourData, 'var(--accent)', '#2387a6', 8)
         . '<span class="ins-scroll-hint">← Scroll for earlier hours</span>'
         . '<p class="ins-note">One bar per hour (hour boundaries follow server time); all times shown in your local timezone. The brightest bar is the peak hour.</p>';
-    echo sectionCard('Hourly traffic', 'unique aircraft by hour', $chart, '2');
+    echo sectionCard('Hourly traffic', 'unique aircraft by hour', $chart);
 
     // Alerts.
     $alertHtml = '';
