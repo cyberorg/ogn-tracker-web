@@ -19,6 +19,8 @@ const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
 const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB (and PureTrack labels) every 6 hours
 const PURETRACK_LABELS_URL = 'https://puretrack.io/api/labels.json';
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
+const POS_JUMP_TOLERANCE_KM = 2.0;  // Allow small GPS jitter between closely spaced fixes
+const POS_SEED_MAX_AGE     = 600;   // Seed continuity state from recent last-known positions
 const MIN_VALID_TEMP_C     = -50.0;
 const MAX_VALID_TEMP_C     = 55.0;
 // ADS-B gateway traffic is mostly commercial aircraft and dominates the feed;
@@ -252,6 +254,22 @@ function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float
     $dLon = deg2rad($lon2 - $lon1);
     $a = sin($dLat / 2.0) ** 2 + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon / 2.0) ** 2;
     return 6371.0 * 2.0 * atan2(sqrt($a), sqrt(1.0 - $a));
+}
+
+/** Credible ground-speed ceiling, mirroring the per-type reported-speed caps below. */
+function max_plausible_speed_kmh(int $type): float {
+    if (in_array($type, [4, 6, 7, 13], true)) return 250.0;
+    if ($type === 1) return 400.0;
+    return 1300.0;
+}
+
+/** True when a fix would require impossible travel from the last accepted fix. */
+function is_implausible_position_jump(?array $prev, float $lat, float $lon, int $ts, int $type): bool {
+    if ($prev === null) return false;
+    $dt = max(0, $ts - (int)($prev['ts'] ?? 0));
+    $km = haversine_km((float)($prev['lat'] ?? 0.0), (float)($prev['lon'] ?? 0.0), $lat, $lon);
+    $allowedKm = max_plausible_speed_kmh($type) * $dt / 3600.0 + POS_JUMP_TOLERANCE_KM;
+    return $km > $allowedKm;
 }
 
 function is_emergency_packet(string $line): int {
@@ -925,6 +943,20 @@ $stationBatch   = [];
 $lastTrackPoint = [];
 $lastThermalPoint = [];
 $lastKnownPos   = [];
+$lastValidPos   = [];
+
+// Seed continuity tracking from recent last-known positions so the jump guard also
+// covers the first packet of each 1-minute collector run.
+$seedStmt = $pdo->prepare('SELECT id, lat, lon, timestamp FROM aircraft WHERE timestamp >= :cutoff');
+$seedStmt->execute([':cutoff' => time() - POS_SEED_MAX_AGE]);
+while ($r = $seedStmt->fetch(PDO::FETCH_ASSOC)) {
+    $lastValidPos[(string)$r['id']] = [
+        'lat' => (float)$r['lat'],
+        'lon' => (float)$r['lon'],
+        'ts'  => (int)$r['timestamp'],
+    ];
+}
+
 $lastPruneTs    = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_prune_ts"')->fetchColumn();
 $lastVacuumTs   = (int)$pdo->query('SELECT value FROM meta WHERE key = "last_vacuum_ts"')->fetchColumn();
 
@@ -975,6 +1007,10 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 $lon = (int)$bm[6][0] + ((float)$bm[7][0] / 60.0);
                 if ($bm[8][0] === 'W') $lon = -$lon;
 
+                // APRS DDMM.MM fields are invalid when the minute part is >= 60.
+                if ((float)$bm[3][0] >= 60.0 || (float)$bm[7][0] >= 60.0) {
+                    continue;
+                }
                 if (abs($lat) > 90.0 || abs($lon) > 180.0 || ($lat == 0.0 && $lon == 0.0)) {
                     continue;
                 }
@@ -1024,6 +1060,15 @@ while (microtime(true) < $deadline && !feof($socket)) {
                 if ($type === 1 && (($alt !== null && $alt > 16000.0) || ($speed !== null && $speed > 400.0))) {
                     continue;
                 }
+
+                // Reject fixes that would require impossible travel since the last accepted
+                // fix for this ID (corrupt APRS digits, duplicate gateways, reused IDs).
+                // This runs before any batch state is touched, so the last good position
+                // survives and the next valid packet is accepted normally.
+                if (is_implausible_position_jump($lastValidPos[$id] ?? null, $lat, $lon, $now, $type)) {
+                    continue;
+                }
+                $lastValidPos[$id] = ['lat' => $lat, 'lon' => $lon, 'ts' => $now];
 
                 $prevKnown = $lastKnownPos[$id] ?? null;
                 $alertAlt = $alt;
