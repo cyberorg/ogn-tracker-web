@@ -266,10 +266,11 @@ if (isset($_GET['info']) && $_GET['info'] === '1') {
         $pdo = open_db($dbFile);
         $stmt = $pdo->prepare('
             SELECT a.id, a.ddb_id, a.raw, a.timestamp, a.lat, a.lon,
-                   n.name,
+                   COALESCE(n.name, pn.name) AS name,
                    d.callsign, d.registration, d.model, d.aircraft_type
             FROM aircraft a
             LEFT JOIN names n ON a.id = n.id
+            LEFT JOIN names pn ON a.ddb_id != \'\' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != \'\' AND a.ddb_id = d.id
             WHERE a.id = :id AND a.timestamp >= :cutoff
             LIMIT 1
@@ -521,7 +522,7 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
 
         $stmt = $pdo->prepare("
             SELECT latest.id, latest.lat, latest.lon, latest.alt, latest.ts,
-                   n.name, d.callsign, d.registration
+                   COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
             FROM (
                 SELECT id, lat, lon, alt, MAX(ts) AS ts
                 FROM tracks
@@ -533,6 +534,7 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
             ) latest
             LEFT JOIN aircraft a ON latest.id = a.id
             LEFT JOIN names n ON latest.id = n.id
+            LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
         ");
         $stmt->execute($params);
@@ -659,6 +661,10 @@ try {
             $storedName = clean_ogn_name($row['name'] ?? '');
             if ($rawName !== '') $names[$id] = $rawName;
             elseif ($storedName !== '') $names[$id] = $storedName;
+            // PureTrack labels are keyed by device hex; expose them under the
+            // DDB ID too so the client can resolve devices with prefixed callsigns.
+            $hexName = clean_ogn_name($row['hex_name'] ?? '');
+            if ($ddbId !== '' && $hexName !== '') $names[strtolower((string)$ddbId)] = $hexName;
             if ($ddbId !== '' && (isset($row['callsign']) || isset($row['registration']) || isset($row['model']) || isset($row['aircraft_type']))) {
                 $ddb[$ddbId] = [
                     'callsign'        => (string)($row['callsign'] ?? ''),
@@ -672,10 +678,12 @@ try {
 
     if ($includeMeta) {
         $sql = "
-            SELECT a.id, a.ddb_id, a.raw, a.timestamp, n.name,
+            SELECT a.id, a.ddb_id, a.raw, a.timestamp,
+                   COALESCE(n.name, pn.name) AS name, pn.name AS hex_name,
                    d.callsign, d.registration, d.model, d.aircraft_type
             FROM aircraft a {$aircraftIndex}
             LEFT JOIN names n ON a.id = n.id
+            LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE a.lat BETWEEN :south AND :north
               AND {$lonClauseA}
@@ -713,10 +721,12 @@ try {
         }
     } else {
         $stmtEmerg = $pdo->prepare("
-            SELECT a.id, a.ddb_id, a.raw, a.timestamp, n.name,
+            SELECT a.id, a.ddb_id, a.raw, a.timestamp,
+                   COALESCE(n.name, pn.name) AS name, pn.name AS hex_name,
                    d.callsign, d.registration, d.model, d.aircraft_type
             FROM aircraft a
             LEFT JOIN names n ON a.id = n.id
+            LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE a.is_emergency = 1
               AND a.timestamp >= :cutoff
@@ -758,10 +768,11 @@ try {
                     SELECT al.id, al.status, al.lat, al.lon, al.alt, al.raw, al.last_ts,
                            a.lat AS latest_lat, a.lon AS latest_lon,
                            a.timestamp AS latest_ts, a.is_emergency AS latest_emerg, a.raw AS latest_raw,
-                           n.name, d.callsign, d.registration
+                           COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
                     FROM alerts al
                     LEFT JOIN aircraft a ON al.id = a.id
                     LEFT JOIN names n ON al.id = n.id
+                    LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
                     LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
                     WHERE al.last_ts >= :cutoff24
                       AND lower(al.status) NOT LIKE 'need a ride%'
@@ -818,9 +829,11 @@ try {
             }
 
             $stmtA24 = $pdo->prepare("
-                SELECT a.id, a.lat, a.lon, a.raw, a.timestamp, a.is_emergency, n.name, d.callsign, d.registration
+                SELECT a.id, a.lat, a.lon, a.raw, a.timestamp, a.is_emergency,
+                       COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
                 FROM aircraft a
                 LEFT JOIN names n ON a.id = n.id
+                LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
                 LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
                 WHERE a.timestamp >= :cutoff24
                   AND (
@@ -954,10 +967,11 @@ try {
         }
         $stmtSt = $pdo->prepare("
             SELECT s.id, s.max_km, s.farthest_id, s.farthest_ts, s.heard_24h,
-                   n.name, d.callsign, d.registration
+                   COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
             FROM stations s
             LEFT JOIN aircraft a ON s.farthest_id = a.id
             LEFT JOIN names n ON s.farthest_id = n.id
+            LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE s.lat BETWEEN :south AND :north
               AND {$lonClauseS}

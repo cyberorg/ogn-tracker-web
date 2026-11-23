@@ -16,7 +16,8 @@ const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft position
 const TRACK_EXPIRE_SECONDS = 86400; // 24 hours for flight tracks
 const TRACK_MIN_INTERVAL   = 15;    // Min seconds between track points for non-paragliders
 const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
-const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB every 6 hours
+const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB (and PureTrack labels) every 6 hours
+const PURETRACK_LABELS_URL = 'https://puretrack.io/api/labels.json';
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
 const MIN_VALID_TEMP_C     = -50.0;
 const MAX_VALID_TEMP_C     = 55.0;
@@ -541,6 +542,48 @@ if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
                 $pdo->commit();
             }
             unset($data);
+        }
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+    }
+}
+
+// --- Sync PureTrack hex-ID labels alongside the DDB, once every 6 hours ---
+// PureTrack publishes user-assigned names for OGN/FANET devices that the DDB
+// does not carry. They are stored in `names` keyed by the 6-digit device ID.
+$labelsUpdated = (int)$pdo->query('SELECT value FROM meta WHERE key = "puretrack_labels_updated"')->fetchColumn();
+if ((time() - $labelsUpdated) >= DDB_SYNC_INTERVAL) {
+    try {
+        $ctx  = stream_context_create(['http' => ['timeout' => 15, 'user_agent' => 'OGN-Global-Collector/1.14']]);
+        $body = @file_get_contents(PURETRACK_LABELS_URL, false, $ctx);
+        if ($body !== false) {
+            $labels = json_decode($body, true);
+            unset($body);
+            if (is_array($labels)) {
+                $stmtLabel = $pdo->prepare('
+                    INSERT INTO names (id, name, updated)
+                    VALUES (:id, :name, :ts)
+                    ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated = excluded.updated
+                ');
+                $stmtLabelMeta = $pdo->prepare('
+                    INSERT INTO meta (key, value) VALUES ("puretrack_labels_updated", :ts)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                ');
+
+                $pdo->beginTransaction();
+                $ts = (string)time();
+                foreach ($labels as $rec) {
+                    if (!is_array($rec)) continue;
+                    $id = strtolower(trim((string)($rec['hex'] ?? '')));
+                    if (!preg_match('/^[0-9a-f]{6}$/', $id)) continue;
+                    $name = clean_ogn_name((string)($rec['label'] ?? ''));
+                    if ($name === '') continue;
+                    $stmtLabel->execute([':id' => $id, ':name' => $name, ':ts' => $ts]);
+                }
+                $stmtLabelMeta->execute([':ts' => $ts]);
+                $pdo->commit();
+            }
+            unset($labels);
         }
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
