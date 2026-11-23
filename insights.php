@@ -280,7 +280,8 @@ try {
 
     // Max altitude per aircraft in the rolling window, rolled up by type below.
     $altByAircraft = [];
-    $altStmt = $pdo->prepare('SELECT id, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff AND alt IS NOT NULL GROUP BY id');
+    // Ignore aircraft with only one altitude sample — a lone point cannot establish a record.
+    $altStmt = $pdo->prepare('SELECT id, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff AND alt IS NOT NULL GROUP BY id HAVING COUNT(*) >= 2');
     $altStmt->execute([':cutoff' => $cutoff]);
     foreach ($altStmt as $r) $altByAircraft[strtolower((string)$r['id'])] = (float)$r['ma'];
 
