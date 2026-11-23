@@ -203,6 +203,10 @@ function isUsPreset() {
   return altUnit === 'ft' && speedUnit === 'mph' && tempUnit === 'f' && climbUnit === 'fpm';
 }
 
+function useImperialDistanceUnits() {
+  return isAviationPreset() || isUsPreset() || altUnit === 'ft' || speedUnit === 'kt' || speedUnit === 'mph';
+}
+
 function fmtAltValue(meters) {
   if (meters == null) return '';
   if (altUnit === 'ft') return `${Math.round(meters * 3.28084).toLocaleString()} ft`;
@@ -220,6 +224,12 @@ function fmtWindSpeed(kmh) {
   if (speedUnit === 'kt') return `${Math.round(kmh * 0.539957)} kt`;
   if (speedUnit === 'mph') return `${Math.round(kmh * 0.621371)} mph`;
   return `${Math.round(kmh)} km/h`;
+}
+
+function fmtDistanceKm(km) {
+  if (km == null || !Number.isFinite(km)) return '';
+  if (useImperialDistanceUnits()) return `${(km * 0.621371).toFixed(1)} mi`;
+  return `${km.toFixed(1)} km`;
 }
 
 function fmtTemp(c) {
@@ -272,6 +282,74 @@ const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
 
 const map = L.map('map', { zoomControl: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
+
+const FullscreenControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd: function () {
+    const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control-fullscreen');
+    const button = L.DomUtil.create('button', 'leaflet-control-fullscreen-btn', container);
+    button.type = 'button';
+    button.textContent = '⤢';
+    button.setAttribute('aria-label', 'Maximize map');
+    button.title = 'Maximize map';
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.on(button, 'click', event => {
+      L.DomEvent.preventDefault(event);
+      toggleMapFullscreen();
+    });
+    this._button = button;
+    return container;
+  }
+});
+
+function mapIsFullscreen() {
+  return document.fullscreenElement === $('mapWrap') || $('mapWrap').classList.contains('map-fullscreen');
+}
+
+function exitMapFullscreen() {
+  const wrap = $('mapWrap');
+  if (!mapIsFullscreen()) return Promise.resolve();
+  if (document.fullscreenElement === wrap) return document.exitFullscreen();
+  wrap.classList.remove('map-fullscreen');
+  syncMapFullscreenUi();
+  return Promise.resolve();
+}
+
+function toggleMapFullscreen() {
+  const wrap = $('mapWrap');
+  if (mapIsFullscreen()) {
+    exitMapFullscreen();
+  } else if (wrap.requestFullscreen) {
+    wrap.requestFullscreen().catch(() => {
+      wrap.classList.add('map-fullscreen');
+      syncMapFullscreenUi();
+    });
+  } else {
+    wrap.classList.add('map-fullscreen');
+    syncMapFullscreenUi();
+  }
+}
+
+function syncMapFullscreenUi() {
+  const button = mapFullscreenControl?._button;
+  if (!button) return;
+  const active = mapIsFullscreen();
+  button.textContent = active ? '⤡' : '⤢';
+  button.setAttribute('aria-label', active ? 'Restore map' : 'Maximize map');
+  button.title = active ? 'Restore map' : 'Maximize map';
+  button.setAttribute('aria-pressed', String(active));
+  requestAnimationFrame(() => map.invalidateSize());
+}
+
+const mapFullscreenControl = new FullscreenControl().addTo(map);
+document.addEventListener('fullscreenchange', syncMapFullscreenUi);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && $('mapWrap').classList.contains('map-fullscreen')) {
+    toggleMapFullscreen();
+  }
+});
+syncMapFullscreenUi();
+
 raisePopupPane();
 
 function syncBottomBarOffset() {
@@ -360,7 +438,7 @@ function reorderBottomRightControls() {
 }
 
 function syncScaleControl() {
-  const useImperial = isAviationPreset() || isUsPreset() || altUnit === 'ft' || speedUnit === 'kt' || speedUnit === 'mph';
+  const useImperial = useImperialDistanceUnits();
   if (scaleControl && scaleControlImperial === useImperial) return;
   if (scaleControl) map.removeControl(scaleControl);
 
@@ -1914,10 +1992,10 @@ function updateCoverageLayer() {
     const color = a.snr >= 25 ? '#57d3b0' : a.snr >= 12 ? '#f5c451' : '#f07878';
     const rx = a.receiver ? rxPos.get(a.receiver.toLowerCase()) : null;
     if (rx) {
-      const distKm = haversineKm(rx.lat, rx.lon, a.lat, a.lon).toFixed(1);
+      const dist = fmtDistanceKm(haversineKm(rx.lat, rx.lon, a.lat, a.lon));
       L.polyline([[rx.lat, rx.lon], [a.lat, a.lon]], {
         color, weight: 2.5, opacity: 0.85, dashArray: '6 4'
-      }).bindTooltip(`${displayName(rx)} → ${displayName(a)} · ${a.snr.toFixed(1)} dB · ${distKm} km`, { sticky: true })
+      }).bindTooltip(`${displayName(rx)} → ${displayName(a)} · ${a.snr.toFixed(1)} dB · ${dist}`, { sticky: true })
         .addTo(coverageLayer);
     } else {
       L.circleMarker([a.lat, a.lon], {
@@ -2785,6 +2863,14 @@ $('markerWindow').addEventListener('change', () => {
 $('trackWindow').addEventListener('change', () => {
   saveMenuPrefs();
   for (const addr of selectedTracks.keys()) loadTrack(addr);
+});
+
+$('scrollToListBtn')?.addEventListener('click', () => {
+  Promise.resolve(exitMapFullscreen()).catch(() => {}).finally(() => {
+    requestAnimationFrame(() => {
+      $('aircraftSidebar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
 });
 
 const mapFilterControl = $('mapFilterControl');

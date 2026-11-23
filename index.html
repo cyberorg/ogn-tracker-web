@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261122g">
+<link rel="stylesheet" href="style.css?v=20261123e">
 </head>
 <body>
 <div class="app">
@@ -107,6 +107,7 @@
       </div>
     </div>
     <div id="map" aria-label="Map showing live OGN aircraft"></div>
+    <button id="scrollToListBtn" class="scroll-to-list-btn" type="button" aria-label="Scroll to aircraft list" title="Scroll to aircraft list">↓</button>
     <div id="emergencyBanner" class="emerg-banner" role="status" aria-live="assertive" aria-atomic="true">
       <span id="emergencyBannerText">Emergency Alert</span>
       <button id="emergencyJump" type="button">Jump to Alert</button>
@@ -129,7 +130,7 @@
     </div>
 
   </div>
-  <aside class="sidebar">
+  <aside class="sidebar" id="aircraftSidebar">
     <div class="filters">
       <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
       <button type="button" id="btnClearSearch" class="clear-search-btn" aria-label="Clear search" hidden>Clear</button>
@@ -152,6 +153,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261122f"></script>
+<script src="app.js?v=20261123e"></script>
 </body>
 </html>
