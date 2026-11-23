@@ -543,10 +543,11 @@ let replayActive = false, replayTimer = null;
 let replayFollowAddress = null;
 let replayPoints = [];
 let replayTrackPoints = [];
+let replayTrackSegments = [];   // Distinct flights: [{startTs, endTs, points}]
+let replayTrackPromise = null;
+const REPLAY_TRACK_GAP_S = 600; // No fixes for 10 minutes starts a new track
 let replayOnlyFocus = false;
 let replayDirection = 1;
-const REPLAY_SPEEDS = [1, 2, 5, 10, 20, 50];
-let replaySpeedIndex = 0;
 const REPLAY_RANGE_LABELS = ['15m', '1h', '6h', 'Today'];
 const REPLAY_RANGE_TITLES = ['Last 15 minutes', 'Last hour', 'Last 6 hours', 'Today (from midnight)'];
 const REPLAY_RANGE_MINUTES = [15, 60, 360];
@@ -2527,8 +2528,7 @@ document.addEventListener('click', e => {
     syncRecenterButton();
     $('replaySlider').value = '0';
     markers.get(addr)?.closePopup();
-    setReplayMode(true);
-    startReplayPlayback();
+    setReplayMode(true, { startAtTrackStart: true, play: true });
     syncReplayFollowLabel();
     return;
   }
@@ -2866,16 +2866,20 @@ async function fetchLive(force = false) {
 }
 
 function replaySpeed() {
-  return REPLAY_SPEEDS[replaySpeedIndex];
+  const v = Number($('replaySpeed')?.value);
+  return Number.isFinite(v) ? Math.max(1, Math.min(50, Math.round(v))) : 1;
 }
 
-function syncReplaySpeedButton() {
-  const btn = $('replaySpeed');
-  if (!btn) return;
+function syncReplaySpeedUi() {
+  const slider = $('replaySpeed');
+  const out = $('replaySpeedValue');
+  if (!slider) return;
   const speed = replaySpeed();
-  btn.textContent = `${speed}×`;
-  btn.title = `Replay speed: ${speed}× (click to cycle)`;
-  btn.setAttribute('aria-label', `Replay speed ${speed} times`);
+  if (out) out.textContent = `${speed}×`;
+  const title = `Replay speed: ${speed}× — scroll or drag to change`;
+  slider.title = title;
+  slider.setAttribute('aria-label', title);
+  slider.setAttribute('aria-valuetext', `${speed} times normal speed`);
 }
 
 function replaySpanMs() {
@@ -2886,6 +2890,108 @@ function replaySpanMs() {
     return Math.max(60000, nowMs - midnight);
   }
   return REPLAY_RANGE_MINUTES[replayRangeIndex] * 60000;
+}
+
+/** Split an aircraft's 24h fixes into distinct tracks on reception gaps. */
+function computeReplayTrackSegments(points) {
+  const valid = (Array.isArray(points) ? points : [])
+    .filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[3]))
+    .slice()
+    .sort((a, b) => a[3] - b[3]);
+  const segments = [];
+  let current = [];
+  for (const p of valid) {
+    if (current.length && p[3] - current[current.length - 1][3] > REPLAY_TRACK_GAP_S) {
+      segments.push({ startTs: current[0][3], endTs: current[current.length - 1][3], points: current });
+      current = [];
+    }
+    current.push(p);
+  }
+  if (current.length) {
+    segments.push({ startTs: current[0][3], endTs: current[current.length - 1][3], points: current });
+  }
+  return segments;
+}
+
+/** Effective replay bounds: extends back to the focused aircraft's earliest fix. */
+function replayWindow() {
+  const end = serverNow();
+  const rangeStart = end - replaySpanMs();
+  const start = replayTrackSegments.length
+    ? Math.min(rangeStart, replayTrackSegments[0].startTs * 1000 - 60000)
+    : rangeStart;
+  return { start, end: Math.max(end, start + 60000) };
+}
+
+function currentReplayTrackIndex() {
+  if (!replayTrackSegments.length) return -1;
+  let idx = 0;
+  for (let i = 0; i < replayTrackSegments.length; i++) {
+    if (replayTsMs >= replayTrackSegments[i].startTs * 1000) idx = i;
+    else break;
+  }
+  return idx;
+}
+
+function syncReplayTrackMarks() {
+  const box = $('replayTrackMarks');
+  if (!box) return;
+  const segs = replayFollowAddress ? replayTrackSegments : [];
+  const fmt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const marks = [];
+  segs.forEach((seg, i) => {
+    marks.push({ ts: seg.startTs, kind: 'start', title: `Track ${i + 1} start: ${fmt(seg.startTs)}` });
+    marks.push({ ts: seg.endTs, kind: 'end', title: `Track ${i + 1} end: ${fmt(seg.endTs)}` });
+  });
+  const sig = marks.map(m => `${m.kind}:${m.ts}`).join(',');
+  if (box.dataset.sig !== sig) {
+    box.replaceChildren();
+    marks.forEach(m => {
+      const tick = document.createElement('i');
+      tick.className = `replay-track-mark ${m.kind}`;
+      tick.title = m.title;
+      box.appendChild(tick);
+    });
+    box.dataset.sig = sig;
+  }
+  if (!marks.length) return;
+  const { start, end } = replayWindow();
+  [...box.children].forEach((tick, i) => {
+    const ratio = (marks[i].ts * 1000 - start) / Math.max(1, end - start);
+    tick.hidden = ratio < 0 || ratio > 1;
+    tick.style.left = `calc(8px + (100% - 16px) * ${ratio})`;
+  });
+}
+
+function syncReplayTrackUi() {
+  const count = replayTrackSegments.length;
+  const hasTracks = !!replayFollowAddress && count > 0;
+  const label = `${currentReplayTrackIndex() + 1}/${count}`;
+  for (const [id, icon, word] of [['replayPrevTrack', '⏮', 'Previous'], ['replayNextTrack', '⏭', 'Next']]) {
+    const btn = $(id);
+    if (!btn) continue;
+    btn.hidden = !hasTracks || count < 2;
+    if (!btn.hidden) {
+      btn.textContent = `${icon} ${label}`;
+      btn.title = `${word} track (${label})`;
+      btn.setAttribute('aria-label', btn.title);
+    }
+  }
+  syncReplayTrackMarks();
+}
+
+/** Move to an adjacent track's first fix, wrapping at either end. */
+function jumpToReplayTrack(delta) {
+  if (replayTrackSegments.length < 2) return;
+  const idx = (currentReplayTrackIndex() + delta + replayTrackSegments.length) % replayTrackSegments.length;
+  replayTsMs = replayTrackSegments[idx].startTs * 1000;
+  updateReplaySliderFromTs();
+  lastReplaySliceMinute = null;
+  followCenteringPaused = false;
+  syncRecenterButton();
+  centerOnFollowed(true);
+  syncReplayTrackUi();
+  loadReplaySlice();
 }
 
 function syncReplayRangeButton() {
@@ -2926,18 +3032,21 @@ function syncReplayFollowLabel() {
     scopeBtn.title = replayOnlyFocus ? 'Show all aircraft while staying centered' : 'Show only this aircraft';
     scopeBtn.setAttribute('aria-label', scopeBtn.title);
   }
+  syncReplayTrackUi();
 }
 
 function replayTsFromSlider() {
   const slider = $('replaySlider');
   const ratio = Number(slider.value) / Math.max(1, Number(slider.max));
-  return serverNow() - (replaySpanMs() * (1 - ratio));
+  const { start, end } = replayWindow();
+  return start + (end - start) * ratio;
 }
 
 function updateReplaySliderFromTs() {
   const slider = $('replaySlider');
   const max = Math.max(1, Number(slider.max));
-  const ratio = 1 - ((serverNow() - replayTsMs) / replaySpanMs());
+  const { start, end } = replayWindow();
+  const ratio = (replayTsMs - start) / Math.max(1, end - start);
   slider.value = String(Math.max(0, Math.min(max, ratio * max)));
 }
 
@@ -2961,11 +3070,11 @@ function startReplayPlayback() {
     const elapsedMs = Math.max(0, wallNow - replayLastTickMs);
     replayLastTickMs = wallNow;
     replayTsMs += elapsedMs * replaySpeed() * replayDirection;
-    const nowMs = serverNow();
-    const spanMs = replaySpanMs();
-    if (replayTsMs > nowMs) replayTsMs = nowMs - spanMs;
-    else if (replayTsMs < nowMs - spanMs) replayTsMs = nowMs;
+    const { start, end } = replayWindow();
+    if (replayTsMs > end) replayTsMs = start;
+    else if (replayTsMs < start) replayTsMs = end;
     updateReplaySliderFromTs();
+    syncReplayTrackUi();
     const minute = Math.floor(replayTsMs / 60000);
     if (minute !== lastReplaySliceMinute) loadReplaySlice();
   }, 1000);
@@ -2991,28 +3100,37 @@ function replayTrackLayers(points, weight, opacity, dashed = false) {
 
 function updateReplayTrackLine() {
   replayTrackGroup.clearLayers();
-  if (!replayFollowAddress || !replayTrackPoints.length) return;
-  const valid = replayTrackPoints.filter(p =>
-    Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[3]));
-  replayTrackLayers(valid, 2, 0.25, true).forEach(l => l.addTo(replayTrackGroup));
-  if (replayTsMs) {
-    const upTo = valid.filter(p => p[3] * 1000 <= replayTsMs);
-    replayTrackLayers(upTo, 3, 0.9).forEach(l => l.addTo(replayTrackGroup));
+  if (!replayFollowAddress) return;
+  const segments = replayTrackSegments.length ? replayTrackSegments : [{ points: replayTrackPoints }];
+  for (const seg of segments) {
+    const valid = (seg.points || []).filter(p =>
+      Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[3]));
+    replayTrackLayers(valid, 2, 0.25, true).forEach(l => l.addTo(replayTrackGroup));
+    if (replayTsMs) {
+      const upTo = valid.filter(p => p[3] * 1000 <= replayTsMs);
+      replayTrackLayers(upTo, 3, 0.9).forEach(l => l.addTo(replayTrackGroup));
+    }
   }
 }
 
 async function loadReplayTrack() {
   replayTrackPoints = [];
+  replayTrackSegments = [];
   replayTrackGroup.clearLayers();
+  syncReplayTrackUi();
   if (!replayFollowAddress) return;
-  const since = Math.floor((serverNow() - replaySpanMs()) / 1000);
+  // Always load the full 24h so every distinct track is available, regardless
+  // of the replay window selected with the range button.
+  const since = Math.floor(serverNow() / 1000) - 86400;
   const params = new URLSearchParams({ track: '1', id: replayFollowAddress, since: String(since) });
   try {
     const res = await fetch(`ogn-proxy.php?${params}`);
     if (!res.ok) return;
     const data = await res.json();
     replayTrackPoints = Array.isArray(data.points) ? data.points : [];
+    replayTrackSegments = computeReplayTrackSegments(replayTrackPoints);
     updateReplayTrackLine();
+    syncReplayTrackUi();
   } catch (e) {}
 }
 
@@ -3060,7 +3178,7 @@ async function loadReplaySlice() {
   } catch (e) {}
 }
 
-function setReplayMode(on) {
+function setReplayMode(on, opts = {}) {
   replayActive = on;
   $('btnReplay').classList.toggle('active', on);
   $('btnReplay').setAttribute('aria-pressed', String(on));
@@ -3072,8 +3190,23 @@ function setReplayMode(on) {
     replayGroup.addTo(map);
     replayTsMs = replayTsFromSlider();
     syncReplayFollowLabel();
-    loadReplaySlice();
-    loadReplayTrack();
+    replayTrackPromise = loadReplayTrack();
+    if (opts.startAtTrackStart && replayFollowAddress) {
+      // Wait for the 24h track so playback begins at the aircraft's first fix
+      // (earliest point of its first track), not at the window boundary.
+      replayTrackPromise.then(() => {
+        if (replayTrackSegments.length) {
+          replayTsMs = replayTrackSegments[0].startTs * 1000;
+          updateReplaySliderFromTs();
+          syncReplayTrackUi();
+        }
+        lastReplaySliceMinute = null;
+        loadReplaySlice();
+        if (opts.play) startReplayPlayback();
+      });
+    } else {
+      loadReplaySlice();
+    }
   } else {
     stopReplayPlayback();
     replayTsMs = 0;
@@ -3089,6 +3222,9 @@ function setReplayMode(on) {
     map.removeLayer(replayGroup); replayGroup.clearLayers();
     map.removeLayer(replayTrackGroup); replayTrackGroup.clearLayers();
     replayTrackPoints = [];
+    replayTrackSegments = [];
+    replayTrackPromise = null;
+    syncReplayTrackUi();
     clusterGroup.addTo(map); emergencyGroup.addTo(map);
     fetchLive(true);
   }
@@ -3283,22 +3419,22 @@ $('replayExit').addEventListener('click', () => setReplayMode(false));
 $('replaySlider').addEventListener('input', () => {
   replayTsMs = replayTsFromSlider();
   lastReplaySliceMinute = null;
+  syncReplayTrackUi();
   loadReplaySlice();
 });
 $('replayPlay').addEventListener('click', () => {
   if (replayTimer) stopReplayPlayback();
   else startReplayPlayback();
 });
-$('replaySpeed').addEventListener('click', () => {
-  const wasPlaying = !!replayTimer;
-  if (wasPlaying) {
-    clearInterval(replayTimer);
-    replayTimer = null;
-  }
-  replaySpeedIndex = (replaySpeedIndex + 1) % REPLAY_SPEEDS.length;
-  syncReplaySpeedButton();
-  if (wasPlaying) startReplayPlayback();
-});
+$('replaySpeed').addEventListener('input', syncReplaySpeedUi);
+$('replaySpeed').closest('.replay-speed-wrap')?.addEventListener('wheel', e => {
+  e.preventDefault();
+  const delta = e.deltaY < 0 ? 1 : (e.deltaY > 0 ? -1 : 0);
+  if (!delta) return;
+  const slider = $('replaySpeed');
+  slider.value = String(Math.max(1, Math.min(50, replaySpeed() + delta)));
+  syncReplaySpeedUi();
+}, { passive: false });
 $('replayReverse').addEventListener('click', () => {
   replayDirection = -replayDirection;
   syncReplayDirectionButton();
@@ -3307,16 +3443,20 @@ $('replayRange').addEventListener('click', () => {
   replayRangeIndex = (replayRangeIndex + 1) % REPLAY_RANGE_LABELS.length;
   syncReplayRangeButton();
   $('replaySlider').value = '0';
-  replayTsMs = serverNow() - replaySpanMs();
+  replayTsMs = replayWindow().start;
+  updateReplaySliderFromTs();
   lastReplaySliceMinute = null;
-  if (replayActive) { loadReplaySlice(); loadReplayTrack(); }
+  syncReplayTrackUi();
+  if (replayActive) { loadReplaySlice(); replayTrackPromise = loadReplayTrack(); }
 });
+$('replayPrevTrack').addEventListener('click', () => jumpToReplayTrack(-1));
+$('replayNextTrack').addEventListener('click', () => jumpToReplayTrack(1));
 $('replayClearFollow').addEventListener('click', () => {
   replayOnlyFocus = !replayOnlyFocus;
   syncReplayFollowLabel();
   loadReplaySlice();
 });
-syncReplaySpeedButton();
+syncReplaySpeedUi();
 syncReplayDirectionButton();
 syncReplayRangeButton();
 syncReplayFollowLabel();
