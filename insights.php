@@ -433,7 +433,7 @@ try {
     <span class="status-updated">
       <?php if ($dataUpdated > 0): ?>data @ <time class="ins-time" data-ts="<?php echo $dataUpdated; ?>"><?php echo h(date('H:i', $dataUpdated)); ?></time><?php else: ?>no data timestamp<?php endif; ?>
     </span>
-    <a class="ins-refresh" href="/ogn/">← Tracker</a>
+    <a class="ins-refresh" href="index.html">← Tracker</a>
   </div>
 </header>
 

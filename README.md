@@ -1,4 +1,4 @@
-# OGN Glider Tracker
+# OGN Tracker
 
 A lightweight, self-hosted live aircraft and paraglider radar powered by the **Open Glider Network (OGN)** APRS-IS feed. Built to run reliably on standard shared PHP web hosting using **SQLite (WAL mode)** and a zero-build **Leaflet** frontend.
 
