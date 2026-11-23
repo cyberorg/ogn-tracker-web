@@ -295,7 +295,7 @@ function syncUnitButtons() {
   $('presetAviationBtn').classList.toggle('active', isAviationPreset());
   $('presetUsBtn').classList.toggle('active', isUsPreset());
   $('unitAltBtn').textContent = `Alt: ${altUnit === 'ft' ? 'ft' : 'm'}`;
-  $('unitSpeedBtn').textContent = `Wind: ${speedUnit === 'kt' ? 'kt' : speedUnit === 'mph' ? 'mph' : 'km/h'}`;
+  $('unitSpeedBtn').textContent = `Speed: ${speedUnit === 'kt' ? 'kt' : speedUnit === 'mph' ? 'mph' : 'km/h'}`;
   $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
   $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : climbUnit === 'fpm' ? 'fpm' : 'm/s'}`;
   updateFilterBadge();
@@ -2759,7 +2759,7 @@ $('unitAltBtn').addEventListener('click', () => {
   if (activeBaroAddress) renderBarogram(activeBaroAddress);
 });
 $('unitSpeedBtn').addEventListener('click', () => {
-  speedUnit = speedUnit === 'kmh' ? 'kt' : 'kmh';
+  speedUnit = speedUnit === 'kmh' ? 'kt' : speedUnit === 'kt' ? 'mph' : 'kmh';
   saveMenuPrefs();
   syncUnitButtons();
   render();
