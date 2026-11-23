@@ -36,13 +36,13 @@ if (!$doGenerate) {
     }
     http_response_code(503);
     ?><!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>OGN Tracker — Insights</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
 <link rel="stylesheet" href="style.css"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
 <div class="ins-error">No snapshot has been generated yet. The 4-hourly refresh job will create it shortly.</div>
-</div></main></body></html><?php
+</div></main></div></body></html><?php
     exit;
 }
 
@@ -88,9 +88,11 @@ function n(int|float $v): string { return number_format((int)$v); }
 function pct(int $n, int $total): string { return $total > 0 ? number_format($n * 100 / $total, 1) . '%' : '0%'; }
 function ageText(int $ts): string {
     $s = max(0, time() - $ts);
-    if ($s < 60) return $s . 's ago';
-    if ($s < 3600) return intdiv($s, 60) . 'm ago';
-    return intdiv($s, 3600) . 'h ' . intdiv($s % 3600, 60) . 'm ago';
+    if ($s < 60) $txt = $s . 's ago';
+    elseif ($s < 3600) $txt = intdiv($s, 60) . 'm ago';
+    else $txt = intdiv($s, 3600) . 'h ' . intdiv($s % 3600, 60) . 'm ago';
+    // The page is cached for hours, so relative ages are refreshed client-side.
+    return '<time class="ins-time-age" data-ts="' . $ts . '">' . h($txt) . '</time>';
 }
 function localHourEpoch(string $key, string $tz): int {
     try {
@@ -414,8 +416,8 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}
   .ins-nav a{font-size:11px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--panel2)}
   .ins-nav a:hover{color:var(--text);border-color:var(--accent)}
-  .ins-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin-bottom:12px}
-  .ins-kpis-secondary{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px}
+  .ins-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(165px,100%),1fr));gap:10px;margin-bottom:12px}
+  .ins-kpis-secondary{grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr));margin-bottom:18px}
   .ins-kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 14px}
   .ins-kpi-hero{padding:16px 18px;border-color:#2a4354}
   .ins-kpi-label{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;font-weight:700}
@@ -425,7 +427,7 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-kpis-secondary .ins-kpi-value{font-size:20px}
   .ins-kpis-secondary .ins-kpi-sub{font-size:10px}
   .ins-kpi-sub{font-size:11px;color:#b7c7d2;margin-top:3px}
-  .ins-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px;align-items:start}
+  .ins-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:12px;align-items:start}
   .ins-section{grid-column:1/-1;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:6px 0 -2px;padding-bottom:6px;border-bottom:1px solid var(--line)}
   .ins-span-2{grid-column:span 2}
   .ins-card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;min-width:0}
@@ -439,6 +441,7 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-bar-track{height:8px;border-radius:5px;background:#223442;overflow:hidden}
   .ins-bar-fill{height:100%;border-radius:5px;min-width:2px}
   .ins-bar-value{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
+  .dot.warn{background:var(--yellow)}
   .ins-table-wrap{overflow-x:auto}
   .ins-table{border-collapse:collapse;width:100%;font-size:12px}
   .ins-table th{text-align:left;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.4px;padding:6px 8px;border-bottom:1px solid var(--line)}
@@ -465,7 +468,30 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-split{display:grid;grid-template-columns:1fr 1fr;gap:18px}
   .ins-split h3{font-size:11px;margin:0 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
   .ins-error{background:#3d1118;border:1px solid var(--red);color:#ffe5e5;padding:14px;border-radius:10px;margin:20px auto;max-width:700px}
-  @media(max-width:800px){.ins-split{grid-template-columns:1fr}.ins-span-2{grid-column:auto}.ins-page{padding:12px}.ins-nav{margin-bottom:12px}}
+  @media(max-width:800px){
+    .ins-split{grid-template-columns:1fr}
+    .ins-span-2{grid-column:auto}
+    .ins-page{padding:12px}
+    .ins-nav{margin-bottom:12px}
+    .ins-col-val{font-size:12px}
+    .ins-col-date,.ins-col-hour{font-size:11px}
+  }
+  @media(max-width:480px){
+    .ins-page{padding:10px}
+    .ins-nav{gap:5px}
+    .ins-nav a{padding:8px 12px;font-size:12px}
+    .ins-gen{display:none}
+    .ins-headline h2{font-size:18px}
+    .ins-headline .sub{font-size:11px}
+    .status{white-space:normal}
+    .status-updated{width:100%;text-align:right}
+    .ins-kpi-hero{padding:13px 14px}
+    .ins-kpi-hero .ins-kpi-value{font-size:27px}
+    .ins-section{margin-top:10px}
+    .ins-bar-row{grid-template-columns:minmax(80px,120px) 1fr 50px;gap:6px;font-size:11px}
+    .ins-table{font-size:11px}
+    .ins-table th,.ins-table td{padding:5px 6px}
+  }
 </style>
 </head>
 <body>
@@ -558,8 +584,9 @@ $genDuration = microtime(true) - $generationStarted;
 
     $fanetHtml = ''; $i = 0;
     foreach ($fanetCounts as $label => $c) { $fanetHtml .= barRow($label, $c, array_sum($fanetCounts), $colors[$i++ % count($colors)]); }
-    echo sectionCard('FANET statuses', n(array_sum($fanetCounts)) . ' aircraft with status', $fanetHtml ?: '<div class="ins-empty">No FANET status packets in the last 24 hours.</div>',
-      '<p class="ins-note">From <code>FNT1x</code> (airborne) and <code>FNT7x</code> status codes in the latest packet per aircraft.</p>');
+    echo sectionCard('FANET statuses', n(array_sum($fanetCounts)) . ' aircraft with status',
+      ($fanetHtml ?: '<div class="ins-empty">No FANET status packets in the last 24 hours.</div>')
+      . '<p class="ins-note">From <code>FNT1x</code> (airborne) and <code>FNT7x</code> status codes in the latest packet per aircraft.</p>');
 
     $stHtml = '<div class="ins-split"><div><h3>By receiver network</h3>';
     foreach ($stationNetworks as $label => $c) $stHtml .= barRow($label, $c, $stationTotal, 'var(--accent)');
@@ -574,7 +601,7 @@ $genDuration = microtime(true) - $generationStarted;
         $rows[] = [
             '<b>' . h($r['station_id']) . '</b>',
             '<span class="num">' . n((int)$r['n']) . '</span>',
-            h(ageText((int)$r['last_ts'])),
+            ageText((int)$r['last_ts']),
         ];
     }
     echo sectionCard('Top receiving stations', 'most aircraft heard in 24h',
@@ -587,7 +614,7 @@ $genDuration = microtime(true) - $generationStarted;
             '<b>' . h($s['id']) . '</b>',
             '<span class="num">' . h(number_format((float)$s['max_km'], 1)) . ' km</span>',
             h((string)$s['farthest_id']),
-            h(ageText((int)$s['farthest_ts'])),
+            ageText((int)$s['farthest_ts']),
         ];
     }
     echo sectionCard('Farthest reception records', 'longest station → aircraft range',
@@ -663,6 +690,17 @@ $genDuration = microtime(true) - $generationStarted;
   const tzNote = document.querySelector('.ins-tz-note');
   if (tzNote) tzNote.textContent = 'your local time';
 
+  const relAge = ts => {
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm ago';
+  };
+  document.querySelectorAll('.ins-time-age').forEach(el => {
+    const ts = Number(el.dataset.ts || 0);
+    if (ts) el.textContent = relAge(ts);
+  });
+
   const status = document.getElementById('insStatus');
   if (status) {
     const dataTs = Number(status.dataset.dataTs || 0);
@@ -731,7 +769,11 @@ if (!isset($fatal)) {
     @rename($tmpMeta, $cacheMeta);
 }
 if ($cliGenerate) {
-    echo 'Insights regenerated in ' . number_format($genDuration, 1) . "s\n";
+    if (isset($fatal)) {
+        fwrite(STDERR, 'Insights generation failed: ' . $fatal . "\n");
+    } else {
+        echo 'Insights regenerated in ' . number_format($genDuration, 1) . "s\n";
+    }
 } else {
     echo $pageHtml;
 }
