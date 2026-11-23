@@ -10,6 +10,7 @@ declare(strict_types=1);
 $dbFile = __DIR__ . '/ogn-live.sqlite';
 $cutoff = time() - 86400;
 $cacheTtl = 4 * 3600;
+$trackGapSeconds = 600; // A gap longer than this starts a new continuous track
 $cacheDir = rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache';
 $cacheFile = $cacheDir . '/insights_page.html';
 $cacheMeta = $cacheDir . '/insights_page.meta.json';
@@ -89,6 +90,65 @@ $FANET_STATUS = [
 function h($v): string { return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function n(int|float $v): string { return number_format((int)$v); }
 function pct(int $n, int $total): string { return $total > 0 ? number_format($n * 100 / $total, 1) . '%' : '0%'; }
+
+function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $dLat = deg2rad($lat2 - $lat1);
+    $dLon = deg2rad($lon2 - $lon1);
+    $a = sin($dLat / 2.0) ** 2 + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon / 2.0) ** 2;
+    return 6371.0 * 2.0 * atan2(sqrt($a), sqrt(1.0 - $a));
+}
+
+/** Credible ground-speed ceiling (km/h), mirroring the collector's position-jump guard. */
+function max_plausible_speed_kmh(int $type): float {
+    if (in_array($type, [4, 6, 7, 13], true)) return 250.0;
+    if ($type === 1) return 400.0;
+    return 1300.0;
+}
+
+/** Tracker deep link: #lat,lon,zoom,address (resolved relative to /ogn/). */
+function tracker_hash_url(?float $lat, ?float $lon, string $address): string {
+    if ($lat === null || $lon === null || $address === '') return '';
+    return './#' . number_format($lat, 4, '.', '') . ',' . number_format($lon, 4, '.', '') . ',12,' . rawurlencode($address);
+}
+
+/** Keep the per-type record holder together with its winning aircraft id. */
+function note_type_record(string $label, string $id, float $value, array &$best, array &$bestId): void {
+    if (!isset($best[$label]) || $value > $best[$label]) {
+        $best[$label] = $value;
+        $bestId[$label] = $id;
+    }
+}
+
+/** Aircraft type from the latest packet, mirroring collector / frontend logic. */
+function detect_aircraft_type(string $raw, string $sym, string $ddbId, array $ddbTypes, array &$packetTypeCounts): int {
+    $isStationSym = in_array($sym, ['_', '&', '#', 'r'], true);
+    $type = $isStationSym ? 15 : 0;
+    if (preg_match('/\bid([0-9a-fA-F]{2})[0-9a-fA-F]{6,8}\b/i', $raw, $im)) {
+        $pt = (hexdec($im[1]) >> 2) & 0x0F;
+        $packetTypeCounts[$pt] = ($packetTypeCounts[$pt] ?? 0) + 1;
+        if (!$isStationSym && $pt > 0) {
+            if ($pt === 15 && (preg_match('/\bFNT7[0-9a-f]\b/i', $raw) || preg_match('/^FNT[0-9a-f]{6}>/i', $raw))) {
+                $type = 7;
+            } elseif ($pt === 7 && preg_match('/^[^>]+>OGADSB\b/i', $raw)) {
+                $type = 16;
+            } else {
+                $type = $pt;
+            }
+        }
+    } elseif ($type === 0) {
+        if ($sym === 'g') $type = 7;
+        elseif ($sym === "'") $type = 1;
+        elseif ($sym === '^') $type = 8;
+        elseif ($sym === 'X') $type = 3;
+        elseif ($sym === 'O') $type = 11;
+    }
+    $ddbType = $ddbTypes[$ddbId] ?? '';
+    if ($type === 0 && $ddbType !== '' && ctype_digit($ddbType) && (int)$ddbType > 0) {
+        $type = (int)$ddbType;
+    }
+    return $type;
+}
+
 function ageText(int $ts): string {
     $s = max(0, time() - $ts);
     if ($s < 60) $txt = $s . 's ago';
@@ -106,10 +166,15 @@ function localHourEpoch(string $key, string $tz): int {
     }
 }
 
-function barRow(string $label, int $count, int $total, string $color = 'var(--accent)', string $sub = ''): string {
+function barRow(string $label, int $count, int $total, string $color = 'var(--accent)', string $sub = '', array $subLinks = []): string {
     $w = $total > 0 ? min(100.0, $count * 100 / $total) : 0.0;
+    $subHtml = $sub !== '' ? h($sub) : '';
+    foreach ($subLinks as $link) {
+        if ($subHtml !== '') $subHtml .= ' · ';
+        $subHtml .= '<a class="ins-bar-link" href="' . h($link['url']) . '" title="' . h($link['title'] ?? '') . '">' . h($link['text']) . '</a>';
+    }
     return '<div class="ins-bar-row">'
-        . '<div class="ins-bar-label">' . h($label) . ($sub !== '' ? '<span class="ins-bar-sub">' . h($sub) . '</span>' : '') . '</div>'
+        . '<div class="ins-bar-label">' . h($label) . ($subHtml !== '' ? '<span class="ins-bar-sub">' . $subHtml . '</span>' : '') . '</div>'
         . '<div class="ins-bar-track"><div class="ins-bar-fill" style="width:' . number_format($w, 2) . '%;background:' . h($color) . '"></div></div>'
         . '<div class="ins-bar-value">' . n($count) . '</div>'
         . '</div>';
@@ -204,9 +269,14 @@ try {
     $names = [];
     foreach ($pdo->query('SELECT id, name FROM names') as $r) $names[strtolower((string)$r['id'])] = (string)$r['name'];
 
-    // Raw packet lookup for station classification (avoid N+1 queries below).
+    // Raw packet / last-known-position lookup (avoid N+1 queries below).
     $rawById = [];
-    foreach ($aircraftRows as $r) $rawById[strtolower((string)$r['id'])] = (string)$r['raw'];
+    $posById = [];
+    foreach ($aircraftRows as $r) {
+        $rid = strtolower((string)$r['id']);
+        $rawById[$rid] = (string)$r['raw'];
+        $posById[$rid] = [(float)$r['lat'], (float)$r['lon']];
+    }
 
     // Max altitude per aircraft in the rolling window, rolled up by type below.
     $altByAircraft = [];
@@ -215,7 +285,11 @@ try {
     foreach ($altStmt as $r) $altByAircraft[strtolower((string)$r['id'])] = (float)$r['ma'];
 
     $typeCounts = [];       // aircraft only (ground stations excluded)
+    $typeById = [];         // aircraft id -> resolved type (used by the distance guard)
     $typeMaxAlt = [];       // highest altitude seen per aircraft type
+    $typeMaxAltId = [];     // aircraft that reached it
+    $typeMaxDist = [];      // longest plausibly-travelled distance per type
+    $typeMaxDistId = [];    // aircraft that flew it
     $stationCounts = [];    // type 15 / station symbols
     $networkCounts = [];    // packet source network, all aircraft-table rows
     $fanetCounts = [];      // unique aircraft per FANET status from latest packet
@@ -230,45 +304,19 @@ try {
         if (preg_match('/(\d{6})h(\d{2})(\d{2}\.\d+)([NS])(.)(\d{3})(\d{2}\.\d+)([EW])(.)/', $raw, $bm)) {
             $sym = $bm[9];
         }
-        $isStationSym = in_array($sym, ['_', '&', '#', 'r'], true);
-
         // Receiver / source network.
         if (preg_match('/^[^>]+>([^,]+)/', $raw, $m)) {
             $net = strtoupper($m[1]);
             $networkCounts[$net] = ($networkCounts[$net] ?? 0) + 1;
         }
 
-        // Packet-derived type (mirrors collector / frontend logic).
-        $type = $isStationSym ? 15 : 0;
-        if (preg_match('/\bid([0-9a-fA-F]{2})[0-9a-fA-F]{6,8}\b/i', $raw, $im)) {
-            $pt = (hexdec($im[1]) >> 2) & 0x0F;
-            $packetTypeCounts[$pt] = ($packetTypeCounts[$pt] ?? 0) + 1;
-            if (!$isStationSym && $pt > 0) {
-                if ($pt === 15 && (preg_match('/\bFNT7[0-9a-f]\b/i', $raw) || preg_match('/^FNT[0-9a-f]{6}>/i', $raw))) {
-                    $type = 7;
-                } elseif ($pt === 7 && preg_match('/^[^>]+>OGADSB\b/i', $raw)) {
-                    $type = 16;
-                } else {
-                    $type = $pt;
-                }
-            }
-        } elseif ($type === 0) {
-            if ($sym === 'g') $type = 7;
-            elseif ($sym === "'") $type = 1;
-            elseif ($sym === '^') $type = 8;
-            elseif ($sym === 'X') $type = 3;
-            elseif ($sym === 'O') $type = 11;
-        }
-
-        // DDB fallback when packet has no usable type.
+        // Packet-derived type + DDB fallback (mirrors collector / frontend logic).
+        $id = strtolower((string)$row['id']);
         $ddbId = strtolower((string)$row['ddb_id']);
         $ddbType = $ddbTypes[$ddbId] ?? '';
         if ($ddbId !== '' && $ddbType !== '') $ddbKnown++;
-        if ($type === 0 && $ddbType !== '' && ctype_digit($ddbType) && (int)$ddbType > 0) {
-            $type = (int)$ddbType;
-        }
-
-        $id = strtolower((string)$row['id']);
+        $type = detect_aircraft_type($raw, $sym, $ddbId, $ddbTypes, $packetTypeCounts);
+        $typeById[$id] = $type;
         if (isset($names[$id])) $identifiedCount++;
 
         if ($type === 15) {
@@ -277,8 +325,7 @@ try {
             $label = $OGN_TYPES[$type] ?? ($type > 0 ? 'Type ' . $type : 'Unknown / unspecified');
             $typeCounts[$label] = ($typeCounts[$label] ?? 0) + 1;
             if (isset($altByAircraft[$id])) {
-                $alt = $altByAircraft[$id];
-                $typeMaxAlt[$label] = isset($typeMaxAlt[$label]) ? max($typeMaxAlt[$label], $alt) : $alt;
+                note_type_record($label, $id, $altByAircraft[$id], $typeMaxAlt, $typeMaxAltId);
             }
         }
 
@@ -295,6 +342,44 @@ try {
             }
             $fanetCounts[$st] = ($fanetCounts[$st] ?? 0) + 1;
         }
+    }
+
+    // Longest single continuous track per aircraft (not the sum of separate flights).
+    // A time gap or an implausible hop ends the current track; the next fix starts a new one.
+    // The per-hop speed guard mirrors the collector so corrupt jumps cannot inflate the result.
+    $distByAircraft = [];
+    $distCur = [];
+    $trackStmt = $pdo->prepare('SELECT id, ts, lat, lon FROM tracks WHERE ts >= :cutoff ORDER BY id, ts');
+    $trackStmt->execute([':cutoff' => $cutoff]);
+    $distPrev = [];
+    while ($tr = $trackStmt->fetch(PDO::FETCH_ASSOC)) {
+        $tid = strtolower((string)$tr['id']);
+        $tts = (int)$tr['ts'];
+        $tlat = (float)$tr['lat'];
+        $tlon = (float)$tr['lon'];
+        $p = $distPrev[$tid] ?? null;
+        if ($p !== null) {
+            $km = haversine_km($p['lat'], $p['lon'], $tlat, $tlon);
+            $dt = max(0, $tts - $p['ts']);
+            $allowedKm = max_plausible_speed_kmh($typeById[$tid] ?? 0) * $dt / 3600.0 + 2.0;
+            if ($km > $allowedKm || $dt > $trackGapSeconds) {
+                // Close the current track and keep its best distance.
+                $distByAircraft[$tid] = max($distByAircraft[$tid] ?? 0.0, $distCur[$tid] ?? 0.0);
+                $distCur[$tid] = 0.0;
+                if ($km > $allowedKm) continue; // corrupt hop: skip it, keep last valid point
+            }
+            $distCur[$tid] = ($distCur[$tid] ?? 0.0) + $km;
+        }
+        $distPrev[$tid] = ['ts' => $tts, 'lat' => $tlat, 'lon' => $tlon];
+    }
+    foreach ($distCur as $tid => $km) {
+        $distByAircraft[$tid] = max($distByAircraft[$tid] ?? 0.0, $km);
+    }
+    foreach ($distByAircraft as $tid => $km) {
+        $tt = $typeById[$tid] ?? 0;
+        if ($tt === 15) continue;
+        $label = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown / unspecified');
+        note_type_record($label, $tid, $km, $typeMaxDist, $typeMaxDistId);
     }
 
     arsort($typeCounts);
@@ -452,6 +537,8 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-bar-row{display:grid;grid-template-columns:minmax(210px,290px) minmax(70px,1fr) 58px;gap:9px;align-items:center;margin:7px 0;font-size:12px}
   .ins-bar-label{min-width:0;white-space:normal;color:#d8e4eb}
   .ins-bar-sub{color:var(--muted);font-size:10px;margin-left:5px;white-space:nowrap}
+  .ins-bar-link{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
+  .ins-bar-link:hover{color:#fff;border-bottom-color:#fff}
   .ins-bar-track{height:8px;border-radius:5px;background:#223442;overflow:hidden;max-width:180px}
   .ins-bar-fill{height:100%;border-radius:5px;min-width:2px}
   .ins-bar-value{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
@@ -568,8 +655,24 @@ $genDuration = microtime(true) - $generationStarted;
     $typeTotal = array_sum($typeCounts); // excludes ground stations, matches the card subtitle
     $typeHtml = ''; $i = 0;
     foreach ($typeCounts as $label => $c) {
-        $sub = isset($typeMaxAlt[$label]) ? '(max alt ' . n(round($typeMaxAlt[$label])) . ' m)' : '';
-        $typeHtml .= barRow($label, $c, $typeTotal, $colors[$i++ % count($colors)], $sub);
+        $sub = ''; $links = [];
+        if (isset($typeMaxAlt[$label])) {
+            $aid = $typeMaxAltId[$label] ?? '';
+            $pos = $posById[$aid] ?? [null, null];
+            $url = tracker_hash_url($pos[0], $pos[1], $aid);
+            $text = '(max alt ' . n(round($typeMaxAlt[$label])) . ' m)';
+            if ($url !== '') $links[] = ['url' => $url, 'text' => $text, 'title' => 'Show max-altitude aircraft ' . $aid . ' on the tracker'];
+            else $sub = $text;
+        }
+        if (isset($typeMaxDist[$label])) {
+            $aid = $typeMaxDistId[$label] ?? '';
+            $pos = $posById[$aid] ?? [null, null];
+            $url = tracker_hash_url($pos[0], $pos[1], $aid);
+            $text = '(longest track ' . n(round($typeMaxDist[$label])) . ' km)';
+            if ($url !== '') $links[] = ['url' => $url, 'text' => $text, 'title' => 'Show longest single-track aircraft ' . $aid . ' on the tracker'];
+            else $sub .= ($sub !== '' ? ' ' : '') . $text;
+        }
+        $typeHtml .= barRow($label, $c, $typeTotal, $colors[$i++ % count($colors)], $sub, $links);
     }
     echo sectionCard('Aircraft types', n($typeTotal) . ' aircraft', $typeHtml ?: '<div class="ins-empty">No aircraft seen.</div>');
 
