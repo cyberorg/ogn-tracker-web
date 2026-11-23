@@ -2248,8 +2248,10 @@ function isUserInteractingWithList() {
 function updateListHint() {
   const hint = $('listHint');
   const q = $('search').value.trim();
-  const visibleKeys = new Set(filtered().map(a => a.address));
+  const visible = filtered();
+  const visibleKeys = new Set(visible.map(a => a.address));
   const hiddenTracks = [...selectedTracks.keys()].filter(k => !visibleKeys.has(k));
+  const outsideCount = visible.reduce((n, a) => n + (isInCurrentViewport(a.lat, a.lon) ? 0 : 1), 0);
   const parts = [];
   if (q) parts.push(`Filtering by "${q}".`);
   if (hiddenTracks.length) {
@@ -2259,6 +2261,7 @@ function updateListHint() {
     });
     parts.push(`${hiddenTracks.length} selected track${hiddenTracks.length > 1 ? 's' : ''} hidden by filter/search: ${names.join(', ')}${hiddenTracks.length > 3 ? '…' : ''}.`);
   }
+  if (outsideCount) parts.push(`${outsideCount} aircraft outside the current map view; pan or zoom to see them.`);
   if (followedAddress && !visibleKeys.has(followedAddress)) {
     parts.push('Followed aircraft is currently outside current filter/view.');
   }
@@ -2268,6 +2271,7 @@ function updateListHint() {
 function render() {
   if (replayActive) return;
   const visible = filtered();
+  const listVisible = visible.filter(a => isInCurrentViewport(a.lat, a.lon));
   const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
 
@@ -2363,9 +2367,9 @@ function render() {
   });
 
   updateCoverageLayer();
-  $('listCount').textContent = visible.length;
+  $('listCount').textContent = listVisible.length;
 
-  const sorted = visible.slice().sort((a, b) => {
+  const sorted = listVisible.slice().sort((a, b) => {
     const ea = isEmergency(a) ? 1 : 0, eb = isEmergency(b) ? 1 : 0;
     if (ea !== eb) return eb - ea;
     const pa = pinnedAircraft.has(a.address) ? 1 : 0, pb = pinnedAircraft.has(b.address) ? 1 : 0;
@@ -3271,6 +3275,7 @@ let moveTimer = null;
 map.on('moveend', () => {
   updateUrlHash();
   render24hAlertsSummary(serverNow());
+  scheduleRender();
   clearTimeout(moveTimer);
   moveTimer = setTimeout(() => {
     if (replayActive) loadReplaySlice();
