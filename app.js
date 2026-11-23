@@ -353,6 +353,7 @@ syncMapFullscreenUi();
 raisePopupPane();
 
 let lastBottomBarSpace = -1;
+let emergencyBannerDismissedSig = null;
 
 function syncBottomBarOffset() {
   const wrap = $('mapWrap');
@@ -360,9 +361,11 @@ function syncBottomBarOffset() {
   const hasBar = !!bar;
   wrap.classList.toggle('has-bottom-bar', hasBar);
 
-  // Shrink the Leaflet map itself so no popup can be positioned under the bar.
+  // On mobile the replay bar floats over the map; shrinking the map would leave a dark
+  // empty band between the map and the aircraft sidebar. Only shrink on desktop.
+  const overlayBar = window.matchMedia('(max-width:800px)').matches;
   let space = 0;
-  if (hasBar) {
+  if (hasBar && !overlayBar) {
     const wrapRect = wrap.getBoundingClientRect();
     const barRect = bar.getBoundingClientRect();
     space = Math.max(0, Math.ceil(wrapRect.bottom - barRect.top + 8));
@@ -546,8 +549,10 @@ let replayTrackPoints = [];
 let replayTrackSegments = [];   // Distinct flights: [{startTs, endTs, points}]
 let replayTrackPromise = null;
 const REPLAY_TRACK_GAP_S = 600; // No fixes for 10 minutes starts a new track
+const compactReplayUi = () => window.matchMedia('(max-width:800px)').matches;
 let replayOnlyFocus = false;
 let replayDirection = 1;
+let replaySpeedValue = 1;
 const REPLAY_RANGE_LABELS = ['15m', '1h', '6h', 'Today'];
 const REPLAY_RANGE_TITLES = ['Last 15 minutes', 'Last hour', 'Last 6 hours', 'Today (from midnight)'];
 const REPLAY_RANGE_MINUTES = [15, 60, 360];
@@ -2273,11 +2278,15 @@ function render() {
   if (emergencies.length > 0) {
     const first = emergencies[0];
     const msg = `🚨 ${emergencies.length} Emergency: ${displayName(first)} (${getDisplayStatus(first)})`;
+    const sig = `${first.address}|${emergencies.length}|${msg}`;
+    if (emergencyBannerDismissedSig && emergencyBannerDismissedSig !== sig) emergencyBannerDismissedSig = null;
     if ($('emergencyBannerText').textContent !== msg) $('emergencyBannerText').textContent = msg;
     $('emergencyJump').dataset.addr = first.address;
-    $('emergencyBanner').classList.add('show');
+    $('emergencyBanner').dataset.sig = sig;
+    $('emergencyBanner').classList.toggle('show', !emergencyBannerDismissedSig);
   } else {
     $('emergencyBanner').classList.remove('show');
+    emergencyBannerDismissedSig = null;
   }
 
   if (!isSpiderfied) {
@@ -2866,20 +2875,24 @@ async function fetchLive(force = false) {
 }
 
 function replaySpeed() {
-  const v = Number($('replaySpeed')?.value);
-  return Number.isFinite(v) ? Math.max(1, Math.min(50, Math.round(v))) : 1;
+  return Math.max(1, Math.min(50, Math.round(replaySpeedValue)));
+}
+
+function adjustReplaySpeed(delta) {
+  replaySpeedValue = replaySpeed() + delta;
+  syncReplaySpeedUi();
 }
 
 function syncReplaySpeedUi() {
-  const slider = $('replaySpeed');
-  const out = $('replaySpeedValue');
-  if (!slider) return;
   const speed = replaySpeed();
-  if (out) out.textContent = `${speed}×`;
-  const title = `Replay speed: ${speed}× — scroll or drag to change`;
-  slider.title = title;
-  slider.setAttribute('aria-label', title);
-  slider.setAttribute('aria-valuetext', `${speed} times normal speed`);
+  const out = $('replaySpeedValue');
+  if (out) {
+    out.textContent = `${speed}×`;
+    out.title = `Replay speed: ${speed}× (use ◀ / ▶ beside the slider)`;
+  }
+  for (const id of ['replaySpeedDown', 'replaySpeedUp']) {
+    $(id)?.setAttribute('aria-valuetext', `${speed} times normal speed`);
+  }
 }
 
 function replaySpanMs() {
@@ -2972,12 +2985,13 @@ function syncReplayTrackUi() {
     if (!btn) continue;
     btn.hidden = !hasTracks || count < 2;
     if (!btn.hidden) {
-      btn.textContent = `${icon} ${label}`;
+      btn.textContent = compactReplayUi() ? icon : `${icon} ${label}`;
       btn.title = `${word} track (${label})`;
       btn.setAttribute('aria-label', btn.title);
     }
   }
   syncReplayTrackMarks();
+  if (replayActive) syncBottomBarOffset();
 }
 
 /** Move to an adjacent track's first fix, wrapping at either end. */
@@ -3015,20 +3029,13 @@ function syncReplayDirectionButton() {
 }
 
 function syncReplayFollowLabel() {
-  const label = $('replayFollowLabel');
   const scopeBtn = $('replayClearFollow');
   const hasFocus = !!replayFollowAddress;
-  if (label) {
-    label.hidden = !hasFocus;
-    if (hasFocus) {
-      const a = aircraft.find(x => x.address === replayFollowAddress);
-      const name = a ? displayName(a) : replayFollowAddress.toUpperCase();
-      label.textContent = `${replayOnlyFocus ? 'Following' : 'Centered on'}: ${name}`;
-    }
-  }
   if (scopeBtn) {
     scopeBtn.hidden = !hasFocus;
-    scopeBtn.textContent = replayOnlyFocus ? '👁 All' : '🎯 Only';
+    scopeBtn.textContent = compactReplayUi()
+      ? (replayOnlyFocus ? '👁' : '🎯')
+      : (replayOnlyFocus ? '👁 All' : '🎯 Only');
     scopeBtn.title = replayOnlyFocus ? 'Show all aircraft while staying centered' : 'Show only this aircraft';
     scopeBtn.setAttribute('aria-label', scopeBtn.title);
   }
@@ -3140,7 +3147,9 @@ async function loadReplaySlice() {
     : Math.floor(replayTsFromSlider() / 1000);
   if (!replayTsMs) replayTsMs = ts * 1000;
   lastReplaySliceMinute = Math.floor(ts / 60);
-  $('replayTime').textContent = new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  $('replayTime').textContent = new Date(ts * 1000).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', hour12: !compactReplayUi()
+  });
   updateReplayTrackLine();
   const hasFocus = !!replayFollowAddress;
   const filtering = hasFocus && replayOnlyFocus;
@@ -3413,6 +3422,10 @@ $('emergencyJump').addEventListener('click', () => {
   const addr = $('emergencyJump').dataset.addr;
   if (addr) jumpToAlertAddress(addr);
 });
+$('emergencyBannerClose').addEventListener('click', () => {
+  emergencyBannerDismissedSig = $('emergencyBanner').dataset.sig || null;
+  $('emergencyBanner').classList.remove('show');
+});
 
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
@@ -3426,15 +3439,56 @@ $('replayPlay').addEventListener('click', () => {
   if (replayTimer) stopReplayPlayback();
   else startReplayPlayback();
 });
-$('replaySpeed').addEventListener('input', syncReplaySpeedUi);
-$('replaySpeed').closest('.replay-speed-wrap')?.addEventListener('wheel', e => {
-  e.preventDefault();
-  const delta = e.deltaY < 0 ? 1 : (e.deltaY > 0 ? -1 : 0);
-  if (!delta) return;
-  const slider = $('replaySpeed');
-  slider.value = String(Math.max(1, Math.min(50, replaySpeed() + delta)));
-  syncReplaySpeedUi();
-}, { passive: false });
+/** Tap for one step; press-and-hold (mouse or touch) repeats, accelerating slightly. */
+function bindReplaySpeedHold(id, delta) {
+  const btn = $(id);
+  if (!btn) return;
+  let timer = null;
+  let period = 0;
+  let lastPointerTs = 0;
+  const blockSelection = e => e.preventDefault();
+
+  const stop = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    period = 0;
+    document.removeEventListener('selectstart', blockSelection, true);
+    document.removeEventListener('dragstart', blockSelection, true);
+  };
+  const tick = () => {
+    adjustReplaySpeed(delta);
+    period = Math.max(35, period ? period - 8 : 80);
+    timer = setTimeout(tick, period);
+  };
+
+  btn.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    e.preventDefault(); // block drag/selection and the touch callout on long press
+    lastPointerTs = Date.now();
+    stop();
+    // Selection is hit-tested outside the button while dragging, so guard it globally.
+    document.addEventListener('selectstart', blockSelection, true);
+    document.addEventListener('dragstart', blockSelection, true);
+    adjustReplaySpeed(delta);
+    timer = setTimeout(tick, 300);
+    try { btn.setPointerCapture(e.pointerId); } catch (_) { /* older browsers */ }
+  });
+  btn.addEventListener('selectstart', blockSelection);
+  btn.addEventListener('contextmenu', blockSelection);
+  for (const evt of ['pointerup', 'pointercancel', 'lostpointercapture']) btn.addEventListener(evt, stop);
+  btn.addEventListener('click', e => {
+    // Pointer-driven clicks were handled on pointerdown; only keyboard activation needs this.
+    if (Date.now() - lastPointerTs > 600) adjustReplaySpeed(delta);
+  });
+  btn.addEventListener('wheel', e => {
+    e.preventDefault();
+    const wheelDelta = e.deltaY < 0 ? 1 : (e.deltaY > 0 ? -1 : 0);
+    if (wheelDelta) adjustReplaySpeed(wheelDelta);
+  }, { passive: false });
+}
+
+bindReplaySpeedHold('replaySpeedDown', -1);
+bindReplaySpeedHold('replaySpeedUp', 1);
 $('replayReverse').addEventListener('click', () => {
   replayDirection = -replayDirection;
   syncReplayDirectionButton();
