@@ -577,6 +577,8 @@ try {
             lon: Number.isFinite(Number(item.lon)) ? Number(item.lon) : null,
             raw: String(item.raw || ''),
             tsMs: Number(item.tsMs),
+            firstTsMs: Number.isFinite(Number(item.firstTsMs)) && Number(item.firstTsMs) > 0
+              ? Number(item.firstTsMs) : Number(item.tsMs),
             latestTsMs: Number.isFinite(Number(item.latestTsMs)) ? Number(item.latestTsMs) : Number(item.tsMs),
             normalAfter: Boolean(item.normalAfter),
             alertStillOn: Boolean(item.alertStillOn)
@@ -1533,7 +1535,7 @@ function record24hAlerts(list, nowMs) {
     const nextLatestTs = Math.max(a.receivedAtMs || nowMs, prev ? (prev.latestTsMs || 0) : 0);
     const nextLat = Number.isFinite(a.lat) ? a.lat : (prev ? prev.lat : null);
     const nextLon = Number.isFinite(a.lon) ? a.lon : (prev ? prev.lon : null);
-    if (!prev || prev.status !== emergText || prev.tsMs !== nextTs || prev.latestTsMs !== nextLatestTs) {
+    if (!prev || prev.status !== emergText || prev.tsMs !== nextTs || prev.latestTsMs !== nextLatestTs || !prev.firstTsMs) {
       alerts24hHistory.set(a.address, {
         address: a.address,
         name: displayName(a),
@@ -1544,6 +1546,7 @@ function record24hAlerts(list, nowMs) {
         alt: Number.isFinite(a.altitude) ? a.altitude : (prev ? prev.alt : null),
         raw: a.aprsPacket || (prev ? prev.raw : ''),
         tsMs: nextTs,
+        firstTsMs: prev ? (prev.firstTsMs || nextTs) : nextTs,
         latestTsMs: nextLatestTs,
         normalAfter: false,
         alertStillOn: true
@@ -1562,9 +1565,10 @@ function buildAlertRowHtml(it, nowMs) {
   const lastStatus = it.lastStatus || statusText;
   const outcomeHtml = outcome ? `<br><span style="color:var(--yellow);font-weight:600">${esc(outcome)}</span>` : '';
   const lastStatusHtml = (lastStatus && lastStatus !== statusText) ? `<br><span style="color:var(--muted)">Last: ${esc(lastStatus)}</span>` : '';
-  // Show when the alert itself was received; the age below stays "last seen",
+  // Show when the alert was first received; the age below stays "last seen",
   // matching the age shown for aircraft in the main list.
-  const alertTime = new Date(it.tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const alertTimeMs = it.firstTsMs || it.tsMs;
+  const alertTime = new Date(alertTimeMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const label = `${it.name} - ${statusText}`;
   return `<div class="aircraft emergency" data-alert-addr="${esc(it.address)}" data-key="${esc(it.address)}" tabindex="0" role="option" aria-selected="false" aria-label="${esc(label)}">
     <div class="stripe" style="background:var(--red)"></div>
@@ -1572,7 +1576,7 @@ function buildAlertRowHtml(it, nowMs) {
       <div class="callsign">${esc(it.name)}</div>
       <div class="meta"><span style="color:var(--red);font-weight:600">${esc(statusText)}</span>${lastStatusHtml}${outcomeHtml}</div>
     </div>
-    <div class="alt station-alt" title="Alert received"><span data-ts="${it.tsMs}">${esc(alertTime)}</span><div class="age-row"><span class="age" data-ts="${lastSeenMs}" title="Last seen">${fmtAge(ageSec)}</span></div></div>
+    <div class="alt station-alt" title="Alert first received"><span data-ts="${alertTimeMs}">${esc(alertTime)}</span><div class="age-row"><span class="age" data-ts="${lastSeenMs}" title="Last seen">${fmtAge(ageSec)}</span></div></div>
   </div>`;
 }
 
@@ -2738,6 +2742,8 @@ async function fetchLive(force = false) {
             alt: Number.isFinite(Number(al.alt)) ? Number(al.alt) : null,
             raw: String(al.raw || ''),
             tsMs: Number(al.ts) * 1000,
+            firstTsMs: Number.isFinite(Number(al.first_ts)) && Number(al.first_ts) > 0
+              ? Number(al.first_ts) * 1000 : Number(al.ts) * 1000,
             latestTsMs: Number.isFinite(Number(al.latest_ts)) ? Number(al.latest_ts) * 1000 : Number(al.ts) * 1000,
             normalAfter: Boolean(al.normal_after),
             alertStillOn: Boolean(al.alert_still_on)

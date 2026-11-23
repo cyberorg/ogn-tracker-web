@@ -712,7 +712,7 @@ try {
 
     // 24-hour alerts (excluding routine 'Need a ride' / FNT78) with alert reason, last-seen coords/time, and post-alert state
     $alerts24h = [];
-    $alertsCacheKey = 'alerts24h_v9';
+    $alertsCacheKey = 'alerts24h_v10';
     $alertsCached = cache_get($cacheDir, $alertsCacheKey, 10);
     if ($alertsCached !== null) {
         $decodedAlerts = json_decode($alertsCached, true);
@@ -731,7 +731,7 @@ try {
             $hasAlertsTable = (bool)$pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alerts'")->fetchColumn();
             if ($hasAlertsTable) {
                 $stmtAl = $pdo->prepare("
-                    SELECT al.id, al.status, al.lat, al.lon, al.alt, al.raw, al.last_ts,
+                    SELECT al.id, al.status, al.lat, al.lon, al.alt, al.raw, al.last_ts, al.first_ts,
                            a.lat AS latest_lat, a.lon AS latest_lon,
                            a.timestamp AS latest_ts, a.is_emergency AS latest_emerg, a.raw AS latest_raw,
                            COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
@@ -749,6 +749,7 @@ try {
                 while ($ar = $stmtAl->fetch(PDO::FETCH_ASSOC)) {
                     $addr = strtolower((string)$ar['id']);
                     $alertTs = (int)$ar['last_ts'];
+                    $firstTs = (int)($ar['first_ts'] ?? 0) > 0 ? (int)$ar['first_ts'] : $alertTs;
                     $alertRaw = (string)$ar['raw'];
                     $latestTs = $ar['latest_ts'] !== null ? (int)$ar['latest_ts'] : $alertTs;
                     $latestRaw = (string)($ar['latest_raw'] ?? $alertRaw);
@@ -787,6 +788,7 @@ try {
                         'alt'            => $alertAlt,
                         'raw'            => $rawForAlt,
                         'ts'             => $alertTs,
+                        'first_ts'       => $firstTs,
                         'latest_ts'      => $latestTs,
                         'normal_after'   => $subsequentNormal,
                         'alert_still_on' => $stillAlertOnLast,
@@ -830,6 +832,7 @@ try {
                     'alt'            => extract_altitude_from_raw($raw),
                     'raw'            => $raw,
                     'ts'             => $ts,
+                    'first_ts'       => $ts,
                     'latest_ts'      => $ts,
                     'normal_after'   => false,
                     'alert_still_on' => true,

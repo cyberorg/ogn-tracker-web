@@ -87,6 +87,7 @@ $pdo->exec('
         alt REAL,
         raw TEXT NOT NULL,
         last_ts INTEGER NOT NULL,
+        first_ts INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id, status)
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts (last_ts);
@@ -180,6 +181,12 @@ if (!in_array('heard_24h', $stationCols, true)) {
 $alertCols = array_column($pdo->query('PRAGMA table_info(alerts)')->fetchAll(PDO::FETCH_ASSOC), 'name');
 if (!in_array('alt', $alertCols, true)) {
     $pdo->exec('ALTER TABLE alerts ADD COLUMN alt REAL;');
+}
+if (!in_array('first_ts', $alertCols, true)) {
+    $pdo->exec('ALTER TABLE alerts ADD COLUMN first_ts INTEGER NOT NULL DEFAULT 0;');
+    // Existing alerts have no first-seen time; use their current last_ts as the best
+    // available approximation so old rows still display a meaningful time.
+    $pdo->exec('UPDATE alerts SET first_ts = last_ts WHERE first_ts = 0;');
 }
 
 function clean_ogn_name($value): string {
@@ -431,18 +438,19 @@ try {
     $stmtSeed = $pdo->prepare('SELECT id, lat, lon, raw, timestamp FROM aircraft WHERE timestamp >= :cutoff AND is_emergency = 1');
     $stmtSeed->execute([':cutoff' => $cutoff24h]);
     $stmtSeedInsert = $pdo->prepare('
-        INSERT OR IGNORE INTO alerts (id, status, lat, lon, raw, last_ts)
-        VALUES (:id, :status, :lat, :lon, :raw, :ts)
+        INSERT OR IGNORE INTO alerts (id, status, lat, lon, raw, last_ts, first_ts)
+        VALUES (:id, :status, :lat, :lon, :raw, :ts, :first_ts)
     ');
     while ($sr = $stmtSeed->fetch(PDO::FETCH_ASSOC)) {
         $decodedStatus = detect_alert_status((string)$sr['raw']) ?? 'Emergency alert';
         $stmtSeedInsert->execute([
-            ':id'     => (string)$sr['id'],
-            ':status' => $decodedStatus,
-            ':lat'    => (float)$sr['lat'],
-            ':lon'    => (float)$sr['lon'],
-            ':raw'    => (string)$sr['raw'],
-            ':ts'     => (int)$sr['timestamp'],
+            ':id'       => (string)$sr['id'],
+            ':status'   => $decodedStatus,
+            ':lat'      => (float)$sr['lat'],
+            ':lon'      => (float)$sr['lon'],
+            ':raw'      => (string)$sr['raw'],
+            ':ts'       => (int)$sr['timestamp'],
+            ':first_ts' => (int)$sr['timestamp'],
         ]);
     }
 } catch (Throwable $e) {
@@ -574,8 +582,8 @@ $stmtUpsertPos = $pdo->prepare('
         is_emergency = excluded.is_emergency
 ');
 $stmtUpsertAlert = $pdo->prepare('
-    INSERT INTO alerts (id, status, lat, lon, alt, raw, last_ts)
-    VALUES (:id, :status, :lat, :lon, :alt, :raw, :ts)
+    INSERT INTO alerts (id, status, lat, lon, alt, raw, last_ts, first_ts)
+    VALUES (:id, :status, :lat, :lon, :alt, :raw, :ts, :first_ts)
     ON CONFLICT(id, status) DO UPDATE SET
         lat = COALESCE(excluded.lat, alerts.lat),
         lon = COALESCE(excluded.lon, alerts.lon),
@@ -720,13 +728,14 @@ function flush_batch(
         }
         foreach ($alertBatch as $al) {
             $stmtUpsertAlert->execute([
-                ':id'     => $al['id'],
-                ':status' => $al['status'],
-                ':lat'    => $al['lat'],
-                ':lon'    => $al['lon'],
-                ':alt'    => $al['alt'],
-                ':raw'    => $al['raw'],
-                ':ts'     => $al['ts'],
+                ':id'       => $al['id'],
+                ':status'   => $al['status'],
+                ':lat'      => $al['lat'],
+                ':lon'      => $al['lon'],
+                ':alt'      => $al['alt'],
+                ':raw'      => $al['raw'],
+                ':ts'       => $al['ts'],
+                ':first_ts' => $al['ts'],
             ]);
         }
         foreach ($telemetryBatch as $id => $tel) {
