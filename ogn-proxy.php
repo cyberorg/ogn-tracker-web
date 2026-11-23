@@ -600,18 +600,14 @@ if ($fullWorld || $viewArea >= 2000) {
     $liveTtl = 7;
 }
 
-header('Cache-Control: public, max-age=' . $liveTtl);
-
-$cacheKey = 'live_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0));
-if (($cached = cache_get($cacheDir, $cacheKey, $liveTtl)) !== null) {
-    echo $cached;
-    exit;
-}
+$noCache = isset($_GET['nc']) && $_GET['nc'] !== '';
+header($noCache ? 'Cache-Control: no-store' : 'Cache-Control: public, max-age=' . $liveTtl);
 
 if (!is_file($dbFile)) {
     echo json_encode([
         'server_time'     => time(),
         'updated'         => 0,
+        'names_updated'   => 0,
         'packets'         => new stdClass(),
         'telemetry'       => new stdClass(),
         'station_weather' => new stdClass(),
@@ -629,6 +625,18 @@ try {
     $cutoff = $now - $window;
     $cutoff24 = $now - 86400;
     $wxCutoff = $now - max($window, 1800);
+
+    // The name version invalidates cached payloads only when names actually change.
+    $metaRows = $pdo->query('SELECT key, value FROM meta WHERE key IN ("updated", "names_updated")')->fetchAll(PDO::FETCH_KEY_PAIR);
+    $updated = (int)($metaRows['updated'] ?? 0);
+    $namesUpdated = (int)($metaRows['names_updated'] ?? 0);
+
+    $cacheKey = 'live_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0, $namesUpdated));
+    if (!$noCache && ($cached = cache_get($cacheDir, $cacheKey, $liveTtl)) !== null) {
+        echo $cached;
+        exit;
+    }
+
     $params = [':south' => $south, ':north' => $north, ':cutoff' => $cutoff];
     $aircraftIndex = '';
     if ($pdo->query("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_aircraft_ts_lat_lon'")->fetchColumn()) {
@@ -994,11 +1002,10 @@ try {
     } catch (Throwable $e) {
     }
 
-    $updated = (int)$pdo->query('SELECT value FROM meta WHERE key = "updated"')->fetchColumn();
-
     $out = [
         'server_time'     => $now,
         'updated'         => $updated,
+        'names_updated'   => $namesUpdated,
         'packets'         => $packets ?: new stdClass(),
         'telemetry'       => $telemetry ?: new stdClass(),
         'station_weather' => $stationWeather ?: new stdClass(),
@@ -1012,7 +1019,7 @@ try {
 
     $json = json_encode($out, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     if ($json !== false) {
-        cache_set($cacheDir, $cacheKey, $json);
+        if (!$noCache) cache_set($cacheDir, $cacheKey, $json);
         echo $json;
     }
 } catch (Throwable $e) {

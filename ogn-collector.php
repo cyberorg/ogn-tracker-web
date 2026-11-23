@@ -548,6 +548,11 @@ if ((time() - $ddbUpdated) >= DDB_SYNC_INTERVAL) {
     }
 }
 
+$stmtMetaNames = $pdo->prepare('
+    INSERT INTO meta (key, value) VALUES ("names_updated", :ts)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+');
+
 // --- Sync PureTrack hex-ID labels alongside the DDB, once every 6 hours ---
 // PureTrack publishes user-assigned names for OGN/FANET devices that the DDB
 // does not carry. They are stored in `names` keyed by the 6-digit device ID.
@@ -581,6 +586,7 @@ if ((time() - $labelsUpdated) >= DDB_SYNC_INTERVAL) {
                     $stmtLabel->execute([':id' => $id, ':name' => $name, ':ts' => $ts]);
                 }
                 $stmtLabelMeta->execute([':ts' => $ts]);
+                $stmtMetaNames->execute([':ts' => $ts]);
                 $pdo->commit();
             }
             unset($labels);
@@ -711,6 +717,7 @@ function flush_batch(
     PDOStatement $stmtThermalAllowed,
     PDOStatement $stmtTouchPos,
     PDOStatement $stmtUpsertName,
+    PDOStatement $stmtMetaNames,
     PDOStatement $stmtUpsertStation,
     PDOStatement $stmtMeta,
     array &$posBatch,
@@ -813,6 +820,9 @@ function flush_batch(
         }
         foreach ($nameBatch as $id => $name) {
             $stmtUpsertName->execute([':id' => $id, ':name' => $name, ':ts' => $now]);
+        }
+        if ($nameBatch !== []) {
+            $stmtMetaNames->execute([':ts' => (string)$now]);
         }
         if ($prune) {
             $pruneSql = [
@@ -1169,7 +1179,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
     if ((microtime(true) - $lastFlush) >= FLUSH_INTERVAL) {
         $nowTs = time();
         $doPrune = ($nowTs - $lastPruneTs) >= 3600;
-        $flushStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doPrune);
+        $flushStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtMetaNames, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doPrune);
         if ($doPrune) {
             $lastPruneTs = $nowTs;
             $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
@@ -1192,7 +1202,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
 fclose($socket);
 $nowTs = time();
 $doFinalPrune = ($nowTs - $lastPruneTs) >= 3600;
-$finalStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doFinalPrune);
+$finalStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtMetaNames, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doFinalPrune);
 if ($doFinalPrune) {
     $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
     $stmtMetaKey->execute([':k' => 'last_prune_ts', ':v' => (string)$nowTs]);

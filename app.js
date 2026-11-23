@@ -4,6 +4,8 @@ const BIR = [32.037, 76.708];
 const PINNED_STORAGE_KEY = 'ogn_pinned_aircraft';
 const MENU_PREFS_STORAGE_KEY = 'ogn_menu_prefs';
 const ALERTS_24H_STORAGE_KEY = 'ogn_alerts_24h';
+const NAME_CACHE_STORAGE_KEY = 'ogn_name_cache';
+const NAME_CACHE_MAX = 1000;
 const WX_CACHE_TTL_MS = 30 * 60 * 1000;
 const ALERT_24H_TTL_MS = 24 * 60 * 60 * 1000;
 const OFFLINE_THRESHOLD_SEC = 180;
@@ -17,6 +19,10 @@ const cleanName = s => {
   const raw = String(s ?? '');
   if (!raw || /[\u0000-\u001F\u007F-\u009F\uFFFD]/.test(raw) || /[\u2400-\u243F]/.test(raw)) return '';
   return raw.replace(/\s+/g, ' ').trim();
+};
+const extractStreamName = raw => {
+  const m = String(raw ?? '').match(/Name="([^"]*)"/);
+  return m ? cleanName(m[1]) : '';
 };
 const cleanAlertStatus = s => {
   const raw = String(s ?? '').trim();
@@ -34,11 +40,11 @@ let savedTypes = ['para', 'wx'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
 let savedVarioTrackMode = false;
-let savedBarogramEnabled = false;
+let savedBaroEnabled = false;
 let savedBaseLayer = 'terrain';
 let savedOverlays = [];
 let applyingSavedLayers = false;
-let barogramEnabled = false;
+let baroEnabled = false;
 let collectorPaused = false;
 let lastFetchOkAtMs = 0;
 let lastFetchAttemptAtMs = 0;
@@ -59,9 +65,9 @@ try {
   if (typeof prefs.markerWindow === 'string' && prefs.markerWindow) savedMarkerWindow = prefs.markerWindow;
   if (typeof prefs.trackWindow === 'string' && prefs.trackWindow) savedTrackWindow = prefs.trackWindow;
   if (typeof prefs.varioTrackMode === 'boolean') savedVarioTrackMode = prefs.varioTrackMode;
-  if (typeof prefs.barogramEnabled === 'boolean') {
-    savedBarogramEnabled = prefs.barogramEnabled;
-    barogramEnabled = prefs.barogramEnabled;
+  if (typeof prefs.baroEnabled === 'boolean') {
+    savedBaroEnabled = prefs.baroEnabled;
+    baroEnabled = prefs.baroEnabled;
   }
   if (typeof prefs.baseLayer === 'string' && prefs.baseLayer) savedBaseLayer = prefs.baseLayer;
   if (Array.isArray(prefs.overlays)) savedOverlays = prefs.overlays.filter(v => typeof v === 'string');
@@ -85,7 +91,7 @@ function isDefaultFilterState() {
     $('markerWindow').value === '900' &&
     $('trackWindow').value === '900' &&
     !varioTrackMode &&
-    !barogramEnabled &&
+    !baroEnabled &&
     isMetricPreset();
 }
 
@@ -114,7 +120,7 @@ function saveMenuPrefs() {
       markerWindow: $('markerWindow').value,
       trackWindow: $('trackWindow').value,
       varioTrackMode,
-      barogramEnabled,
+      baroEnabled,
       baseLayer: savedBaseLayer,
       overlays: savedOverlays
     }));
@@ -144,14 +150,8 @@ function applySavedMenuPrefs() {
   $('btnNotify').setAttribute('aria-pressed', String(alertsEnabled));
   varioTrackMode = savedVarioTrackMode;
   syncTrackModeButtons();
-  barogramEnabled = savedBarogramEnabled;
-  syncBarogramButton();
-  if (!barogramEnabled) {
-    $('barogram').classList.remove('show');
-    syncBottomBarOffset();
-  } else if (activeBaroAddress && baroDismissedAddress !== activeBaroAddress) {
-    renderBarogram(activeBaroAddress);
-  }
+  baroEnabled = savedBaroEnabled;
+  syncBaroButton();
   updateSearchUi();
   updateFilterBadge();
 }
@@ -162,8 +162,8 @@ function resetFilters() {
   savedMarkerWindow = '900';
   savedTrackWindow = '900';
   savedVarioTrackMode = false;
-  savedBarogramEnabled = false;
-  barogramEnabled = false;
+  savedBaroEnabled = false;
+  baroEnabled = false;
   altUnit = 'm'; speedUnit = 'kmh'; tempUnit = 'c'; climbUnit = 'mps';
   applySavedMenuPrefs();
   redrawAllTracks();
@@ -352,19 +352,40 @@ syncMapFullscreenUi();
 
 raisePopupPane();
 
+let lastBottomBarSpace = -1;
+
 function syncBottomBarOffset() {
-  const hasBar = $('barogram').classList.contains('show') || $('replayBar').classList.contains('show');
   const wrap = $('mapWrap');
+  const bar = visibleBottomBarEl();
+  const hasBar = !!bar;
   wrap.classList.toggle('has-bottom-bar', hasBar);
+
+  // Shrink the Leaflet map itself so no popup can be positioned under the bar.
+  let space = 0;
   if (hasBar) {
-    const bar = visibleBottomBarEl();
-    const safeBottom = bar ? bar.getBoundingClientRect().top - $('map').getBoundingClientRect().top - 8 : null;
-    // Reserve a little room above the bar and for the popup wrapper so the full content can scroll into view.
-    if (safeBottom != null) wrap.style.setProperty('--popup-max-h', `${Math.max(180, Math.floor(safeBottom - 44))}px`);
+    const wrapRect = wrap.getBoundingClientRect();
+    const barRect = bar.getBoundingClientRect();
+    space = Math.max(0, Math.ceil(wrapRect.bottom - barRect.top + 8));
+  }
+
+  const spaceChanged = space !== lastBottomBarSpace;
+  if (spaceChanged) {
+    wrap.style.setProperty('--bottom-bar-space', `${space}px`);
+    lastBottomBarSpace = space;
+  }
+
+  const mapRect = $('map').getBoundingClientRect();
+  if (hasBar) {
+    // Cap popup content to the shortened map, leaving room for wrapper/tip.
+    wrap.style.setProperty('--popup-max-h', `${Math.max(0, Math.floor(mapRect.height - 44))}px`);
   } else {
     wrap.style.removeProperty('--popup-max-h');
   }
-  requestAnimationFrame(() => keepPopupAboveBottomBar());
+
+  requestAnimationFrame(() => {
+    if (spaceChanged) map.invalidateSize({ pan: false, animate: false });
+    keepPopupAboveBottomBar();
+  });
 }
 
 function syncUnitButtons() {
@@ -390,7 +411,6 @@ function applyUnitPreset(mode) {
   saveMenuPrefs();
   syncUnitButtons();
   render();
-  if (activeBaroAddress) renderBarogram(activeBaroAddress);
 }
 
 map.on('zoomend moveend resize', updateMarkerLabels);
@@ -508,13 +528,13 @@ let liveFailures = 0;
 let serverClockOffsetMs = 0;
 let userLocationMarker = null;
 let needMeta = true;
+let lastNameUpdated = 0;
 let lastMetaBounds = null;
 const knownIds = new Set();
 
 let followedAddress = null;
 let varioTrackMode = savedVarioTrackMode;
-let activeBaroAddress = null;
-let baroDismissedAddress = null;
+let activeTrackAddress = null;
 const lastPinnedStatus = new Map();
 const alerts24hHistory = new Map();
 let replayActive = false, replayTimer = null;
@@ -582,6 +602,26 @@ const lastKnownCache = new Map();
 const telemetryCache = new Map();
 const parsedLineCache = new Map();
 const nameCache = new Map();
+try {
+  const savedNames = JSON.parse(localStorage.getItem(NAME_CACHE_STORAGE_KEY) || '{}');
+  if (savedNames && typeof savedNames === 'object' && !Array.isArray(savedNames)) {
+    for (const [id, name] of Object.entries(savedNames)) {
+      const clean = cleanName(name);
+      const key = String(id || '').trim().toLowerCase();
+      if (key && clean) nameCache.set(key, clean);
+    }
+  }
+} catch (e) {}
+
+function saveNameCache() {
+  try {
+    const entries = [...nameCache.entries()]
+      .filter(([id, name]) => id && cleanName(name))
+      .slice(-NAME_CACHE_MAX);
+    localStorage.setItem(NAME_CACHE_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
+  } catch (e) {}
+}
+
 const lastAltCache = new Map();
 const lastClimbCache = new Map();
 const wxCache = new Map();
@@ -692,7 +732,7 @@ async function loadHashAircraft(id) {
       received_at: new Date(tsMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       timestamp: tsMs
     });
-    if (data.name) nameCache.set(id, String(data.name));
+    if (data.name) { nameCache.set(id, String(data.name)); saveNameCache(); }
     const ddbId = String(data.ddb_id || '').toLowerCase();
     if (ddbId) {
       ddbCache.set(ddbId, {
@@ -717,7 +757,7 @@ async function loadHashAircraft(id) {
 
 function updateUrlHash() {
   const c = map.getCenter();
-  const sel = activeBaroAddress ? `,${encodeURIComponent(activeBaroAddress)}` : '';
+  const sel = activeTrackAddress ? `,${encodeURIComponent(activeTrackAddress)}` : '';
   const hash = `#${c.lat.toFixed(4)},${c.lng.toFixed(4)},${map.getZoom()}${sel}`;
   if (location.hash !== hash) history.replaceState(null, '', hash);
 }
@@ -800,31 +840,29 @@ function setTrackColorMode(vario) {
   if (varioTrackMode === vario) return;
   varioTrackMode = vario;
   savedVarioTrackMode = vario;
-  syncTrackModeButtons();
+  // Persist immediately, before any redraw work that could be interrupted.
   saveMenuPrefs();
+  syncTrackModeButtons();
   redrawAllTracks();
 }
 
-function syncBarogramButton() {
-  const btn = $('btnBarogram');
+function syncBaroButton() {
+  const btn = $('btnBaro');
   if (!btn) return;
-  btn.classList.toggle('active', barogramEnabled);
-  btn.setAttribute('aria-pressed', String(barogramEnabled));
-  btn.textContent = `📈 ${barogramEnabled ? 'ON' : 'OFF'}`;
+  btn.classList.toggle('active', baroEnabled);
+  btn.setAttribute('aria-pressed', String(baroEnabled));
+  btn.textContent = `📈 ${baroEnabled ? 'ON' : 'OFF'}`;
 }
 
-function setBarogramEnabled(on) {
-  if (barogramEnabled === on) return;
-  barogramEnabled = on;
-  savedBarogramEnabled = on;
-  syncBarogramButton();
+function setBaroEnabled(on) {
+  if (baroEnabled === on) return;
+  baroEnabled = on;
+  savedBaroEnabled = on;
+  // Persist immediately, before refreshing any open popup.
   saveMenuPrefs();
-  if (!on) {
-    $('barogram').classList.remove('show');
-    syncBottomBarOffset();
-  } else {
-    baroDismissedAddress = null;
-    if (activeBaroAddress) renderBarogram(activeBaroAddress);
+  syncBaroButton();
+  for (const [address, marker] of markers) {
+    if (marker.isPopupOpen()) refreshMarkerPopup(address);
   }
 }
 
@@ -842,26 +880,13 @@ function toggleFollow(address) {
   updateListHint();
 }
 
-function renderBarogram(address, scrubIdx = null) {
-  // Keep the barogram closed when disabled, or after the user dismisses it, until a track is selected again.
-  if (!barogramEnabled || baroDismissedAddress === address) {
-    $('barogram').classList.remove('show');
-    syncBottomBarOffset();
-    return;
-  }
+// Shared altitude-profile renderer for the popup barograph.
+function barogramChart(address, scrubIdx = null) {
   const entry = selectedTracks.get(address);
-  if (!entry || !entry.points || entry.points.length < 2) {
-    $('barogram').classList.remove('show');
-    syncBottomBarOffset();
-    return;
-  }
+  if (!entry || !entry.points) return null;
   const pts = entry.points.filter(p => p[2] != null);
-  if (pts.length < 2) {
-    $('barogram').classList.remove('show');
-    syncBottomBarOffset();
-    return;
-  }
-  activeBaroAddress = address;
+  if (pts.length < 2) return null;
+
   const minAlt = Math.min(...pts.map(p => p[2]));
   const maxAlt = Math.max(...pts.map(p => p[2]));
   const spanAlt = Math.max(10, maxAlt - minAlt);
@@ -888,28 +913,22 @@ function renderBarogram(address, scrubIdx = null) {
   }
 
   const title = `Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
-  $('baroTitle').textContent = title;
-  $('baroSvg').setAttribute('aria-label', `Altitude profile: ${title}`);
-  $('baroSvg').innerHTML = `
+  const svg = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
     ${scrubSvg}
     <text x="4" y="12" fill="#9aabba" font-size="10">${esc(fmtAlt(maxAlt))}</text>
     <text x="4" y="66" fill="#9aabba" font-size="10">${esc(fmtAlt(minAlt))}</text>
   `;
-  $('barogram').classList.add('show');
-  syncBottomBarOffset();
-  updateListHint();
-  updateUrlHash();
+  return { title, svg };
 }
 
-function scrubBarogramAtClientX(clientX) {
-  if (!activeBaroAddress) return;
-  const entry = selectedTracks.get(activeBaroAddress);
-  if (!entry || !entry.points) return;
+function barogramScrubIndex(svgEl, clientX, address) {
+  const entry = selectedTracks.get(address);
+  if (!entry || !entry.points) return null;
   const pts = entry.points.filter(p => p[2] != null);
-  if (pts.length < 2) return;
-  const rect = $('baroSvg').getBoundingClientRect();
-  if (rect.width <= 0) return;
+  if (pts.length < 2) return null;
+  const rect = svgEl.getBoundingClientRect();
+  if (rect.width <= 0) return null;
   const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
   const t0 = pts[0][3], t1 = pts[pts.length - 1][3];
   const targetTs = t0 + ratio * Math.max(1, t1 - t0);
@@ -918,12 +937,31 @@ function scrubBarogramAtClientX(clientX) {
     const diff = Math.abs(pts[i][3] - targetTs);
     if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
   }
-  renderBarogram(activeBaroAddress, bestIdx);
+  return bestIdx;
 }
 
-$('baroSvg').addEventListener('pointermove', e => scrubBarogramAtClientX(e.clientX));
-$('baroSvg').addEventListener('pointerleave', () => {
-  if (activeBaroAddress) renderBarogram(activeBaroAddress, null);
+// The popup barograph supports scrubbing via delegation
+// because popup contents are rebuilt as live data arrives.
+function updatePopupBarogram(svg, idx = null) {
+  const chart = barogramChart(svg.dataset.addr, idx);
+  if (!chart) return;
+  svg.innerHTML = chart.svg;
+  svg.setAttribute('aria-label', `Altitude profile: ${chart.title}`);
+  const label = svg.parentElement?.querySelector('.baro-head strong');
+  if (label) label.textContent = chart.title;
+}
+let hoveredPopupBaro = null;
+map.getContainer().addEventListener('pointermove', e => {
+  const svg = e.target.closest?.('.popup-baro-svg');
+  if (svg) {
+    hoveredPopupBaro = svg;
+    const idx = barogramScrubIndex(svg, e.clientX, svg.dataset.addr);
+    if (idx != null) updatePopupBarogram(svg, idx);
+  } else if (hoveredPopupBaro) {
+    const previous = hoveredPopupBaro;
+    hoveredPopupBaro = null;
+    if (previous.isConnected) updatePopupBarogram(previous);
+  }
 });
 
 function removeTrack(address) {
@@ -932,20 +970,11 @@ function removeTrack(address) {
     if (entry.layer) map.removeLayer(entry.layer);
     selectedTracks.delete(address);
   }
-  if (activeBaroAddress === address) {
-    baroDismissedAddress = null;
-    const next = [...selectedTracks.keys()].pop() || null;
-    activeBaroAddress = next;
-    if (next) renderBarogram(next);
-    else {
-      $('barogram').classList.remove('show');
-      syncBottomBarOffset();
-    }
-    updateListHint();
+  if (activeTrackAddress === address) {
+    activeTrackAddress = [...selectedTracks.keys()].pop() || null;
     updateUrlHash();
-  } else {
-    updateListHint();
   }
+  updateListHint();
 }
 
 function clearAllTracks() {
@@ -953,10 +982,7 @@ function clearAllTracks() {
     if (entry.layer) map.removeLayer(entry.layer);
   }
   selectedTracks.clear();
-  activeBaroAddress = null;
-  baroDismissedAddress = null;
-  $('barogram').classList.remove('show');
-  syncBottomBarOffset();
+  activeTrackAddress = null;
   updateListHint();
   updateUrlHash();
 }
@@ -987,7 +1013,7 @@ async function loadTrack(address) {
     current.points = Array.isArray(data.points) ? data.points : [];
     current.layer = buildTrackLayer(current.points, current.color);
     if (current.layer) current.layer.addTo(map);
-    if (activeBaroAddress === address) renderBarogram(address);
+    refreshMarkerPopup(address);
   } catch (err) {
     console.warn('Track fetch failed:', err);
   }
@@ -1103,8 +1129,8 @@ function toggleSelection(address, openOnMap = false) {
     removeTrack(address);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
-    baroDismissedAddress = null;
-    activeBaroAddress = address;
+    activeTrackAddress = address;
+    updateUrlHash();
     loadTrack(address);
     if (openOnMap) {
       if (window.innerWidth <= 800) $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1335,7 +1361,7 @@ function displayName(a) {
     ? [a.streamName, a.callsign, a.registration,
        a.ddbId && a.ddbId.length === 6 && /^[0-9a-f]{6}$/i.test(a.ddbId) ? a.ddbId.toUpperCase() : '',
        a.ognId ? a.ognId.toUpperCase() : '', a.liveLabel]
-    : [a.liveLabel];
+    : [a.streamName, a.liveLabel];
   for (const candidate of candidates) {
     const name = cleanName(candidate);
     if (name) return name;
@@ -1770,14 +1796,12 @@ function syncRaisedPopupPane() {
 }
 
 function visibleBottomBarEl() {
-  const baro = $('barogram');
-  if (baro?.classList.contains('show')) return baro;
   const replay = $('replayBar');
   if (replay?.classList.contains('show')) return replay;
   return null;
 }
 
-// Bottom edge of the map area that is safe for popups (above the barogram/replay bar).
+// Bottom edge of the map area that is safe for popups (above the replay bar).
 function popupSafeBottom(mapRect) {
   const bar = visibleBottomBarEl();
   if (!bar) return null;
@@ -1941,6 +1965,8 @@ function popup(a) {
   }
 
   const isTracked = selectedTracks.has(a.address);
+  const baro = baroEnabled ? barogramChart(a.address) : null;
+  const baroVisible = !!baro;
   const detailRows = [
     popupRow('Aircraft type', typeName(a)),
     popupRow('Over-the-air Name', displayStreamName(a)),
@@ -1972,10 +1998,41 @@ function popup(a) {
     ...stationRows
   ].join('');
 
+  const baroBlock = baroVisible
+    ? `<div class="popup-baro">
+        <div class="baro-head"><strong>${esc(baro.title)}</strong></div>
+        <svg class="baro-svg popup-baro-svg" data-addr="${esc(a.address)}" viewBox="0 0 460 70" preserveAspectRatio="none" role="img" aria-label="Altitude profile: ${esc(baro.title)}" tabindex="0">${baro.svg}</svg>
+      </div>`
+    : '';
+
   return `<div class="popup-title"><span class="popup-name">${esc(displayName(a))}</span>${statusText ? `<span class="popup-status" style="color:${statusColor(a, statusText)}" title="${esc(statusText)}">${esc(statusText)}</span>` : ''}</div>
     <div class="popup-actions">${actionButtons}</div>
     <div class="popup-grid">${telemetryRows}</div>
+    ${baroBlock}
     ${detailsBlock}`;
+}
+
+function refreshMarkerPopup(address, data = null) {
+  const m = markers.get(address);
+  if (!m || !m.isPopupOpen()) return;
+  const a = data || m._data || aircraft.find(x => x.address === address);
+  if (!a) return;
+  const popupEl = m.getPopup()?.getElement();
+  const detailsEl = popupEl?.querySelector('[data-popup-details]');
+  if (detailsEl) m._detailsOpen = detailsEl.open;
+  const html = popup(a);
+  if (m._popupSig !== html) {
+    m._popupSig = html;
+    m.setPopupContent(html);
+    keepOpenPopupAboveBar(m);
+  }
+  const newDetails = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+  if (newDetails) {
+    newDetails.open = !!m._detailsOpen;
+    newDetails.onTogglePopupDetails = newDetails.onTogglePopupDetails || (() => { m._detailsOpen = newDetails.open; keepOpenPopupAboveBar(m); });
+    newDetails.removeEventListener('toggle', newDetails.onTogglePopupDetails);
+    newDetails.addEventListener('toggle', newDetails.onTogglePopupDetails);
+  }
 }
 
 function updateCoverageLayer() {
@@ -2187,7 +2244,6 @@ function render() {
           if (trackEntry.layer) map.removeLayer(trackEntry.layer);
           trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
           if (trackEntry.layer) trackEntry.layer.addTo(map);
-          if (activeBaroAddress === key) renderBarogram(key);
         }
       }
       if (!isSpiderfied && m._isEmergency !== emerg) {
@@ -2198,24 +2254,7 @@ function render() {
       if ((!isSpiderfied || m._isEmergency) && m._iconSig !== iconSig) {
         m.setIcon(markerIcon(a)); m.setZIndexOffset(emerg ? 1000 : 0); m._iconSig = iconSig;
       }
-      if (m.isPopupOpen()) {
-        const popupEl = m.getPopup()?.getElement();
-        const detailsEl = popupEl?.querySelector('[data-popup-details]');
-        if (detailsEl) m._detailsOpen = detailsEl.open;
-        const html = popup(a);
-        if (m._popupSig !== html) {
-          m._popupSig = html;
-          m.setPopupContent(html);
-          keepOpenPopupAboveBar(m);
-        }
-        const newDetails = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
-        if (newDetails) {
-          newDetails.open = !!m._detailsOpen;
-          newDetails.onTogglePopupDetails = newDetails.onTogglePopupDetails || (() => { m._detailsOpen = newDetails.open; keepOpenPopupAboveBar(m); });
-          newDetails.removeEventListener('toggle', newDetails.onTogglePopupDetails);
-          newDetails.addEventListener('toggle', newDetails.onTogglePopupDetails);
-        }
-      }
+      refreshMarkerPopup(key, a);
     }
 
     if (followedAddress === key) map.panTo([a.lat, a.lon], { animate: true });
@@ -2527,10 +2566,18 @@ async function fetchLive(force = false) {
       window: $('markerWindow').value,
       meta: shouldFetchMeta ? '1' : '0'
     });
+    if (shouldFetchMeta) params.set('nc', String(Date.now()));
 
     const response = await fetch(`ogn-proxy.php?${params}`);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const payload = await response.json();
+
+    let serverNamesChanged = false;
+    const namesUpdated = Number(payload.names_updated) || 0;
+    if (namesUpdated && namesUpdated !== lastNameUpdated) {
+      lastNameUpdated = namesUpdated;
+      serverNamesChanged = true;
+    }
 
     if (wasDisconnected) {
       wasDisconnected = false;
@@ -2542,9 +2589,8 @@ async function fetchLive(force = false) {
     if (payload.server_time) serverClockOffsetMs = (Number(payload.server_time) * 1000) - Date.now();
     const nowTick = serverNow();
 
-    if (payload.names && typeof payload.names === 'object') {
-      for (const [id, name] of Object.entries(payload.names)) nameCache.set(id, cleanName(name));
-    }
+    let nameChanged = false;
+    const serverNames = payload.names && typeof payload.names === 'object' ? payload.names : null;
     if (payload.ddb && typeof payload.ddb === 'object') {
       for (const [id, info] of Object.entries(payload.ddb)) ddbCache.set(id, info);
     }
@@ -2580,6 +2626,7 @@ async function fetchLive(force = false) {
 
     const incoming = payload.packets && typeof payload.packets === 'object' ? payload.packets : {};
     const incomingIds = new Set(Object.keys(incoming));
+    const rawNamedIds = new Set();
     let sawUnknown = false;
     for (const existingId of aprsCache.keys()) {
       if (!incomingIds.has(existingId)) aprsCache.delete(existingId);
@@ -2589,6 +2636,12 @@ async function fetchLive(force = false) {
       const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
       const prev = aprsCache.get(id);
       const raw = pkt.raw || '';
+      const streamName = extractStreamName(raw);
+      if (streamName) rawNamedIds.add(id);
+      if (streamName && nameCache.get(id) !== streamName) {
+        nameCache.set(id, streamName);
+        nameChanged = true;
+      }
       if (!prev || prev.timestamp !== tsMs || prev.raw !== raw) {
         aprsCache.set(id, {
           raw,
@@ -2606,9 +2659,28 @@ async function fetchLive(force = false) {
     for (const [id, pkt] of Object.entries(incomingTel)) {
       const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
       const raw = pkt.raw || '';
+      const streamName = extractStreamName(raw);
+      if (streamName) rawNamedIds.add(id);
+      if (streamName && nameCache.get(id) !== streamName) {
+        nameCache.set(id, streamName);
+        nameChanged = true;
+      }
       const prev = telemetryCache.get(id);
       if (!prev || prev.timestamp !== tsMs || prev.raw !== raw) {
         telemetryCache.set(id, { raw, timestamp: tsMs });
+      }
+    }
+
+    // Server names are applied only when this payload did not carry a fresher
+    // over-the-air Name for the same ID (which may be newer than the proxy cache).
+    if (serverNames) {
+      for (const [id, name] of Object.entries(serverNames)) {
+        if (rawNamedIds.has(id)) continue;
+        const clean = cleanName(name);
+        if (clean && String(nameCache.get(id) || '').toLowerCase() !== clean.toLowerCase()) {
+          nameCache.set(id, clean);
+          nameChanged = true;
+        }
       }
     }
 
@@ -2620,7 +2692,11 @@ async function fetchLive(force = false) {
       }
     }
 
-    needMeta = sawUnknown;
+    if (nameChanged) saveNameCache();
+
+    // Ask for full metadata only when the server's name version changed (or a
+    // new device appeared). An over-the-air Name already updates nameCache here.
+    needMeta = sawUnknown || serverNamesChanged;
     if (shouldFetchMeta) {
       const c = b.getCenter();
       lastMetaBounds = { lat: c.lat, lng: c.lng, spanLat: b.getNorth() - b.getSouth() };
@@ -2827,13 +2903,12 @@ $('presetAviationBtn').addEventListener('click', () => applyUnitPreset('aviation
 $('presetUsBtn').addEventListener('click', () => applyUnitPreset('us'));
 $('btnTrackFlat').addEventListener('click', () => setTrackColorMode(false));
 $('btnTrackVario').addEventListener('click', () => setTrackColorMode(true));
-$('btnBarogram').addEventListener('click', () => setBarogramEnabled(!barogramEnabled));
+$('btnBaro').addEventListener('click', () => setBaroEnabled(!baroEnabled));
 $('unitAltBtn').addEventListener('click', () => {
   altUnit = altUnit === 'm' ? 'ft' : 'm';
   saveMenuPrefs();
   syncUnitButtons();
   render();
-  if (activeBaroAddress) renderBarogram(activeBaroAddress);
 });
 $('unitSpeedBtn').addEventListener('click', () => {
   speedUnit = speedUnit === 'kmh' ? 'kt' : speedUnit === 'kt' ? 'mph' : 'kmh';
@@ -2907,12 +2982,6 @@ document.addEventListener('keydown', event => {
 $('emergencyJump').addEventListener('click', () => {
   const addr = $('emergencyJump').dataset.addr;
   if (addr) jumpToAlertAddress(addr);
-});
-
-$('btnCloseBaro').addEventListener('click', () => {
-  baroDismissedAddress = activeBaroAddress;
-  $('barogram').classList.remove('show');
-  syncBottomBarOffset();
 });
 
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
