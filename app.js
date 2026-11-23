@@ -230,7 +230,6 @@ function fmtTemp(c) {
 
 function fmtClimb(mps) {
   if (mps == null) return '';
-  if (climbUnit === 'fps') return `${(mps * 3.28084).toFixed(1)} fps`;
   if (climbUnit === 'fpm') return `${Math.round(mps * 196.850394).toLocaleString()} fpm`;
   return `${Number(mps).toFixed(1)} m/s`;
 }
@@ -297,7 +296,7 @@ function syncUnitButtons() {
   $('unitAltBtn').textContent = `Alt: ${altUnit === 'ft' ? 'ft' : 'm'}`;
   $('unitSpeedBtn').textContent = `Speed: ${speedUnit === 'kt' ? 'kt' : speedUnit === 'mph' ? 'mph' : 'km/h'}`;
   $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
-  $('unitClimbBtn').textContent = `Climb: ${climbUnit === 'fps' ? 'fps' : climbUnit === 'fpm' ? 'fpm' : 'm/s'}`;
+  $('unitClimbBtn').textContent = `Vario: ${climbUnit === 'fpm' ? 'fpm' : 'm/s'}`;
   updateFilterBadge();
   syncScaleControl();
 }
