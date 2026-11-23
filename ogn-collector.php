@@ -20,6 +20,9 @@ const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB every 6 hours
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
 const MIN_VALID_TEMP_C     = -50.0;
 const MAX_VALID_TEMP_C     = 55.0;
+// ADS-B gateway traffic is mostly commercial aircraft and dominates the feed;
+// it is not useful for a glider/paraglider tracker.
+const DROP_PACKET_SOURCES  = ['OGADSB'];
 
 $lockFile = __DIR__ . '/ogn-collector.lock';
 $dbFile   = __DIR__ . '/ogn-live.sqlite';
@@ -878,7 +881,10 @@ while (microtime(true) < $deadline && !feof($socket)) {
     if ($line !== false) {
         $line = trim($line);
         if ($line !== '' && $line[0] !== '#' && strpos($line, '>') !== false) {
-            if (!preg_match('/^([^>]+)>/', $line, $cm)) {
+            if (!preg_match('/^([^>]+)>([^,:]+)/', $line, $cm)) {
+                continue;
+            }
+            if (in_array(strtoupper(trim($cm[2])), DROP_PACKET_SOURCES, true)) {
                 continue;
             }
             $callsign = trim($cm[1]);

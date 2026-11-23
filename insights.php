@@ -3,30 +3,52 @@ declare(strict_types=1);
 
 /*
  * OGN Tracker Insights — read-only rolling 24-hour statistics.
- * Standalone file: intentionally lives only in public_html, not in the git repo.
+ * Regeneration is done by a 4-hourly cron job (php insights.php --generate)
+ * or on demand with ?fresh=1.
  */
 
 $dbFile = __DIR__ . '/ogn-live.sqlite';
 $cutoff = time() - 86400;
+$cacheTtl = 4 * 3600;
+$cacheDir = rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache';
+$cacheFile = $cacheDir . '/insights_page.html';
+$cacheMeta = $cacheDir . '/insights_page.meta.json';
 
 // Match SQLite's localtime modifier used in the aggregate queries.
 $serverTz = trim((string)@file_get_contents('/etc/timezone'));
 if ($serverTz === '' || !in_array($serverTz, timezone_identifiers_list(), true)) $serverTz = 'Asia/Kolkata';
 date_default_timezone_set($serverTz);
 
-// Regenerate when the snapshot's data timestamp + 3 hours has passed.
-$cacheFile = sys_get_temp_dir() . '/ogn_insights_page.html';
-$cacheMeta = sys_get_temp_dir() . '/ogn_insights_page.meta.json';
-$cacheTtl = 3 * 3600;
+$cliGenerate  = PHP_SAPI === 'cli' && in_array('--generate', $_SERVER['argv'] ?? [], true);
+$forceGenerate = isset($_GET['fresh']);
+$doGenerate   = $cliGenerate || $forceGenerate;
 $generatedAt = time();
-if (!isset($_GET['fresh']) && is_readable($cacheFile) && is_readable($cacheMeta)) {
-    $cachedMeta = json_decode((string)file_get_contents($cacheMeta), true);
-    if (is_array($cachedMeta) && (int)($cachedMeta['next_at'] ?? 0) > time()) {
+$generationStarted = microtime(true);
+$genDuration = 0.0;
+
+if (!is_dir($cacheDir)) @mkdir($cacheDir, 0755, true);
+
+// Web requests serve the snapshot unless ?fresh=1 forces a regeneration.
+if (!$doGenerate) {
+    if (is_readable($cacheFile)) {
         readfile($cacheFile);
         exit;
     }
+    http_response_code(503);
+    ?><!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>OGN Tracker — Insights</title>
+<link rel="stylesheet" href="style.css"></head><body>
+<div class="app"><header><div class="brand"><div class="logo">✈</div><div>
+<h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
+</div></div></header><main><div class="ins-page">
+<div class="ins-error">No snapshot has been generated yet. The 4-hourly refresh job will create it shortly.</div>
+</div></main></body></html><?php
+    exit;
 }
+
 ob_start();
+// Generation can scan millions of tracks rows; give it room to finish.
+set_time_limit(180);
 
 $OGN_TYPES = [
     1  => 'Glider',
@@ -101,8 +123,9 @@ function simpleTable(array $headers, array $rows): string {
     return $out . '</tbody></table></div>';
 }
 
-function sectionCard(string $title, string $subtitle, string $body, string $span = ''): string {
-    return '<section class="ins-card' . ($span !== '' ? ' ins-span-' . $span : '') . '">'
+function sectionCard(string $title, string $subtitle, string $body, string $span = '', string $id = ''): string {
+    return '<section class="ins-card' . ($span !== '' ? ' ins-span-' . $span : '') . '"'
+        . ($id !== '' ? ' id="' . h($id) . '"' : '') . '>'
         . '<div class="ins-card-head"><h2>' . h($title) . '</h2><span class="ins-card-sub">' . h($subtitle) . '</span></div>'
         . '<div class="ins-card-body">' . $body . '</div></section>';
 }
@@ -122,7 +145,8 @@ function scrollChart(array $data, string $c1, string $c2, int $visible = 8): str
         $tip = $d[2] ?? ($date . ' ' . $hour . ': ' . n($value));
         $epoch = (int)($d[3] ?? 0);
         $bh = max(2, $value / $max * 100);
-        $out .= '<div class="ins-col"' . ($epoch > 0 ? ' data-ts="' . $epoch . '"' : '') . ' title="' . h($tip) . '">'
+        $peak = (int)$value === $max ? ' ins-col-peak' : '';
+        $out .= '<div class="ins-col' . $peak . '"' . ($epoch > 0 ? ' data-ts="' . $epoch . '"' : '') . ' title="' . h($tip) . '">'
             . '<div class="ins-col-plot">'
             . '<div class="ins-col-val">' . h($value) . '</div>'
             . '<div class="ins-col-bar" style="height:' . number_format($bh, 2) . '%;background:linear-gradient(180deg,' . h($c1) . ',' . h($c2) . ')"></div>'
@@ -136,8 +160,18 @@ function scrollChart(array $data, string $c1, string $c2, int $visible = 8): str
 
 try {
     if (!file_exists($dbFile)) throw new RuntimeException('Database file not found.');
-    $pdo = new PDO('sqlite:' . $dbFile, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-    $pdo->exec('PRAGMA busy_timeout=5000');
+
+    // Work from a consistent snapshot in /tmp (tmpfs): the live DB is on a slow
+    // disk, and a 3.7M-row tracks scan otherwise blows the 60s FastCGI timeout.
+    $snapshotFile = sys_get_temp_dir() . '/ogn_insights_snapshot_' . bin2hex(random_bytes(6)) . '.sqlite';
+    register_shutdown_function(static function () use ($snapshotFile) { @unlink($snapshotFile); });
+    $src = new SQLite3($dbFile, SQLITE3_OPEN_READONLY);
+    $dst = new SQLite3($snapshotFile, SQLITE3_OPEN_READWRITE | SQLITE3_OPEN_CREATE);
+    if (!$src->backup($dst)) throw new RuntimeException('Unable to snapshot database.');
+    $dst->close();
+    $src->close();
+
+    $pdo = new PDO('sqlite:' . $snapshotFile, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
 
     $meta = [];
     foreach ($pdo->query('SELECT key, value FROM meta') as $r) $meta[$r['key']] = $r['value'];
@@ -145,8 +179,8 @@ try {
     $dataAge = $dataUpdated > 0 ? time() - $dataUpdated : -1;
     $dataOk = $dataAge >= 0 && $dataAge < 300;
 
-    // Next regeneration is 3h after the data timestamp, with a 5m floor if data is stale.
-    $nextRefreshAt = max(($dataUpdated > 0 ? $dataUpdated : $generatedAt) + $cacheTtl, $generatedAt + 300);
+    // Cron runs every 4 hours, so the next refresh is one interval from now.
+    $nextRefreshAt = $generatedAt + $cacheTtl;
 
     // ---- Aircraft (last known position per ID, 24h) -----------------------
     $aircraft = $pdo->prepare('SELECT id, ddb_id, lat, lon, raw, timestamp, is_emergency FROM aircraft WHERE timestamp >= :cutoff');
@@ -309,7 +343,8 @@ try {
     // ---- Tracks / hourly traffic (single scan) ----------------------------
     $hourly = [];
     $trackAircraft = 0; $trackPoints = 0; $maxAlt = null;
-    $tracksStmt = $pdo->prepare("SELECT strftime('%Y-%m-%d %H:00', datetime(ts, 'unixepoch', 'localtime')) AS hr, COUNT(DISTINCT id) AS ac, COUNT(*) AS pts, MAX(alt) AS ma FROM tracks WHERE ts >= :cutoff GROUP BY hr ORDER BY hr");
+    // PK (id, ts) scan is much faster here than random lookups via idx_tracks_ts.
+    $tracksStmt = $pdo->prepare("SELECT strftime('%Y-%m-%d %H:00', datetime(ts, 'unixepoch', 'localtime')) AS hr, COUNT(DISTINCT id) AS ac, COUNT(*) AS pts, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff GROUP BY hr ORDER BY hr");
     $tracksStmt->execute([':cutoff' => $cutoff]);
     foreach ($tracksStmt as $r) {
         $hourly[] = [(string)$r['hr'], (int)$r['ac'], (int)$r['pts']];
@@ -357,6 +392,7 @@ try {
     http_response_code(500);
     $fatal = $e->getMessage();
 }
+$genDuration = microtime(true) - $generationStarted;
 ?>
 <!doctype html>
 <html lang="en">
@@ -369,17 +405,28 @@ try {
 <style>
   main{display:block!important}
   .ins-page{max-width:1500px;margin:0 auto;padding:18px 18px 36px}
-  .ins-headline{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;justify-content:space-between;margin-bottom:16px}
+  .ins-headline{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;justify-content:space-between;margin-bottom:10px}
   .ins-headline h2{font-size:20px;margin:0}
   .ins-headline p{margin:3px 0 0;color:var(--muted);font-size:12px}
   .ins-refresh{font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--panel2)}
   .ins-refresh:hover{border-color:var(--accent);color:var(--text)}
-  .ins-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin-bottom:16px}
+  .ins-gen{display:inline-block;font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:4px 9px;margin-left:6px;white-space:nowrap}
+  .ins-nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}
+  .ins-nav a{font-size:11px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--panel2)}
+  .ins-nav a:hover{color:var(--text);border-color:var(--accent)}
+  .ins-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px;margin-bottom:12px}
+  .ins-kpis-secondary{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));margin-bottom:18px}
   .ins-kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 14px}
+  .ins-kpi-hero{padding:16px 18px;border-color:#2a4354}
   .ins-kpi-label{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.6px;font-weight:700}
   .ins-kpi-value{font-size:25px;font-weight:800;line-height:1.2;margin-top:4px;color:var(--text)}
+  .ins-kpi-hero .ins-kpi-value{font-size:32px}
+  .ins-kpis-secondary .ins-kpi{padding:10px 12px}
+  .ins-kpis-secondary .ins-kpi-value{font-size:20px}
+  .ins-kpis-secondary .ins-kpi-sub{font-size:10px}
   .ins-kpi-sub{font-size:11px;color:#b7c7d2;margin-top:3px}
   .ins-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px;align-items:start}
+  .ins-section{grid-column:1/-1;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:6px 0 -2px;padding-bottom:6px;border-bottom:1px solid var(--line)}
   .ins-span-2{grid-column:span 2}
   .ins-card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;min-width:0}
   .ins-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line);background:#14202b}
@@ -402,20 +449,23 @@ try {
   .ins-table td.num,.ins-table th.num{text-align:right;font-variant-numeric:tabular-nums}
   .ins-empty{color:var(--muted);font-size:12px;padding:8px 0}
   .ins-note{font-size:11px;color:var(--muted);margin:10px 0 0;line-height:1.5}
+  .ins-scroll-hint{display:inline-block;font-size:11px;color:var(--accent);background:#14202b;border:1px solid var(--line);border-radius:999px;padding:3px 9px;margin-top:8px}
   .ins-scroll-chart{overflow-x:auto;overflow-y:hidden;margin-top:6px;padding-bottom:3px;scrollbar-color:#2b3d4c #17232f;scrollbar-width:thin}
   .ins-scroll-chart::-webkit-scrollbar{height:8px}
   .ins-scroll-chart::-webkit-scrollbar-thumb{background:#2b3d4c;border-radius:5px}
   .ins-chart-cols{display:flex;gap:3px;width:max-content;align-items:flex-end}
-  .ins-col{flex:0 0 64px;display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0}
-  .ins-col-plot{height:130px;width:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;border-bottom:1px solid var(--line);background:repeating-linear-gradient(to top,transparent 0,transparent 64px,#22313e 64px,#22313e 65px)}
-  .ins-col-val{font-size:9px;color:#edf4f8;height:12px;line-height:12px;white-space:nowrap}
+  .ins-col{flex:0 0 72px;display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0}
+  .ins-col-plot{height:140px;width:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;border-bottom:1px solid var(--line);background:repeating-linear-gradient(to top,transparent 0,transparent 69px,#22313e 69px,#22313e 70px)}
+  .ins-col-val{font-size:11px;color:#edf4f8;height:14px;line-height:14px;white-space:nowrap}
+  .ins-col-peak .ins-col-val{color:#fff;font-weight:800}
+  .ins-col-peak .ins-col-bar{box-shadow:0 0 12px #57d3b066}
   .ins-col-bar{width:100%;border-radius:3px 3px 0 0;min-height:2px}
-  .ins-col-date{font-size:9px;color:var(--muted);line-height:1.1;white-space:nowrap}
-  .ins-col-hour{font-size:9px;color:#b7c7d2;font-weight:600;line-height:1.1;white-space:nowrap}
+  .ins-col-date{font-size:10px;color:var(--muted);line-height:1.1;white-space:nowrap}
+  .ins-col-hour{font-size:10px;color:#b7c7d2;font-weight:600;line-height:1.1;white-space:nowrap}
   .ins-split{display:grid;grid-template-columns:1fr 1fr;gap:18px}
   .ins-split h3{font-size:11px;margin:0 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
   .ins-error{background:#3d1118;border:1px solid var(--red);color:#ffe5e5;padding:14px;border-radius:10px;margin:20px auto;max-width:700px}
-  @media(max-width:800px){.ins-split{grid-template-columns:1fr}.ins-span-2{grid-column:auto}.ins-page{padding:12px}}
+  @media(max-width:800px){.ins-split{grid-template-columns:1fr}.ins-span-2{grid-column:auto}.ins-page{padding:12px}.ins-nav{margin-bottom:12px}}
 </style>
 </head>
 <body>
@@ -424,13 +474,13 @@ try {
     <div class="logo">✈</div>
     <div>
       <h1>OGN Tracker — Insights</h1>
-      <div class="sub">Rolling 24-hour snapshot · regenerated every 3 hours</div>
+      <div class="sub">Rolling 24-hour snapshot · regenerated every 4 hours</div>
     </div>
   </div>
-  <div class="status">
+  <div class="status" id="insStatus" data-data-ts="<?php echo $dataUpdated; ?>" data-gen-ts="<?php echo $generatedAt; ?>">
     <span class="dot <?php echo $dataOk ? 'live' : 'error'; ?>"></span>
-    <span><?php echo $dataOk ? 'Snapshot OK' : 'Collector overdue at generation'; ?></span>
-    <span class="status-updated">
+    <span id="insStatusText"><?php echo $dataOk ? 'Snapshot OK' : 'Collector overdue'; ?></span>
+    <span class="status-updated" id="insStatusAge">
       <?php if ($dataUpdated > 0): ?>data @ <time class="ins-time" data-ts="<?php echo $dataUpdated; ?>"><?php echo h(date('H:i', $dataUpdated)); ?></time><?php else: ?>no data timestamp<?php endif; ?>
     </span>
     <a class="ins-refresh" href="index.html">← Tracker</a>
@@ -448,26 +498,59 @@ try {
       <h2>Network &amp; traffic summary</h2>
       <p>Window: last 24 hours · <time class="ins-time ins-time-dt" data-ts="<?php echo $cutoff; ?>"><?php echo h(date('Y-m-d H:i', $cutoff)); ?></time> → <time class="ins-time ins-time-dt" data-ts="<?php echo $generatedAt; ?>"><?php echo h(date('Y-m-d H:i', $generatedAt)); ?></time> (<span class="ins-tz-note">server time</span>)</p>
     </div>
-    <div class="sub">Snapshot generated <time class="ins-time ins-time-dt" data-ts="<?php echo $generatedAt; ?>"><?php echo h(date('Y-m-d H:i', $generatedAt)); ?></time> · next refresh <time class="ins-time" data-ts="<?php echo $nextRefreshAt; ?>"><?php echo h(date('H:i', $nextRefreshAt)); ?></time></div>
+    <div class="sub">Snapshot generated <time class="ins-time ins-time-dt" data-ts="<?php echo $generatedAt; ?>"><?php echo h(date('Y-m-d H:i', $generatedAt)); ?></time> · next refresh <time class="ins-time" data-ts="<?php echo $nextRefreshAt; ?>"><?php echo h(date('H:i', $nextRefreshAt)); ?></time><span class="ins-gen">built in <?php echo number_format($genDuration, 1); ?>s</span></div>
   </div>
 
+  <nav class="ins-nav">
+    <a href="#traffic">Traffic</a><a href="#network">Network</a><a href="#environment">Environment</a><a href="#quality">Data quality</a>
+  </nav>
+
   <div class="ins-kpis">
-    <div class="ins-kpi"><div class="ins-kpi-label">Unique aircraft</div><div class="ins-kpi-value"><?php echo n($aircraftTotal); ?></div><div class="ins-kpi-sub"><?php echo n($trackAircraft); ?> with track data</div></div>
-    <div class="ins-kpi"><div class="ins-kpi-label">Ground stations</div><div class="ins-kpi-value"><?php echo n($stationTotal); ?></div><div class="ins-kpi-sub"><?php echo n($stationsWithWeather); ?> reporting weather</div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Unique aircraft</div><div class="ins-kpi-value"><?php echo n($aircraftTotal); ?></div><div class="ins-kpi-sub"><?php echo n($trackAircraft); ?> with track data</div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Track points</div><div class="ins-kpi-value"><?php echo n($trackPoints); ?></div><div class="ins-kpi-sub"><?php echo $maxAlt !== null ? 'max ' . n(round($maxAlt)) . ' m' : 'altitude n/a'; ?></div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Ground stations</div><div class="ins-kpi-value"><?php echo n($stationTotal); ?></div><div class="ins-kpi-sub"><?php echo n($stationsWithWeather); ?> reporting weather</div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Thermal samples</div><div class="ins-kpi-value"><?php echo n($thermalTotal); ?></div><div class="ins-kpi-sub">gliders / paragliders only</div></div>
+  </div>
+
+  <div class="ins-kpis ins-kpis-secondary">
     <div class="ins-kpi"><div class="ins-kpi-label">Station ↔ aircraft links</div><div class="ins-kpi-value"><?php echo n((int)$pdo->query('SELECT COUNT(*) FROM station_heard')->fetchColumn()); ?></div><div class="ins-kpi-sub">reception pairs in 24h</div></div>
-    <div class="ins-kpi"><div class="ins-kpi-label">Track points</div><div class="ins-kpi-value"><?php echo n($trackPoints); ?></div><div class="ins-kpi-sub"><?php echo $maxAlt !== null ? 'max ' . n(round($maxAlt)) . ' m' : 'altitude n/a'; ?></div></div>
     <div class="ins-kpi"><div class="ins-kpi-label">Identified</div><div class="ins-kpi-value"><?php echo n($identifiedCount); ?></div><div class="ins-kpi-sub"><?php echo pct($identifiedCount, max(1, $aircraftTotal)); ?> have a stream name</div></div>
     <div class="ins-kpi"><div class="ins-kpi-label">DDB metadata</div><div class="ins-kpi-value"><?php echo n($ddbKnown); ?></div><div class="ins-kpi-sub">of <?php echo n($ddbTotal); ?> catalogue records</div></div>
     <div class="ins-kpi"><div class="ins-kpi-label">Alerts / emergencies</div><div class="ins-kpi-value"><?php echo n($alertAircraft); ?></div><div class="ins-kpi-sub"><?php echo n($emergencyCount); ?> emergency-flagged packets</div></div>
-    <div class="ins-kpi"><div class="ins-kpi-label">Thermal samples</div><div class="ins-kpi-value"><?php echo n($thermalTotal); ?></div><div class="ins-kpi-sub">gliders / paragliders only</div></div>
   </div>
 
   <div class="ins-grid">
     <?php
-    $colors = ['var(--accent)', '#38bdf8', '#a78bfa', '#f5c451', '#f07878', '#34d399', '#fb923c', '#60a5fa', '#e879f9', '#94a3b8'];
+    // One restrained palette: cool tones for traffic, green/blue for network, warm for environment.
+    $colors = ['var(--accent)', '#38bdf8', '#a78bfa', '#34d399', '#f5c451', '#fb923c', '#60a5fa', '#f07878', '#e879f9', '#94a3b8'];
+
+    echo '<h3 class="ins-section" id="traffic">Traffic</h3>';
+
     $typeHtml = ''; $i = 0;
     foreach ($typeCounts as $label => $c) { $typeHtml .= barRow($label, $c, $aircraftTotal, $colors[$i++ % count($colors)]); }
     echo sectionCard('Aircraft types', n(array_sum($typeCounts)) . ' aircraft', $typeHtml ?: '<div class="ins-empty">No aircraft seen.</div>');
+
+    // Hourly traffic chart.
+    $hourData = [];
+    foreach ($hourly as $hh) {
+        $key = $hh[0]; // YYYY-MM-DD HH:00
+        $hourData[] = [[substr($key, 5, 5), substr($key, 11, 5)], (int)$hh[1],
+            $key . ' — ' . n($hh[1]) . ' aircraft, ' . n($hh[2]) . ' track points',
+            localHourEpoch($key, $serverTz)];
+    }
+    $chart = scrollChart($hourData, 'var(--accent)', '#2387a6', 8)
+        . '<span class="ins-scroll-hint">← Scroll for earlier hours</span>'
+        . '<p class="ins-note">One bar per hour (hour boundaries follow server time); all times shown in your local timezone. The brightest bar is the peak hour.</p>';
+    echo sectionCard('Hourly traffic', 'unique aircraft by hour', $chart, '2');
+
+    // Alerts.
+    $alertHtml = '';
+    foreach ($alerts as $label => $c) $alertHtml .= barRow($label, $c, array_sum($alerts), 'var(--red)');
+    echo sectionCard('Alerts seen', $alertAircraft . ' aircraft affected',
+        ($alertHtml ?: '<div class="ins-empty">No alerts in the database.</div>')
+        . '<p class="ins-note">Labels only; trailing packet text is stripped. Alert records are keyed per aircraft and status.</p>');
+
+    echo '<h3 class="ins-section" id="network">Network</h3>';
 
     $netHtml = ''; $i = 0;
     foreach ($networkCounts as $label => $c) { $netHtml .= barRow($label, $c, $aircraftTotal, $colors[$i++ % count($colors)]); }
@@ -484,18 +567,6 @@ try {
     foreach ($stationRoles as $label => $c) $stHtml .= barRow($label, $c, $stationTotal, '#38bdf8');
     $stHtml .= '</div></div>';
     echo sectionCard('Station types', n($stationTotal) . ' active stations', $stHtml);
-
-    // Hourly traffic chart.
-    $hourData = [];
-    foreach ($hourly as $hh) {
-        $key = $hh[0]; // YYYY-MM-DD HH:00
-        $hourData[] = [[substr($key, 5, 5), substr($key, 11, 5)], (int)$hh[1],
-            $key . ' — ' . n($hh[1]) . ' aircraft, ' . n($hh[2]) . ' track points',
-            localHourEpoch($key, $serverTz)];
-    }
-    $chart = scrollChart($hourData, '#57d3b0', '#2387a6', 8)
-        . '<p class="ins-note">Latest 8 hours shown — scroll left for earlier hours. One bar per hour (hour boundaries follow server time); all times shown in your local timezone.</p>';
-    echo sectionCard('Hourly traffic', 'unique aircraft by hour', $chart, '2');
 
     // Top receivers table.
     $rows = [];
@@ -522,12 +593,7 @@ try {
     echo sectionCard('Farthest reception records', 'longest station → aircraft range',
         simpleTable(['Station', 'Distance', 'Aircraft', 'When'], $rows));
 
-    // Alerts.
-    $alertHtml = '';
-    foreach ($alerts as $label => $c) $alertHtml .= barRow($label, $c, array_sum($alerts), 'var(--red)');
-    echo sectionCard('Alerts seen', $alertAircraft . ' aircraft affected',
-        ($alertHtml ?: '<div class="ins-empty">No alerts in the database.</div>')
-        . '<p class="ins-note">Labels only; trailing packet text is stripped. Alert records are keyed per aircraft and status.</p>');
+    echo '<h3 class="ins-section" id="environment">Environment</h3>';
 
     // Weather.
     $wxHtml = '';
@@ -558,6 +624,8 @@ try {
     echo sectionCard('Thermal activity', n($thermalTotal) . ' samples',
         simpleTable(['0.1° cell', 'Samples'], $rows)
         . '<p class="ins-note">Heatmap intensity is an accumulated proxy, not a calibrated climb rate.</p>');
+
+    echo '<h3 class="ins-section" id="quality">Data quality</h3>';
 
     // Data quality.
     $rows = [
@@ -595,6 +663,27 @@ try {
   const tzNote = document.querySelector('.ins-tz-note');
   if (tzNote) tzNote.textContent = 'your local time';
 
+  const status = document.getElementById('insStatus');
+  if (status) {
+    const dataTs = Number(status.dataset.dataTs || 0);
+    const genTs = Number(status.dataset.genTs || 0);
+    const mins = ts => Math.max(0, Math.round((Date.now() / 1000 - ts) / 60));
+    const dataAge = mins(dataTs);
+    const genAge = mins(genTs);
+    const dot = status.querySelector('.dot');
+    const text = document.getElementById('insStatusText');
+    const age = document.getElementById('insStatusAge');
+    let cls = 'dot', label = 'No data timestamp';
+    if (dataTs > 0) {
+      if (dataAge < 5) { cls += ' live'; label = 'Data live'; }
+      else if (dataAge < 60) { cls += ' warn'; label = 'Data delayed'; }
+      else { cls += ' error'; label = 'Collector overdue'; }
+      if (age) age.textContent = 'data ' + dataAge + 'm ago · snapshot ' + genAge + 'm ago';
+    }
+    if (dot) dot.className = cls;
+    if (text) text.textContent = label;
+  }
+
   document.querySelectorAll('.ins-col').forEach(col => {
     const ts = Number(col.dataset.ts || 0);
     if (!ts) return;
@@ -629,11 +718,20 @@ try {
 <?php
 $pageHtml = ob_get_clean();
 if (!isset($fatal)) {
-    @file_put_contents($cacheFile, $pageHtml, LOCK_EX);
-    @file_put_contents($cacheMeta, json_encode([
+    $tmpHtml = $cacheFile . '.tmp';
+    $tmpMeta = $cacheMeta . '.tmp';
+    @file_put_contents($tmpHtml, $pageHtml, LOCK_EX);
+    @file_put_contents($tmpMeta, json_encode([
         'data_updated' => $dataUpdated,
         'generated_at' => $generatedAt,
         'next_at'      => $nextRefreshAt,
+        'duration'     => round($genDuration, 2),
     ]), LOCK_EX);
+    @rename($tmpHtml, $cacheFile);
+    @rename($tmpMeta, $cacheMeta);
 }
-echo $pageHtml;
+if ($cliGenerate) {
+    echo 'Insights regenerated in ' . number_format($genDuration, 1) . "s\n";
+} else {
+    echo $pageHtml;
+}
