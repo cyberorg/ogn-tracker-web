@@ -208,7 +208,14 @@ try {
     $rawById = [];
     foreach ($aircraftRows as $r) $rawById[strtolower((string)$r['id'])] = (string)$r['raw'];
 
+    // Max altitude per aircraft in the rolling window, rolled up by type below.
+    $altByAircraft = [];
+    $altStmt = $pdo->prepare('SELECT id, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff AND alt IS NOT NULL GROUP BY id');
+    $altStmt->execute([':cutoff' => $cutoff]);
+    foreach ($altStmt as $r) $altByAircraft[strtolower((string)$r['id'])] = (float)$r['ma'];
+
     $typeCounts = [];       // aircraft only (ground stations excluded)
+    $typeMaxAlt = [];       // highest altitude seen per aircraft type
     $stationCounts = [];    // type 15 / station symbols
     $networkCounts = [];    // packet source network, all aircraft-table rows
     $fanetCounts = [];      // unique aircraft per FANET status from latest packet
@@ -269,6 +276,10 @@ try {
         } else {
             $label = $OGN_TYPES[$type] ?? ($type > 0 ? 'Type ' . $type : 'Unknown / unspecified');
             $typeCounts[$label] = ($typeCounts[$label] ?? 0) + 1;
+            if (isset($altByAircraft[$id])) {
+                $alt = $altByAircraft[$id];
+                $typeMaxAlt[$label] = isset($typeMaxAlt[$label]) ? max($typeMaxAlt[$label], $alt) : $alt;
+            }
         }
 
         if ((int)$row['is_emergency'] === 1) $emergencyCount++;
@@ -438,10 +449,10 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-card-head h2{font-size:13px;margin:0;font-weight:800}
   .ins-card-sub{font-size:10px;color:var(--muted);white-space:nowrap}
   .ins-card-body{padding:11px 14px 14px}
-  .ins-bar-row{display:grid;grid-template-columns:minmax(95px,160px) 1fr 58px;gap:9px;align-items:center;margin:7px 0;font-size:12px}
-  .ins-bar-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d8e4eb}
-  .ins-bar-sub{color:var(--muted);font-size:10px;margin-left:5px}
-  .ins-bar-track{height:8px;border-radius:5px;background:#223442;overflow:hidden}
+  .ins-bar-row{display:grid;grid-template-columns:minmax(210px,290px) minmax(70px,1fr) 58px;gap:9px;align-items:center;margin:7px 0;font-size:12px}
+  .ins-bar-label{min-width:0;white-space:normal;color:#d8e4eb}
+  .ins-bar-sub{color:var(--muted);font-size:10px;margin-left:5px;white-space:nowrap}
+  .ins-bar-track{height:8px;border-radius:5px;background:#223442;overflow:hidden;max-width:180px}
   .ins-bar-fill{height:100%;border-radius:5px;min-width:2px}
   .ins-bar-value{text-align:right;font-weight:700;font-variant-numeric:tabular-nums}
   .dot.warn{background:var(--yellow)}
@@ -489,7 +500,8 @@ $genDuration = microtime(true) - $generationStarted;
     .ins-kpi-hero{padding:13px 14px}
     .ins-kpi-hero .ins-kpi-value{font-size:27px}
     .ins-section{margin-top:10px}
-    .ins-bar-row{grid-template-columns:minmax(80px,120px) 1fr 50px;gap:6px;font-size:11px}
+    .ins-bar-row{grid-template-columns:minmax(150px,210px) minmax(40px,1fr) 50px;gap:6px;font-size:11px}
+    .ins-bar-track{max-width:120px}
     .ins-table{font-size:11px}
     .ins-table th,.ins-table td{padding:5px 6px}
   }
@@ -534,7 +546,7 @@ $genDuration = microtime(true) - $generationStarted;
 
   <div class="ins-kpis">
     <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Unique aircraft</div><div class="ins-kpi-value"><?php echo n($aircraftTotal); ?></div><div class="ins-kpi-sub"><?php echo n($trackAircraft); ?> with track data</div></div>
-    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Track points</div><div class="ins-kpi-value"><?php echo n($trackPoints); ?></div><div class="ins-kpi-sub"><?php echo $maxAlt !== null ? 'max ' . n(round($maxAlt)) . ' m' : 'altitude n/a'; ?></div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Track points</div><div class="ins-kpi-value"><?php echo n($trackPoints); ?></div><div class="ins-kpi-sub"><?php echo $maxAlt !== null ? 'max altitude ' . n(round($maxAlt)) . ' m' : 'altitude n/a'; ?></div></div>
     <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Ground stations</div><div class="ins-kpi-value"><?php echo n($stationTotal); ?></div><div class="ins-kpi-sub"><?php echo n($stationsWithWeather); ?> reporting weather</div></div>
     <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Thermal samples</div><div class="ins-kpi-value"><?php echo n($thermalTotal); ?></div><div class="ins-kpi-sub">gliders / paragliders only</div></div>
   </div>
@@ -553,9 +565,13 @@ $genDuration = microtime(true) - $generationStarted;
 
     echo '<h3 class="ins-section" id="traffic">Traffic</h3>';
 
+    $typeTotal = array_sum($typeCounts); // excludes ground stations, matches the card subtitle
     $typeHtml = ''; $i = 0;
-    foreach ($typeCounts as $label => $c) { $typeHtml .= barRow($label, $c, $aircraftTotal, $colors[$i++ % count($colors)]); }
-    echo sectionCard('Aircraft types', n(array_sum($typeCounts)) . ' aircraft', $typeHtml ?: '<div class="ins-empty">No aircraft seen.</div>');
+    foreach ($typeCounts as $label => $c) {
+        $sub = isset($typeMaxAlt[$label]) ? '(max alt ' . n(round($typeMaxAlt[$label])) . ' m)' : '';
+        $typeHtml .= barRow($label, $c, $typeTotal, $colors[$i++ % count($colors)], $sub);
+    }
+    echo sectionCard('Aircraft types', n($typeTotal) . ' aircraft', $typeHtml ?: '<div class="ins-empty">No aircraft seen.</div>');
 
     // Hourly traffic chart.
     $hourData = [];
