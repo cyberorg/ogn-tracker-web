@@ -396,6 +396,7 @@ function syncUnitButtons() {
   $('unitSpeedBtn').textContent = `Speed: ${speedUnit === 'kt' ? 'kt' : speedUnit === 'mph' ? 'mph' : 'km/h'}`;
   $('unitTempBtn').textContent = `Temp: ${tempUnit === 'f' ? '°F' : '°C'}`;
   $('unitClimbBtn').textContent = `Vario: ${climbUnit === 'fpm' ? 'fpm' : 'm/s'}`;
+  syncVarioLegend();
   updateFilterBadge();
   syncScaleControl();
 }
@@ -515,6 +516,7 @@ const clusterGroup = L.markerClusterGroup({
 }).addTo(map);
 const emergencyGroup = L.layerGroup().addTo(map);
 const replayGroup = L.layerGroup();
+const replayTrackGroup = L.layerGroup();
 
 let isSpiderfied = false;
 clusterGroup.on('spiderfied', () => { isSpiderfied = true; });
@@ -538,6 +540,20 @@ let activeTrackAddress = null;
 const lastPinnedStatus = new Map();
 const alerts24hHistory = new Map();
 let replayActive = false, replayTimer = null;
+let replayFollowAddress = null;
+let replayPoints = [];
+let replayTrackPoints = [];
+let replayOnlyFocus = false;
+let replayDirection = 1;
+const REPLAY_SPEEDS = [1, 2, 5, 10, 20, 50];
+let replaySpeedIndex = 0;
+const REPLAY_RANGE_LABELS = ['15m', '1h', '6h', 'Today'];
+const REPLAY_RANGE_TITLES = ['Last 15 minutes', 'Last hour', 'Last 6 hours', 'Today (from midnight)'];
+const REPLAY_RANGE_MINUTES = [15, 60, 360];
+let replayRangeIndex = REPLAY_RANGE_LABELS.length - 1;
+let replayTsMs = 0;
+let replayLastTickMs = 0;
+let lastReplaySliceMinute = null;
 
 try {
   const savedAlerts = JSON.parse(localStorage.getItem(ALERTS_24H_STORAGE_KEY) || '[]');
@@ -824,9 +840,21 @@ function redrawAllTracks() {
     entry.layer = buildTrackLayer(entry.points, entry.color);
     if (entry.layer) entry.layer.addTo(map);
   }
+  updateReplayTrackLine();
+}
+
+function syncVarioLegend() {
+  const legend = $('varioLegend');
+  if (!legend) return;
+  legend.hidden = !varioTrackMode;
+  if (!varioTrackMode) return;
+  $('varioLegendLow').textContent = `↓ ${fmtClimb(-2)}`;
+  $('varioLegendHigh').textContent = `+${fmtClimb(2.5)} ↑`;
+  legend.setAttribute('aria-label', `Vario colour scale from ${fmtClimb(-2)} sink to +${fmtClimb(2.5)} climb`);
 }
 
 function syncTrackModeButtons() {
+  syncVarioLegend();
   const flatBtn = $('btnTrackFlat');
   const varioBtn = $('btnTrackVario');
   if (!flatBtn || !varioBtn) return;
@@ -878,6 +906,57 @@ function toggleFollow(address) {
     btn.title = `${active ? 'Unfollow' : 'Follow'} ${a ? displayName(a) : btn.dataset.follow}`;
   });
   updateListHint();
+  followCenteringPaused = false;
+  syncRecenterButton();
+}
+
+// --- Shared follow-centering control (live and replay) ---
+const FOLLOW_CENTER_MIN_ZOOM = 15;
+let followCenteringPaused = false;
+
+function activeFollowAddress() {
+  return replayActive ? replayFollowAddress : followedAddress;
+}
+
+function syncRecenterButton() {
+  const btn = $('recenterBtn');
+  if (!btn) return;
+  const addr = activeFollowAddress();
+  const needsRecenter = !!addr && followCenteringPaused;
+  btn.hidden = !needsRecenter;
+  if (needsRecenter) {
+    const a = aircraft.find(x => x.address === addr);
+    const name = a ? displayName(a) : addr.toUpperCase();
+    btn.title = `Center map on ${name}`;
+    btn.setAttribute('aria-label', btn.title);
+  }
+}
+
+function pauseFollowCentering() {
+  if (!activeFollowAddress() || followCenteringPaused) return;
+  followCenteringPaused = true;
+  syncRecenterButton();
+}
+
+function centerOnFollowed(force = false) {
+  const addr = activeFollowAddress();
+  if (!addr) return false;
+  if (!force && (followCenteringPaused || map.getZoom() < FOLLOW_CENTER_MIN_ZOOM)) return false;
+  let lat, lon;
+  if (replayActive) {
+    const p = replayPoints.find(x => x.id === addr);
+    if (!p) return false;
+    lat = p.lat; lon = p.lon;
+  } else {
+    const a = aircraft.find(x => x.address === addr);
+    if (!a) return false;
+    lat = a.lat; lon = a.lon;
+  }
+  followCenteringPaused = false;
+  syncRecenterButton();
+  const dest = L.latLng(lat, lon);
+  if (map.getCenter().distanceTo(dest) > 1) map.setView(dest, map.getZoom(), { animate: true });
+  return true;
 }
 
 // Shared altitude-profile renderer for the popup barograph.
@@ -1157,7 +1236,9 @@ map.on('click', () => {
   }
 });
 
-map.on('dragstart', () => { followedAddress = null; });
+map.on('dragstart', () => { pauseFollowCentering(); });
+map.on('zoomend', () => { syncRecenterButton(); });
+$('recenterBtn').addEventListener('click', () => { centerOnFollowed(true); });
 
 function sanitizeWeather(wx) {
   if (!wx || typeof wx !== 'object') return null;
@@ -1891,25 +1972,35 @@ function updateMarkerLabels() {
   const barRect = visibleBottomBarEl()?.getBoundingClientRect();
   const candidates = [];
 
-  for (const m of markers.values()) {
+  const collect = (m, priority) => {
     const el = m.getElement?.();
-    if (!el) continue;
+    if (!el) return;
     el.classList.remove('show-name');
-    if (!showNames || !m._data) continue;
+    if (!showNames) return;
     const iconRect = el.getBoundingClientRect();
-    if (iconRect.width <= 0 || iconRect.height <= 0) continue;
+    if (iconRect.width <= 0 || iconRect.height <= 0) return;
     const label = el.querySelector('.glider-label');
-    if (!label) continue;
+    if (!label) return;
     const labelRect = label.getBoundingClientRect();
-    if (labelRect.width <= 0 || labelRect.height <= 0) continue;
+    if (labelRect.width <= 0 || labelRect.height <= 0) return;
     if (labelRect.left < mapRect.left + 2 || labelRect.right > mapRect.right - 2 ||
-        labelRect.top < mapRect.top + 2 || labelRect.bottom > mapRect.bottom - 2) continue;
-    if (barRect && markerRectsOverlap(labelRect, barRect, 4)) continue;
-
-    const a = m._data;
-    const priority = (isEmergency(a) ? 4 : 0) + (selectedTracks.has(a.address) ? 2 : 0) +
-      (pinnedAircraft.has(a.address) ? 1 : 0);
+        labelRect.top < mapRect.top + 2 || labelRect.bottom > mapRect.bottom - 2) return;
+    if (barRect && markerRectsOverlap(labelRect, barRect, 4)) return;
     candidates.push({ el, iconRect, labelRect, priority });
+  };
+
+  if (replayActive) {
+    replayGroup.eachLayer(m => {
+      collect(m, m._replayId === replayFollowAddress ? 4 : 0);
+    });
+  } else {
+    for (const m of markers.values()) {
+      const a = m._data;
+      if (!a) continue;
+      const priority = (isEmergency(a) ? 4 : 0) + (selectedTracks.has(a.address) ? 2 : 0) +
+        (pinnedAircraft.has(a.address) ? 1 : 0);
+      collect(m, priority);
+    }
   }
 
   if (!candidates.length) return;
@@ -1982,6 +2073,7 @@ function popup(a) {
   const actionButtons = isStation
     ? `<button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>`
     : `<button type="button" data-act="track" data-addr="${esc(a.address)}" class="${isTracked ? 'active' : ''}" aria-pressed="${isTracked}">Track</button>
+      <button type="button" data-act="replay" data-addr="${esc(a.address)}" title="Replay this aircraft over the last 24 hours">⏱ Replay</button>
       <button type="button" data-act="sar" data-addr="${esc(a.address)}">📋 SAR</button>
       <button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>
       <button type="button" data-act="igc" data-addr="${esc(a.address)}">⬇ IGC</button>`;
@@ -2257,7 +2349,7 @@ function render() {
       refreshMarkerPopup(key, a);
     }
 
-    if (followedAddress === key) map.panTo([a.lat, a.lon], { animate: true });
+    if (followedAddress === key) centerOnFollowed();
   });
 
   updateCoverageLayer();
@@ -2423,6 +2515,21 @@ document.addEventListener('click', e => {
     const txt = btn.dataset.sar || '';
     if (!txt) return;
     navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
+    return;
+  }
+  if (act === 'replay') {
+    if (!addr) return;
+    replayFollowAddress = addr.toLowerCase();
+    replayOnlyFocus = true;
+    replayDirection = 1;
+    followCenteringPaused = false;
+    syncReplayDirectionButton();
+    syncRecenterButton();
+    $('replaySlider').value = '0';
+    markers.get(addr)?.closePopup();
+    setReplayMode(true);
+    startReplayPlayback();
+    syncReplayFollowLabel();
     return;
   }
   const a = aircraft.find(x => x.address === addr);
@@ -2758,26 +2865,198 @@ async function fetchLive(force = false) {
   }
 }
 
+function replaySpeed() {
+  return REPLAY_SPEEDS[replaySpeedIndex];
+}
+
+function syncReplaySpeedButton() {
+  const btn = $('replaySpeed');
+  if (!btn) return;
+  const speed = replaySpeed();
+  btn.textContent = `${speed}×`;
+  btn.title = `Replay speed: ${speed}× (click to cycle)`;
+  btn.setAttribute('aria-label', `Replay speed ${speed} times`);
+}
+
+function replaySpanMs() {
+  const nowMs = serverNow();
+  if (replayRangeIndex >= REPLAY_RANGE_MINUTES.length) {
+    const d = new Date(nowMs);
+    const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    return Math.max(60000, nowMs - midnight);
+  }
+  return REPLAY_RANGE_MINUTES[replayRangeIndex] * 60000;
+}
+
+function syncReplayRangeButton() {
+  const btn = $('replayRange');
+  if (!btn) return;
+  const label = REPLAY_RANGE_LABELS[replayRangeIndex];
+  const title = `Replay window: ${REPLAY_RANGE_TITLES[replayRangeIndex]} (click to cycle)`;
+  btn.textContent = label;
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+}
+
+function syncReplayDirectionButton() {
+  const btn = $('replayReverse');
+  if (!btn) return;
+  const reversed = replayDirection < 0;
+  btn.classList.toggle('active', reversed);
+  btn.setAttribute('aria-pressed', String(reversed));
+  btn.title = reversed ? 'Rewinding — click to play forward' : 'Rewind replay';
+  btn.setAttribute('aria-label', reversed ? 'Rewind active, click to play forward' : 'Rewind replay');
+}
+
+function syncReplayFollowLabel() {
+  const label = $('replayFollowLabel');
+  const scopeBtn = $('replayClearFollow');
+  const hasFocus = !!replayFollowAddress;
+  if (label) {
+    label.hidden = !hasFocus;
+    if (hasFocus) {
+      const a = aircraft.find(x => x.address === replayFollowAddress);
+      const name = a ? displayName(a) : replayFollowAddress.toUpperCase();
+      label.textContent = `${replayOnlyFocus ? 'Following' : 'Centered on'}: ${name}`;
+    }
+  }
+  if (scopeBtn) {
+    scopeBtn.hidden = !hasFocus;
+    scopeBtn.textContent = replayOnlyFocus ? '👁 All' : '🎯 Only';
+    scopeBtn.title = replayOnlyFocus ? 'Show all aircraft while staying centered' : 'Show only this aircraft';
+    scopeBtn.setAttribute('aria-label', scopeBtn.title);
+  }
+}
+
+function replayTsFromSlider() {
+  const slider = $('replaySlider');
+  const ratio = Number(slider.value) / Math.max(1, Number(slider.max));
+  return serverNow() - (replaySpanMs() * (1 - ratio));
+}
+
+function updateReplaySliderFromTs() {
+  const slider = $('replaySlider');
+  const max = Math.max(1, Number(slider.max));
+  const ratio = 1 - ((serverNow() - replayTsMs) / replaySpanMs());
+  slider.value = String(Math.max(0, Math.min(max, ratio * max)));
+}
+
+function stopReplayPlayback() {
+  if (!replayTimer) return;
+  clearInterval(replayTimer);
+  replayTimer = null;
+  replayLastTickMs = 0;
+  $('replayPlay').textContent = '▶';
+  $('replayPlay').setAttribute('aria-label', 'Play replay');
+}
+
+function startReplayPlayback() {
+  if (replayTimer) return;
+  if (!replayTsMs) replayTsMs = replayTsFromSlider();
+  replayLastTickMs = Date.now();
+  $('replayPlay').textContent = '⏸';
+  $('replayPlay').setAttribute('aria-label', 'Pause replay');
+  replayTimer = setInterval(() => {
+    const wallNow = Date.now();
+    const elapsedMs = Math.max(0, wallNow - replayLastTickMs);
+    replayLastTickMs = wallNow;
+    replayTsMs += elapsedMs * replaySpeed() * replayDirection;
+    const nowMs = serverNow();
+    const spanMs = replaySpanMs();
+    if (replayTsMs > nowMs) replayTsMs = nowMs - spanMs;
+    else if (replayTsMs < nowMs - spanMs) replayTsMs = nowMs;
+    updateReplaySliderFromTs();
+    const minute = Math.floor(replayTsMs / 60000);
+    if (minute !== lastReplaySliceMinute) loadReplaySlice();
+  }, 1000);
+}
+
+function replayTrackLayers(points, weight, opacity, dashed = false) {
+  if (points.length < 2) return [];
+  if (!varioTrackMode) {
+    const color = selectedTracks.get(replayFollowAddress)?.color || '#57d3b0';
+    return [L.polyline(points.map(p => [p[0], p[1]]), { color, weight, opacity, dashArray: dashed ? '3 6' : null })];
+  }
+  const layers = [];
+  for (let i = 1; i < points.length; i++) {
+    const p0 = points[i - 1], p1 = points[i];
+    const dt = p1[3] - p0[3];
+    const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
+    layers.push(L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], {
+      color: varioColor(climb), weight, opacity, dashArray: dashed ? '3 6' : null
+    }));
+  }
+  return layers;
+}
+
+function updateReplayTrackLine() {
+  replayTrackGroup.clearLayers();
+  if (!replayFollowAddress || !replayTrackPoints.length) return;
+  const valid = replayTrackPoints.filter(p =>
+    Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[3]));
+  replayTrackLayers(valid, 2, 0.25, true).forEach(l => l.addTo(replayTrackGroup));
+  if (replayTsMs) {
+    const upTo = valid.filter(p => p[3] * 1000 <= replayTsMs);
+    replayTrackLayers(upTo, 3, 0.9).forEach(l => l.addTo(replayTrackGroup));
+  }
+}
+
+async function loadReplayTrack() {
+  replayTrackPoints = [];
+  replayTrackGroup.clearLayers();
+  if (!replayFollowAddress) return;
+  const since = Math.floor((serverNow() - replaySpanMs()) / 1000);
+  const params = new URLSearchParams({ track: '1', id: replayFollowAddress, since: String(since) });
+  try {
+    const res = await fetch(`ogn-proxy.php?${params}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    replayTrackPoints = Array.isArray(data.points) ? data.points : [];
+    updateReplayTrackLine();
+  } catch (e) {}
+}
+
 async function loadReplaySlice() {
-  const minsAgo = 1440 - Number($('replaySlider').value);
-  const ts = Math.floor(serverNow() / 1000) - (minsAgo * 60);
+  const ts = replayTsMs
+    ? Math.floor(replayTsMs / 1000)
+    : Math.floor(replayTsFromSlider() / 1000);
+  if (!replayTsMs) replayTsMs = ts * 1000;
+  lastReplaySliceMinute = Math.floor(ts / 60);
   $('replayTime').textContent = new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const b = map.getBounds();
+  updateReplayTrackLine();
+  const hasFocus = !!replayFollowAddress;
+  const filtering = hasFocus && replayOnlyFocus;
+  const b = filtering
+    ? { getSouth: () => -90, getNorth: () => 90, getWest: () => -180, getEast: () => 180 }
+    : map.getBounds();
   const params = new URLSearchParams({
     replay: '1', ts: String(ts),
     south: b.getSouth().toFixed(1), north: b.getNorth().toFixed(1),
     west: b.getWest().toFixed(1), east: b.getEast().toFixed(1)
   });
+  if (filtering) params.set('id', replayFollowAddress);
   try {
     const res = await fetch(`ogn-proxy.php?${params}`);
     if (!res.ok) return;
     const data = await res.json();
     replayGroup.clearLayers();
-    (data.aircraft || []).forEach(p => {
-      L.circleMarker([p.lat, p.lon], { radius: 6, color: '#38bdf8', fillColor: '#57d3b0', fillOpacity: 0.9, weight: 2 })
-        .bindTooltip(`${p.label}${p.alt != null ? ' · ' + fmtAlt(p.alt) : ''}`)
-        .addTo(replayGroup);
+    const points = data.aircraft || [];
+    replayPoints = points;
+    points.forEach(p => {
+      const isFocused = hasFocus && p.id === replayFollowAddress;
+      const name = esc(p.label);
+      const marker = L.marker([p.lat, p.lon], {
+        icon: L.divIcon({
+          className: `glider-icon replay-icon${isFocused ? ' focused' : ''}`,
+          html: `<div class="replay-dot${isFocused ? ' focused' : ''}"></div><div class="glider-label" title="${name}">${name}</div>`,
+          iconSize: [16, 16], iconAnchor: [8, 8]
+        })
+      }).bindTooltip(`${p.label}${p.alt != null ? ' · ' + fmtAlt(p.alt) : ''}${p.ts ? ' · ' + new Date(p.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}`);
+      marker._replayId = p.id;
+      marker.addTo(replayGroup);
     });
+    updateMarkerLabels();
+    if (hasFocus) centerOnFollowed();
   } catch (e) {}
 }
 
@@ -2789,12 +3068,27 @@ function setReplayMode(on) {
   syncBottomBarOffset();
   if (on) {
     map.removeLayer(clusterGroup); map.removeLayer(emergencyGroup);
+    replayTrackGroup.addTo(map);
     replayGroup.addTo(map);
+    replayTsMs = replayTsFromSlider();
+    syncReplayFollowLabel();
     loadReplaySlice();
+    loadReplayTrack();
   } else {
-    clearInterval(replayTimer); replayTimer = null; $('replayPlay').textContent = '▶';
-    $('replayPlay').setAttribute('aria-label', 'Play replay');
+    stopReplayPlayback();
+    replayTsMs = 0;
+    lastReplaySliceMinute = null;
+    replayFollowAddress = null;
+    replayPoints = [];
+    replayOnlyFocus = false;
+    replayDirection = 1;
+    followCenteringPaused = false;
+    syncReplayDirectionButton();
+    syncReplayFollowLabel();
+    syncRecenterButton();
     map.removeLayer(replayGroup); replayGroup.clearLayers();
+    map.removeLayer(replayTrackGroup); replayTrackGroup.clearLayers();
+    replayTrackPoints = [];
     clusterGroup.addTo(map); emergencyGroup.addTo(map);
     fetchLive(true);
   }
@@ -2986,23 +3280,46 @@ $('emergencyJump').addEventListener('click', () => {
 
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
-$('replaySlider').addEventListener('input', loadReplaySlice);
-$('replayPlay').addEventListener('click', () => {
-  if (replayTimer) {
-    clearInterval(replayTimer); replayTimer = null;
-    $('replayPlay').textContent = '▶';
-    $('replayPlay').setAttribute('aria-label', 'Play replay');
-  } else {
-    $('replayPlay').textContent = '⏸';
-    $('replayPlay').setAttribute('aria-label', 'Pause replay');
-    replayTimer = setInterval(() => {
-      let v = Number($('replaySlider').value) + 5;
-      if (v > 1440) v = 0;
-      $('replaySlider').value = String(v);
-      loadReplaySlice();
-    }, 1000);
-  }
+$('replaySlider').addEventListener('input', () => {
+  replayTsMs = replayTsFromSlider();
+  lastReplaySliceMinute = null;
+  loadReplaySlice();
 });
+$('replayPlay').addEventListener('click', () => {
+  if (replayTimer) stopReplayPlayback();
+  else startReplayPlayback();
+});
+$('replaySpeed').addEventListener('click', () => {
+  const wasPlaying = !!replayTimer;
+  if (wasPlaying) {
+    clearInterval(replayTimer);
+    replayTimer = null;
+  }
+  replaySpeedIndex = (replaySpeedIndex + 1) % REPLAY_SPEEDS.length;
+  syncReplaySpeedButton();
+  if (wasPlaying) startReplayPlayback();
+});
+$('replayReverse').addEventListener('click', () => {
+  replayDirection = -replayDirection;
+  syncReplayDirectionButton();
+});
+$('replayRange').addEventListener('click', () => {
+  replayRangeIndex = (replayRangeIndex + 1) % REPLAY_RANGE_LABELS.length;
+  syncReplayRangeButton();
+  $('replaySlider').value = '0';
+  replayTsMs = serverNow() - replaySpanMs();
+  lastReplaySliceMinute = null;
+  if (replayActive) { loadReplaySlice(); loadReplayTrack(); }
+});
+$('replayClearFollow').addEventListener('click', () => {
+  replayOnlyFocus = !replayOnlyFocus;
+  syncReplayFollowLabel();
+  loadReplaySlice();
+});
+syncReplaySpeedButton();
+syncReplayDirectionButton();
+syncReplayRangeButton();
+syncReplayFollowLabel();
 
 $('btnResetFilters').addEventListener('click', resetFilters);
 

@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261123g">
+<link rel="stylesheet" href="style.css?v=20261123n">
 </head>
 <body>
 <div class="app">
@@ -106,16 +106,27 @@
       </div>
     </div>
     <div id="map" aria-label="Map showing live OGN aircraft"></div>
+    <div id="varioLegend" class="vario-legend" role="img" aria-label="Vario colour scale from sink to climb" hidden>
+      <span id="varioLegendLow" class="vario-legend-label"></span>
+      <span class="vario-legend-bar"></span>
+      <span id="varioLegendHigh" class="vario-legend-label"></span>
+    </div>
+    <button id="recenterBtn" class="recenter-btn" type="button" aria-label="Center map on followed aircraft" title="Center map on followed aircraft" hidden>◎ Recenter</button>
     <button id="scrollToListBtn" class="scroll-to-list-btn" type="button" aria-label="Scroll to aircraft list" title="Scroll to aircraft list">↓</button>
     <div id="emergencyBanner" class="emerg-banner" role="status" aria-live="assertive" aria-atomic="true">
       <span id="emergencyBannerText">Emergency Alert</span>
       <button id="emergencyJump" type="button">Jump to Alert</button>
     </div>
-    <div id="replayBar" class="replay-bar" role="region" aria-label="24-hour replay controls">
+    <div id="replayBar" class="replay-bar" role="region" aria-label="Replay controls">
       <button id="replayPlay" type="button" aria-label="Play replay">▶</button>
-      <label class="sr-only" for="replaySlider">Replay time (minutes ago)</label>
-      <input id="replaySlider" type="range" min="0" max="1440" value="1440" step="1" aria-label="Replay time slider">
+      <button id="replayReverse" type="button" aria-label="Rewind replay" aria-pressed="false" title="Rewind replay">⏪</button>
+      <button id="replaySpeed" type="button" aria-label="Replay speed 1 times" title="Replay speed: 1× (click to cycle)">1×</button>
+      <button id="replayRange" type="button" aria-label="Replay window: Today" title="Replay window: Today (from midnight) (click to cycle)">Today</button>
+      <label class="sr-only" for="replaySlider">Replay position within the selected window</label>
+      <input id="replaySlider" type="range" min="0" max="1440" value="1440" step="any" aria-label="Replay time slider">
       <span id="replayTime" style="white-space:nowrap;font-weight:600" aria-live="polite">--:--</span>
+      <span id="replayFollowLabel" class="replay-follow-label" hidden></span>
+      <button id="replayClearFollow" type="button" title="Show all aircraft in replay" aria-label="Show all aircraft in replay" hidden>👁 All</button>
       <button id="replayExit" type="button" aria-label="Exit replay">✕</button>
     </div>
 
@@ -143,6 +154,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261123o"></script>
+<script src="app.js?v=20261123y"></script>
 </body>
 </html>

@@ -491,9 +491,14 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
     }
     [$south, $north, $w, $e, $fullWorld] = $bounds;
     $tsBucket = (int)(floor($ts / 60) * 60);
+    $followId = '';
+    if (isset($_GET['id'])) {
+        $candidate = strtolower(trim((string)$_GET['id']));
+        if (preg_match('/^[a-z0-9_-]{1,64}$/', $candidate)) $followId = $candidate;
+    }
 
     header('Cache-Control: public, max-age=30');
-    $cacheKey = 'rpl_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $tsBucket));
+    $cacheKey = 'rpl_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%s', $south, $north, $w, $e, $fullWorld ? 1 : 0, $tsBucket, $followId));
     if (($cached = cache_get($cacheDir, $cacheKey, 30)) !== null) {
         echo $cached;
         exit;
@@ -512,6 +517,11 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
             ':t1'    => $tsBucket - 60,
             ':t2'    => $tsBucket + 60,
         ];
+        $idClause = '';
+        if ($followId !== '') {
+            $idClause = ' AND id = :id';
+            $params[':id'] = $followId;
+        }
         if ($fullWorld) {
             $lonClause = '1=1';
         } else {
@@ -528,7 +538,7 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
                 FROM tracks
                 WHERE ts BETWEEN :t1 AND :t2
                   AND lat BETWEEN :south AND :north
-                  AND {$lonClause}
+                  AND {$lonClause}{$idClause}
                 GROUP BY id
                 LIMIT 2000
             ) latest
