@@ -65,6 +65,9 @@ let hashMessagePopup = null;
 let bookmarks = [];
 let measureMode = false;
 let measurePoints = [];
+let selectedMeasureIndex = -1;
+let measureLine = null;
+let measureMarkers = [];
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -334,12 +337,29 @@ const FullscreenControl = L.Control.extend({
     button.textContent = '⤢';
     button.setAttribute('aria-label', 'Maximize map');
     button.title = 'Maximize map';
+
+    const clearTracksButton = L.DomUtil.create('button', 'leaflet-control-clear-tracks-btn', container);
+    clearTracksButton.type = 'button';
+    clearTracksButton.hidden = true;
+    clearTracksButton.innerHTML =
+      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
+      '<path d="M2.5 17.5c3-8 6.5 3 9.5-4 2-4.5 4-2 6-6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+      '<path d="M15.5 15.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+      '</svg>';
+    clearTracksButton.setAttribute('aria-label', 'Clear all tracks');
+    clearTracksButton.title = 'Clear all tracks';
     L.DomEvent.disableClickPropagation(container);
     L.DomEvent.on(button, 'click', event => {
       L.DomEvent.preventDefault(event);
       toggleMapFullscreen();
     });
+    L.DomEvent.on(clearTracksButton, 'click', event => {
+      L.DomEvent.preventDefault(event);
+      clearAllTracks();
+      render();
+    });
     this._button = button;
+    this._clearTracksButton = clearTracksButton;
     return container;
   }
 });
@@ -381,6 +401,12 @@ function syncMapFullscreenUi() {
   button.title = active ? 'Restore map' : 'Maximize map';
   button.setAttribute('aria-pressed', String(active));
   requestAnimationFrame(() => map.invalidateSize());
+}
+
+function syncClearTracksButton() {
+  const button = mapFullscreenControl?._clearTracksButton;
+  if (!button) return;
+  button.hidden = selectedTracks.size === 0;
 }
 
 const mapFullscreenControl = new FullscreenControl().addTo(map);
@@ -677,6 +703,7 @@ function togglePin(address) {
 }
 
 const selectedTracks = new Map();
+syncClearTracksButton();
 let trackReqSeq = 0, colorSeq = 0;
 
 const ddbCache = new Map();
@@ -1135,6 +1162,7 @@ function removeTrack(address) {
     updateUrlHash();
   }
   updateListHint();
+  syncClearTracksButton();
 }
 
 function clearAllTracks() {
@@ -1145,6 +1173,7 @@ function clearAllTracks() {
   activeTrackAddress = null;
   updateListHint();
   updateUrlHash();
+  syncClearTracksButton();
 }
 
 function buildTrackQuery(address) {
@@ -1441,6 +1470,7 @@ function toggleSelection(address, openOnMap = false) {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
     activeTrackAddress = address;
     updateUrlHash();
+    syncClearTracksButton();
     loadTrack(address);
     if (openOnMap) {
       if (window.innerWidth <= 800) $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1463,38 +1493,141 @@ function toggleSelection(address, openOnMap = false) {
   requestAnimationFrame(() => focusListRow(address));
 }
 
+const MEASURE_CLEAR_HTML =
+  `<button type="button" class="measure-clear" data-measure-clear title="Clear measurement" aria-label="Clear measurement">✕</button>`;
+
+function measureIcon() {
+  return L.divIcon({
+    className: 'measure-dot',
+    html: '<span></span>',
+    iconSize: [18, 18],
+    iconAnchor: [9, 9]
+  });
+}
+
 function clearMeasure() {
   measurePoints = [];
+  selectedMeasureIndex = -1;
+  measureLine = null;
+  measureMarkers = [];
   measureLayer.clearLayers();
   const readout = $('measureReadout');
   if (readout) readout.hidden = true;
 }
 
-function renderMeasure() {
-  measureLayer.clearLayers();
+function syncMeasureSelection() {
+  if (selectedMeasureIndex >= measurePoints.length) {
+    selectedMeasureIndex = measurePoints.length ? measurePoints.length - 1 : -1;
+  }
+  measureMarkers.forEach((marker, index) => {
+    const el = marker.getElement();
+    if (el) el.classList.toggle('selected', index === selectedMeasureIndex);
+    marker.setZIndexOffset(index === selectedMeasureIndex ? 1100 : 1000);
+  });
+}
+
+function selectMeasurePoint(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= measurePoints.length) return;
+  selectedMeasureIndex = index;
+  syncMeasureSelection();
+  updateMeasureReadout();
+}
+
+function updateMeasureReadout() {
   const readout = $('measureReadout');
   if (!readout) return;
-  if (measurePoints.length < 2) {
+  if (!measurePoints.length) {
     readout.hidden = true;
+    return;
+  }
+  if (measurePoints.length === 1) {
+    readout.innerHTML = `<span>Point 1 set · tap second point</span>${MEASURE_CLEAR_HTML}`;
+    readout.hidden = false;
     return;
   }
   const [p1, p2] = measurePoints;
   const km = haversineKm(p1[0], p1[1], p2[0], p2[1]);
   const brg = bearingDeg(p1[0], p1[1], p2[0], p2[1]);
-  L.polyline([p1, p2], { color: '#38bdf8', weight: 2, dashArray: '6 4', interactive: false }).addTo(measureLayer);
-  for (const p of [p1, p2]) {
-    L.circleMarker(p, { radius: 4, color: '#38bdf8', weight: 1, fillColor: '#38bdf8', fillOpacity: 1, interactive: false }).addTo(measureLayer);
-  }
   readout.innerHTML =
-    `<span>${esc(fmtDistanceKm(km))} · ${Math.round(brg)}°</span>` +
-    `<button type="button" class="measure-clear" data-measure-clear title="Clear measurement" aria-label="Clear measurement">✕</button>`;
+    `<span>${esc(fmtDistanceKm(km))} · ${Math.round(brg)}°</span>${MEASURE_CLEAR_HTML}`;
   readout.hidden = false;
+}
+
+function nudgeMeasurePoint(index, event, marker) {
+  const vert = event.key === 'ArrowUp' ? 1 : event.key === 'ArrowDown' ? -1 : 0;
+  const horiz = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+  if (!vert && !horiz) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectMeasurePoint(index);
+  const point = measurePoints[index];
+  if (!point) return;
+  const meters = event.shiftKey ? 100 : 10;
+  const lat = Math.max(-85, Math.min(85, point[0] + vert * meters / 111320));
+  const cosLat = Math.max(Math.cos(lat * Math.PI / 180), 0.01);
+  let lon = point[1] + horiz * meters / (111320 * cosLat);
+  if (lon > 180) lon -= 360;
+  else if (lon < -180) lon += 360;
+  measurePoints[index] = [lat, lon];
+  marker.setLatLng([lat, lon]);
+  if (measureLine) measureLine.setLatLngs(measurePoints);
+  updateMeasureReadout();
+}
+
+function renderMeasure() {
+  measureLayer.clearLayers();
+  measureLine = null;
+  measureMarkers = [];
+  if (selectedMeasureIndex >= measurePoints.length) {
+    selectedMeasureIndex = measurePoints.length ? measurePoints.length - 1 : -1;
+  }
+  if (measurePoints.length >= 2) {
+    measureLine = L.polyline(measurePoints, { color: '#38bdf8', weight: 2, dashArray: '6 4', interactive: false }).addTo(measureLayer);
+  }
+  measurePoints.forEach((point, index) => {
+    const marker = L.marker(point, {
+      icon: measureIcon(),
+      draggable: true,
+      autoPan: true,
+      keyboard: true,
+      zIndexOffset: index === selectedMeasureIndex ? 1100 : 1000,
+      title: `Measurement point ${index + 1}`
+    }).addTo(measureLayer);
+    marker.on('click', e => {
+      if (e && e.originalEvent) L.DomEvent.stopPropagation(e.originalEvent);
+      selectMeasurePoint(index);
+    });
+    marker.on('dragstart', () => {
+      selectMeasurePoint(index);
+      const el = marker.getElement();
+      if (el) el.classList.add('dragging');
+    });
+    marker.on('drag', e => {
+      const latlng = e.target.getLatLng();
+      measurePoints[index] = [latlng.lat, latlng.lng];
+      if (measureLine) measureLine.setLatLngs(measurePoints);
+      updateMeasureReadout();
+    });
+    marker.on('dragend', () => {
+      const el = marker.getElement();
+      if (el) el.classList.remove('dragging');
+      renderMeasure();
+    });
+    const el = marker.getElement();
+    if (el) {
+      el.addEventListener('keydown', event => nudgeMeasurePoint(index, event, marker));
+    }
+    measureMarkers.push(marker);
+  });
+  syncMeasureSelection();
+  updateMeasureReadout();
 }
 
 function addMeasurePoint(lat, lon) {
   if (!measureMode || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
   if (measurePoints.length >= 2) measurePoints = [];
   measurePoints.push([lat, lon]);
+  selectedMeasureIndex = measurePoints.length - 1;
   renderMeasure();
 }
 
@@ -1506,18 +1639,14 @@ function setMeasureMode(on) {
     btn.setAttribute('aria-pressed', String(measureMode));
   }
   map.getContainer().style.cursor = measureMode ? 'crosshair' : '';
-  if (!measureMode) clearMeasure();
+  // The measurement stays visible after exiting so it can still be inspected
+  // and edited; the readout's ✕ button is the explicit clear action.
 }
 
 map.on('click', e => {
-  if (measureMode) {
-    addMeasurePoint(e.latlng.lat, e.latlng.lng);
-    return;
-  }
-  if (selectedTracks.size > 0) {
-    clearAllTracks();
-    render();
-  }
+  if (measureMode) addMeasurePoint(e.latlng.lat, e.latlng.lng);
+  // Plain map taps must not wipe selected tracks; Escape and the popup
+  // Track toggle are the deliberate clear actions.
 });
 
 map.on('dragstart', () => { pauseFollowCentering(); });
@@ -2551,12 +2680,7 @@ function buildRowHtml(a, now) {
   if (rType !== 15) {
     const isFollowed = followedAddress === a.address;
     const name = esc(displayName(a));
-    rightColHtml +=
-      `<span class="row-mini-actions">` +
-      `<button type="button" class="row-mini-btn" data-center="${esc(a.address)}" title="Center map on ${name}" aria-label="Center map on ${name}">⌖</button>` +
-      `<button type="button" class="row-mini-btn" data-coords="${esc(a.address)}" title="Copy coordinates" aria-label="Copy coordinates for ${name}">📋</button>` +
-      `</span>` +
-      `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
+    rightColHtml += `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
   }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
@@ -2854,24 +2978,6 @@ $('aircraftList').addEventListener('click', e => {
     else if (act === 'clear-search') { $('search').value = ''; updateSearchUi(); clearSearch24h(); render(); }
     else if (act === 'fit') fitToResults();
     else if (act === 'refresh') fetchLive(true);
-    return;
-  }
-  const centerBtn = e.target.closest('[data-center]');
-  if (centerBtn) {
-    e.stopPropagation();
-    const a = findAircraftByAddress(centerBtn.dataset.center);
-    if (a && Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
-      map.setView([a.lat, a.lon], Math.max(map.getZoom(), 13));
-    }
-    return;
-  }
-  const coordsBtn = e.target.closest('[data-coords]');
-  if (coordsBtn) {
-    e.stopPropagation();
-    const a = findAircraftByAddress(coordsBtn.dataset.coords);
-    if (a && Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
-      copyTextToClipboard(`${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`, 'Coordinates copied');
-    }
     return;
   }
   const pinBtn = e.target.closest('.pin-btn');
@@ -4041,11 +4147,34 @@ $('scrollToListBtn')?.addEventListener('click', () => {
 const mapFilterControl = $('mapFilterControl');
 const mapFilterToggle = $('mapFilterToggle');
 const mapFilterPanel = $('mapFilterPanel');
+const compactMenuQuery = window.matchMedia('(max-width:800px)');
+let menuDefaultsApplied = false;
+
+function applyMenuDefaults() {
+  if (menuDefaultsApplied) return;
+  menuDefaultsApplied = true;
+  for (const section of mapFilterPanel.querySelectorAll('.collapsible-section')) section.open = false;
+}
+
+if (typeof compactMenuQuery.addEventListener === 'function') {
+  compactMenuQuery.addEventListener('change', event => {
+    menuDefaultsApplied = false;
+    if (event.matches) applyMenuDefaults();
+  });
+} else if (typeof compactMenuQuery.addListener === 'function') {
+  compactMenuQuery.addListener(event => {
+    menuDefaultsApplied = false;
+    if (event.matches) applyMenuDefaults();
+  });
+}
+applyMenuDefaults();
+
 function openFilterPanel() {
   if (soundingIsOpen()) setSoundingOpen(false);
   mapFilterPanel.hidden = false;
   mapFilterToggle.setAttribute('aria-expanded', 'true');
-  const first = mapFilterPanel.querySelector('input,select,button');
+  const first = [...mapFilterPanel.querySelectorAll('summary,input,select,button')]
+    .find(el => el.getClientRects().length > 0);
   if (first) first.focus();
 }
 function closeFilterPanel(restoreFocus = false) {
@@ -4060,6 +4189,38 @@ mapFilterToggle.addEventListener('click', event => {
   else closeFilterPanel(true);
 });
 mapFilterPanel.addEventListener('click', event => event.stopPropagation());
+
+const shortcutsControl = $('shortcutsControl');
+const shortcutsModal = $('shortcutsModal');
+const btnShortcuts = $('btnShortcuts');
+function openShortcuts(restoreFocus = false) {
+  if (!shortcutsModal.hidden) return;
+  shortcutsModal.hidden = false;
+  btnShortcuts.setAttribute('aria-expanded', 'true');
+  if (restoreFocus) {
+    const close = $('shortcutsClose');
+    if (close) close.focus();
+  }
+}
+function closeShortcuts(restoreFocus = false) {
+  if (shortcutsModal.hidden) return;
+  shortcutsModal.hidden = true;
+  btnShortcuts.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) btnShortcuts.focus();
+}
+function toggleShortcuts(restoreFocus = false) {
+  if (shortcutsModal.hidden) openShortcuts(restoreFocus);
+  else closeShortcuts(restoreFocus);
+}
+btnShortcuts.addEventListener('click', event => {
+  event.stopPropagation();
+  toggleShortcuts(true);
+});
+$('shortcutsClose').addEventListener('click', event => {
+  event.stopPropagation();
+  closeShortcuts(true);
+});
+shortcutsModal.addEventListener('click', event => event.stopPropagation());
 
 function saveBookmarks() {
   try {
@@ -4115,7 +4276,7 @@ $('btnSaveBookmark').addEventListener('click', () => {
 $('bookmarkSaveCancel').addEventListener('click', () => { $('bookmarkSaveRow').hidden = true; });
 $('bookmarkName').addEventListener('keydown', e => {
   if (e.key === 'Enter') { e.preventDefault(); $('bookmarkSaveConfirm').click(); }
-  else if (e.key === 'Escape') { e.preventDefault(); $('bookmarkSaveRow').hidden = true; }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); $('bookmarkSaveRow').hidden = true; }
 });
 $('bookmarkSaveConfirm').addEventListener('click', () => {
   if (bookmarks.length >= 4) {
@@ -4142,17 +4303,28 @@ $('bookmarkSaveConfirm').addEventListener('click', () => {
 
 document.addEventListener('click', e => {
   if (!mapFilterControl.contains(e.target)) closeFilterPanel(false);
+  if (!shortcutsControl.contains(e.target)) closeShortcuts(false);
 });
+function aircraftForCopyShortcut() {
+  const list = $('aircraftList');
+  const active = document.activeElement;
+  if (list && active && list.contains(active)) {
+    const row = active.closest('.aircraft[data-key]');
+    if (row) return findAircraftByAddress(row.dataset.key);
+  }
+  return activeTrackAddress ? findAircraftByAddress(activeTrackAddress) : null;
+}
+
 document.addEventListener('keydown', event => {
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   const target = event.target;
   const tag = target && target.tagName ? String(target.tagName).toUpperCase() : '';
   const editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!(target && target.isContentEditable);
 
-  if (editable) return;
-
   if (event.key === 'Escape') {
     event.preventDefault();
+    if (!shortcutsModal.hidden) { closeShortcuts(true); return; }
+    if (editable && target && typeof target.blur === 'function') { target.blur(); return; }
     if (measureMode) setMeasureMode(false);
     else if (!mapFilterPanel.hidden) closeFilterPanel(true);
     else if (soundingIsOpen()) setSoundingOpen(false);
@@ -4161,17 +4333,36 @@ document.addEventListener('keydown', event => {
     return;
   }
 
+  if (editable) return;
+
   const key = event.key.toLowerCase();
-  if (event.key === '/') {
+  if (event.key === '?') {
+    event.preventDefault();
+    toggleShortcuts(true);
+  } else if (event.key === '/') {
     event.preventDefault();
     $('search').focus();
     $('search').select();
   } else if (key === 'r') {
     event.preventDefault();
     setReplayMode(!replayActive);
+  } else if (key === 'm') {
+    event.preventDefault();
+    setMeasureMode(!measureMode);
   } else if (key === 'f') {
     event.preventDefault();
     if (!replayActive && activeTrackAddress) toggleFollow(activeTrackAddress);
+  } else if (key === 'c') {
+    // Row-focused C is handled (and stops propagation) by #aircraftList above.
+    // This fallback covers map/toolbar focus while a track is active.
+    const a = aircraftForCopyShortcut();
+    if (a && Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
+      event.preventDefault();
+      copyTextToClipboard(
+        event.shiftKey ? buildSarText(a) : `${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
+        event.shiftKey ? 'SAR info copied' : 'Coordinates copied'
+      );
+    }
   }
 });
 

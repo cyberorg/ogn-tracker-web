@@ -61,6 +61,16 @@ function extract_ogn_stream_name(string $line): string {
     return clean_ogn_name($m[1]);
 }
 
+/**
+ * Stable 24-bit identity for an OGN/FLARM/FANET packet. The prefix changes
+ * between OGN, FLR and FNT relays, but the trailing hex is the same device.
+ * Returns '' when the packet has no usable APRS id field.
+ */
+function packet_hex_id(string $raw): string {
+    if (!preg_match('/\bid[0-9a-fA-F]{2}([0-9a-fA-F]{6,8})\b/i', $raw, $m)) return '';
+    return strtolower(substr($m[1], -6));
+}
+
 function open_db(string $dbFile): PDO {
     $pdo = new PDO('sqlite:' . $dbFile, null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
@@ -370,14 +380,14 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
     if ($since !== false && $since !== null) {
         $cutoff     = max($now - 86400, min($now, $since));
-        $cacheKey   = 'trk_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
+        $cacheKey   = 'trk2_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
         $metaWindow = max(0, $now - $cutoff);
     } else {
         $window = filter_input(INPUT_GET, 'window', FILTER_VALIDATE_INT);
         if ($window === false || $window === null) $window = 900;
         $window     = max(60, min(86400, $window));
         $cutoff     = $now - $window;
-        $cacheKey   = 'trk_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
+        $cacheKey   = 'trk2_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
         $metaWindow = $window;
     }
 
@@ -394,14 +404,38 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
     try {
         $pdo = open_db($dbFile);
+
+        // Resolve OGN/FLR/FNT aliases of the same device so one selected
+        // aircraft draws one continuous history instead of three fragments.
+        $trackIds = [$id];
+        $hexStmt = $pdo->prepare('SELECT ddb_id, raw FROM aircraft WHERE id = :id LIMIT 1');
+        $hexStmt->execute([':id' => $id]);
+        $metaRow = $hexStmt->fetch(PDO::FETCH_ASSOC);
+        $hex = '';
+        if ($metaRow) {
+            $hex = strtolower((string)($metaRow['ddb_id'] ?? ''));
+            if ($hex === '') $hex = packet_hex_id((string)($metaRow['raw'] ?? ''));
+        }
+        if ($hex !== '') {
+            $aliasStmt = $pdo->prepare('SELECT DISTINCT id FROM aircraft WHERE ddb_id = :hex');
+            $aliasStmt->execute([':hex' => $hex]);
+            while (($alias = $aliasStmt->fetchColumn()) !== false) {
+                $alias = strtolower((string)$alias);
+                if ($alias !== '' && !in_array($alias, $trackIds, true)) $trackIds[] = $alias;
+            }
+        }
+
+        $placeholders = implode(',', array_fill(0, count($trackIds), '?'));
         $stmt = $pdo->prepare('
             SELECT lat, lon, alt, ts
             FROM tracks
-            WHERE id = :id AND ts >= :cutoff
+            WHERE id IN (' . $placeholders . ') AND ts >= ?
             ORDER BY ts ASC
             LIMIT ' . ($full ? 100000 : 20000) . '
         ');
-        $stmt->execute([':id' => $id, ':cutoff' => $cutoff]);
+        $execParams = $trackIds;
+        $execParams[] = $cutoff;
+        $stmt->execute($execParams);
 
         $points = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
@@ -426,7 +460,12 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
             $points = $thinned;
         }
 
-        $json = json_encode(['id' => $id, 'window' => $metaWindow, 'points' => $points]);
+        $json = json_encode([
+            'id'         => $id,
+            'window'     => $metaWindow,
+            'merged_ids' => $trackIds,
+            'points'     => $points,
+        ]);
         if ($json !== false) {
             cache_set($cacheDir, $cacheKey, $json);
             echo $json;
@@ -571,38 +610,104 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             $params[':east'] = $e;
         }
 
-        $stmt = $pdo->prepare("
-            SELECT t.id, t.ts, t.lat, t.lon, t.alt,
-                   COALESCE(a.raw, '') AS aircraft_raw,
-                   COALESCE(d.aircraft_type, '') AS ddb_type
+        // Resolve candidate aircraft first, then fetch only their fixes. Doing
+        // the type filter in PHP preserves the packet/DDB fallback logic and
+        // stops station or ADS-B traffic from consuming the global row budget.
+        $idStmt = $pdo->prepare("
+            SELECT DISTINCT t.id
             FROM tracks t
-            LEFT JOIN aircraft a ON a.id = t.id
-            LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE t.ts >= :cutoff
               AND t.lat BETWEEN :south AND :north
               AND {$lonClause}
               AND t.alt IS NOT NULL
-            ORDER BY t.ts DESC
-            LIMIT " . SOUNDING_MAX_TRACK_ROWS . "
         ");
-        $stmt->execute($params);
-        $byAircraft = [];
-        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $id = (string)$row['id'];
-            if (!isset($byAircraft[$id])) {
-                $byAircraft[$id] = [
-                    'raw' => (string)$row['aircraft_raw'],
-                    'ddb' => (string)$row['ddb_type'],
-                    'pts' => [],
+        $idStmt->execute($params);
+        $candidateIds = [];
+        while (($candidateId = $idStmt->fetchColumn()) !== false) {
+            $candidateIds[] = (string)$candidateId;
+        }
+
+        $typeInfo = [];
+        foreach (array_chunk($candidateIds, 400) as $idChunk) {
+            $names = [];
+            $typeParams = [];
+            foreach ($idChunk as $i => $id) {
+                $name = ':tid' . $i;
+                $names[] = $name;
+                $typeParams[$name] = $id;
+            }
+            $typeStmt = $pdo->prepare("
+                SELECT a.id,
+                       COALESCE(a.raw, '') AS aircraft_raw,
+                       COALESCE(d.aircraft_type, '') AS ddb_type
+                FROM aircraft a
+                LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+                WHERE a.id IN (" . implode(',', $names) . ")
+            ");
+            $typeStmt->execute($typeParams);
+            while ($typeRow = $typeStmt->fetch(PDO::FETCH_ASSOC)) {
+                $typeInfo[(string)$typeRow['id']] = [
+                    'raw' => (string)$typeRow['aircraft_raw'],
+                    'ddb' => (string)$typeRow['ddb_type'],
                 ];
             }
-            $byAircraft[$id]['pts'][] = [
-                'ts' => (int)$row['ts'],
-                'lat' => (float)$row['lat'],
-                'lon' => (float)$row['lon'],
-                'alt' => (float)$row['alt'],
-            ];
         }
+
+        $soundingIds = [];
+        foreach ($typeInfo as $id => $info) {
+            $type = sounding_aircraft_type($info['raw'], $info['ddb']);
+            if ($type === 1 || $type === 7) $soundingIds[] = (string)$id;
+        }
+
+        $byAircraft = [];
+        $collectedRows = 0;
+        $perAircraftCounts = [];
+        foreach (array_chunk($soundingIds, 400) as $idChunk) {
+            if ($collectedRows >= SOUNDING_MAX_TRACK_ROWS) break;
+            $names = [];
+            $pointParams = $params;
+            foreach ($idChunk as $i => $id) {
+                $name = ':pid' . $i;
+                $names[] = $name;
+                $pointParams[$name] = $id;
+            }
+            $pointStmt = $pdo->prepare("
+                SELECT t.id, t.ts, t.lat, t.lon, t.alt
+                FROM tracks t
+                WHERE t.id IN (" . implode(',', $names) . ")
+                  AND t.ts >= :cutoff
+                  AND t.lat BETWEEN :south AND :north
+                  AND {$lonClause}
+                  AND t.alt IS NOT NULL
+                ORDER BY t.id, t.ts DESC
+            ");
+            $pointStmt->execute($pointParams);
+            while ($row = $pointStmt->fetch(PDO::FETCH_ASSOC)) {
+                if ($collectedRows >= SOUNDING_MAX_TRACK_ROWS) break;
+                $id = (string)$row['id'];
+                $count = $perAircraftCounts[$id] ?? 0;
+                if ($count >= SOUNDING_MAX_POINTS_PER_AC) continue;
+                if (!isset($byAircraft[$id])) {
+                    $byAircraft[$id] = [
+                        'raw' => $typeInfo[$id]['raw'] ?? '',
+                        'ddb' => $typeInfo[$id]['ddb'] ?? '',
+                        'pts' => [],
+                    ];
+                }
+                $byAircraft[$id]['pts'][] = [
+                    'ts' => (int)$row['ts'],
+                    'lat' => (float)$row['lat'],
+                    'lon' => (float)$row['lon'],
+                    'alt' => (float)$row['alt'],
+                ];
+                $perAircraftCounts[$id] = $count + 1;
+                $collectedRows++;
+            }
+        }
+        // Fixes were read newest-first; restore true time order so turn and
+        // climb segmentation always sees consecutive samples chronologically.
+        foreach ($byAircraft as &$entry) $entry['pts'] = array_reverse($entry['pts']);
+        unset($entry);
 
         // Only densely logged sailplanes/paragliders are useful soundings. Keep
         // at most the newest 200 fixes per aircraft so one busy ID cannot fill
@@ -934,7 +1039,8 @@ if (isset($_GET['search']) && $_GET['search'] === '1') {
         echo json_encode(['results' => []]);
         exit;
     }
-    $cacheKey = 'search24_' . md5($q);
+    // v2: collapse OGN/FLR/FNT aliases of the same 24-bit device.
+    $cacheKey = 'search24_v2_' . md5($q);
     if (!is_file($dbFile)) {
         echo json_encode(['results' => []]);
         exit;
@@ -968,8 +1074,9 @@ if (isset($_GET['search']) && $_GET['search'] === '1') {
         ");
         $stmt->execute([':cutoff' => time() - 86400, ':needle' => $q]);
         $results = [];
+        $seenHex = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $results[] = [
+            $entry = [
                 'id'            => (string)$row['id'],
                 'ddb_id'        => (string)($row['ddb_id'] ?? ''),
                 'raw'           => (string)$row['raw'],
@@ -982,7 +1089,19 @@ if (isset($_GET['search']) && $_GET['search'] === '1') {
                 'model'         => (string)($row['model'] ?? ''),
                 'aircraft_type' => (string)($row['aircraft_type'] ?? ''),
             ];
+            $hex = strtolower((string)($row['ddb_id'] ?? ''));
+            if ($hex === '') $hex = packet_hex_id($entry['raw']);
+            if ($hex !== '' && isset($seenHex[$hex])) {
+                // Rows arrive newest-first; only a later emergency row can win.
+                if ($entry['timestamp'] <= $seenHex[$hex]['timestamp']) continue;
+                $results[$seenHex[$hex]['index']] = $entry;
+                $seenHex[$hex]['timestamp'] = $entry['timestamp'];
+                continue;
+            }
+            if ($hex !== '') $seenHex[$hex] = ['index' => count($results), 'timestamp' => $entry['timestamp']];
+            $results[] = $entry;
         }
+        $results = array_values($results);
         $json = json_encode(['results' => $results], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
         if ($json !== false) {
             cache_set($cacheDir, $cacheKey, $json);
@@ -1064,7 +1183,8 @@ try {
     $updated = (int)($metaRows['updated'] ?? 0);
     $namesUpdated = (int)($metaRows['names_updated'] ?? 0);
 
-    $cacheKey = 'live_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0, $namesUpdated));
+    // v2: packets sharing a device hex are collapsed to one representative.
+    $cacheKey = 'live2_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0, $namesUpdated));
     if (!$noCache && ($cached = cache_get($cacheDir, $cacheKey, $liveTtl)) !== null) {
         echo $cached;
         exit;
@@ -1086,26 +1206,27 @@ try {
         $params[':east'] = $e;
     }
 
-    $packets = [];
-    $names   = [];
-    $ddb     = [];
+    $packets      = [];
+    $names        = [];
+    $ddb          = [];
+    $packetByHex  = [];
 
-    $collectRow = static function (array $row) use (&$packets, &$names, &$ddb, $includeMeta): void {
-        $id = $row['id'];
-        $packets[$id] = [
-            'raw'       => $row['raw'],
-            'timestamp' => (int)$row['timestamp'],
-        ];
+    $collectRow = static function (array $row) use (&$packets, &$names, &$ddb, &$packetByHex, $includeMeta): void {
+        $id  = (string)$row['id'];
+        $ts  = (int)$row['timestamp'];
+        $raw = (string)($row['raw'] ?? '');
+        $ddbId = strtolower((string)($row['ddb_id'] ?? ''));
+        $hex = $ddbId !== '' ? $ddbId : packet_hex_id($raw);
+
         if ($includeMeta) {
-            $ddbId = $row['ddb_id'] ?? '';
-            $rawName = extract_ogn_stream_name((string)($row['raw'] ?? ''));
+            $rawName = extract_ogn_stream_name($raw);
             $storedName = clean_ogn_name($row['name'] ?? '');
             if ($rawName !== '') $names[$id] = $rawName;
             elseif ($storedName !== '') $names[$id] = $storedName;
             // PureTrack labels are keyed by device hex; expose them under the
             // DDB ID too so the client can resolve devices with prefixed callsigns.
             $hexName = clean_ogn_name($row['hex_name'] ?? '');
-            if ($ddbId !== '' && $hexName !== '') $names[strtolower((string)$ddbId)] = $hexName;
+            if ($ddbId !== '' && $hexName !== '') $names[$ddbId] = $hexName;
             if ($ddbId !== '' && (isset($row['callsign']) || isset($row['registration']) || isset($row['model']) || isset($row['aircraft_type']))) {
                 $ddb[$ddbId] = [
                     'callsign'        => (string)($row['callsign'] ?? ''),
@@ -1115,6 +1236,21 @@ try {
                 ];
             }
         }
+
+        // OGN, FLR and FNT can relay the same 24-bit device under different
+        // callsigns. Keep one representative (the newest packet) so the UI
+        // shows one aircraft; track endpoints merge the hidden aliases too.
+        if ($hex !== '' && isset($packetByHex[$hex])) {
+            $previousId = $packetByHex[$hex];
+            $previousTs = (int)($packets[$previousId]['timestamp'] ?? -1);
+            if ($ts <= $previousTs) return;
+            unset($packets[$previousId], $names[$previousId]);
+        }
+        if ($hex !== '') $packetByHex[$hex] = $id;
+        $packets[$id] = [
+            'raw'       => $raw,
+            'timestamp' => $ts,
+        ];
     };
 
     if ($includeMeta) {

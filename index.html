@@ -22,6 +22,23 @@
     <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
     <button id="btnSounding" type="button" title="Live wind aloft & thermal ceiling from aircraft drift" aria-pressed="false">🌬 Wind Aloft</button>
     <a class="tool-link" href="insights.php" title="24-hour network insights">📊 Insights</a>
+    <div class="shortcuts-control" id="shortcutsControl">
+      <button id="btnShortcuts" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-expanded="false" aria-controls="shortcutsModal">?</button>
+      <div id="shortcutsModal" class="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" aria-modal="false" hidden>
+        <div class="shortcuts-head"><strong>Keyboard shortcuts</strong><button type="button" id="shortcutsClose" class="shortcuts-close" title="Close" aria-label="Close keyboard shortcuts">✕</button></div>
+        <dl class="shortcuts-list">
+          <div><dt>/</dt><dd>Focus search</dd></div>
+          <div><dt>R</dt><dd>Toggle replay</dd></div>
+          <div><dt>M</dt><dd>Toggle measure tool</dd></div>
+          <div><dt>F</dt><dd>Follow active or focused aircraft</dd></div>
+          <div><dt>C</dt><dd>Copy coordinates (focused or active aircraft)</dd></div>
+          <div><dt>⇧ C</dt><dd>Copy SAR info (focused or active aircraft)</dd></div>
+          <div><dt>↑ ↓</dt><dd>Move between aircraft rows</dd></div>
+          <div><dt>?</dt><dd>Show or hide this list</dd></div>
+          <div><dt>Esc</dt><dd>Close panels, exit measure, or clear tracks</dd></div>
+        </dl>
+      </div>
+    </div>
     <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
   <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
@@ -31,8 +48,8 @@
     <div class="map-filter-control" id="mapFilterControl">
       <button class="map-filter-toggle" id="mapFilterToggle" type="button" aria-label="Aircraft filters" aria-expanded="false" aria-controls="mapFilterPanel" title="Aircraft filters">☷</button>
       <div class="map-filter-panel" id="mapFilterPanel" role="dialog" aria-label="Aircraft filters" aria-modal="false" hidden>
-        <div class="menu-section">
-          <span class="group-label">Filter</span>
+        <details class="menu-section collapsible-section">
+          <summary class="group-label">Filter</summary>
           <div class="type-checklist" id="type" role="group" aria-label="Aircraft filter">
             <label class="type-option"><input type="checkbox" value="para" checked><span>Paragliders</span></label>
             <label class="type-option"><input type="checkbox" value="wx" checked><span>Wx Stations</span></label>
@@ -42,11 +59,11 @@
             <label class="type-option"><input type="checkbox" value="station"><span>Stations</span></label>
             <label class="type-option type-all"><input type="checkbox" value="all"><span>All aircraft</span></label>
           </div>
-        </div>
+        </details>
 
-        <div class="menu-section">
+        <details class="menu-section collapsible-section">
+          <summary class="group-label">Units</summary>
           <div class="menu-inline-head">
-            <span class="group-label">Units</span>
             <div class="preset-row" role="group" aria-label="Unit system preset">
               <button type="button" class="unit-btn" id="presetMetricBtn" title="Set Metric: m, km/h, °C, m/s">Metric</button>
               <button type="button" class="unit-btn" id="presetAviationBtn" title="Set Aviation: ft, kt, °F, fpm">Aviation</button>
@@ -59,7 +76,7 @@
             <button type="button" class="unit-btn active" id="unitTempBtn" title="Toggle temperature unit">Temp: °C</button>
             <button type="button" class="unit-btn active" id="unitClimbBtn" title="Toggle vario unit">Vario: m/s</button>
           </div>
-        </div>
+        </details>
 
         <div class="menu-section">
           <div class="menu-inline-head">
@@ -96,8 +113,8 @@
           </div>
         </div>
 
-        <div class="menu-section">
-          <span class="group-label">Saved Locations</span>
+        <details class="menu-section collapsible-section">
+          <summary class="group-label">Saved Locations</summary>
           <div id="bookmarkList" class="bookmark-list" aria-label="Saved map locations"></div>
           <div id="bookmarkSaveRow" class="bookmark-save-row" hidden>
             <input id="bookmarkName" type="text" maxlength="24" placeholder="Site name" aria-label="Bookmark name">
@@ -105,7 +122,7 @@
             <button type="button" id="bookmarkSaveCancel" title="Cancel" aria-label="Cancel bookmark">✕</button>
           </div>
           <button type="button" class="menu-compact-btn" id="btnSaveBookmark" title="Save current map view">+ Save current view</button>
-        </div>
+        </details>
 
         <div class="menu-inline-head">
           <span class="group-label">Pinned alerts</span>
@@ -197,6 +214,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261124u"></script>
+<script src="app.js?v=20261124zb"></script>
 </body>
 </html>
