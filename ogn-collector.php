@@ -59,15 +59,82 @@ function prune_proxy_cache(string $cacheDir): void {
     }
 }
 
+/**
+ * One-time conversion of a legacy `auto_vacuum=NONE` database to incremental
+ * vacuum. Must run outside any transaction, before the collector starts its
+ * network/DDB batches. Leaves the flag unset on failure so a later cron run
+ * retries instead of silently living with a large free list.
+ */
+function ensure_auto_vacuum_migration(PDO $pdo, string $dbFile, bool $dbExistedBeforeOpen, int $autoVacuum): void {
+    $migrated = (string)$pdo->query('SELECT value FROM meta WHERE key = "auto_vacuum_migrated"')->fetchColumn();
+    if ($migrated === '1') return;
+
+    $setMeta = static function (string $key, string $value) use ($pdo): void {
+        $stmt = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+        $stmt->execute([':k' => $key, ':v' => $value]);
+    };
+    $nowTs = (string)time();
+
+    // A database created by this version already has incremental vacuum pages;
+    // do not rewrite an empty DB just to record the flag.
+    if (!$dbExistedBeforeOpen) {
+        $setMeta('auto_vacuum_migrated', '1');
+        $setMeta('last_vacuum_ts', $nowTs);
+        error_log('ogn-collector: auto_vacuum migration marked complete for new DB');
+        return;
+    }
+
+    if ($pdo->inTransaction()) {
+        error_log('ogn-collector: skip auto_vacuum migration while a transaction is active');
+        return;
+    }
+
+    // VACUUM rewrites the database and can temporarily need roughly twice its
+    // size. Skip (and retry next run) when there is not enough headroom.
+    $dbBytes   = @filesize($dbFile);
+    $freeBytes = @disk_free_space(dirname($dbFile));
+    if ($dbBytes !== false && $freeBytes !== false && $freeBytes < ($dbBytes * 2.0)) {
+        error_log(sprintf(
+            'ogn-collector: skip auto_vacuum VACUUM, free space %.1f MiB < 2x DB %.1f MiB',
+            $freeBytes / 1048576,
+            $dbBytes / 1048576
+        ));
+        return;
+    }
+
+    $started = microtime(true);
+    error_log(sprintf(
+        'ogn-collector: one-time auto_vacuum VACUUM starting (current=%d, db=%.1f MiB)',
+        $autoVacuum,
+        $dbBytes === false ? -1 : $dbBytes / 1048576
+    ));
+    try {
+        $pdo->exec('PRAGMA auto_vacuum=INCREMENTAL;');
+        // VACUUM cannot run inside a transaction; this point is before any
+        // DDB/network batch has opened one.
+        $pdo->exec('VACUUM;');
+        $pdo->exec('PRAGMA wal_checkpoint(TRUNCATE);');
+        $setMeta('auto_vacuum_migrated', '1');
+        $setMeta('last_vacuum_ts', $nowTs);
+        error_log(sprintf('ogn-collector: one-time auto_vacuum VACUUM completed in %.1fs', microtime(true) - $started));
+    } catch (Throwable $e) {
+        error_log('ogn-collector: one-time auto_vacuum VACUUM failed: ' . $e->getMessage());
+    }
+}
+
 $lockFile = __DIR__ . '/ogn-collector.lock';
 $dbFile   = __DIR__ . '/ogn-live.sqlite';
+// Remember whether this is a legacy DB opened for the first time. Brand-new
+// databases get incremental vacuum from the start and must not pay for a full
+// VACUUM just to set the one-time migration flag.
+$dbExistedBeforeOpen = file_exists($dbFile);
 
 $lockFp = fopen($lockFile, 'c');
 if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
     exit(0);
 }
 
-if (file_exists($dbFile) && !is_writable($dbFile)) {
+if ($dbExistedBeforeOpen && !is_writable($dbFile)) {
     $euid = function_exists('posix_geteuid') ? posix_geteuid() : '?';
     error_log("ogn-collector DB is not writable: {$dbFile} (euid={$euid})");
     exit(1);
@@ -220,6 +287,10 @@ if (!in_array('first_ts', $alertCols, true)) {
     // available approximation so old rows still display a meaningful time.
     $pdo->exec('UPDATE alerts SET first_ts = last_ts WHERE first_ts = 0;');
 }
+
+// Convert legacy auto_vacuum=NONE databases exactly once, before the DDB sync
+// or APRS loop can open a transaction. New databases skip the full VACUUM.
+ensure_auto_vacuum_migration($pdo, $dbFile, $dbExistedBeforeOpen, $autoVacuum);
 
 function clean_ogn_name($value): string {
     $raw = (string)$value;
