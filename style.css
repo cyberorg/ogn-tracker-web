@@ -181,6 +181,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .sounding-pills{display:flex;flex-wrap:wrap;gap:4px}
 .sounding-pill{padding:3px 7px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);font-weight:700;white-space:nowrap}
 .sounding-pill.ceiling{border-color:#7d672a;color:var(--yellow)}
+.sounding-pill.has-tip{cursor:help}
+.sounding-tip{margin-top:2px;padding:7px 8px;border:1px solid #2b3d4c;border-radius:6px;background:#0c151df2;color:#dbe6ec;font:500 10px/1.4 system-ui,sans-serif;white-space:normal;overflow-wrap:anywhere}
+.sounding-tip[hidden]{display:none}
 .sounding-pill.cloud{border-color:#2d7a63;color:var(--accent)}
 .sounding-surface{color:#c7d4dc;line-height:1.4}
 .sounding-layer{display:grid;grid-template-columns:54px 16px 1fr auto;align-items:center;gap:6px;padding:4px 5px;border:1px solid var(--line);border-radius:6px;background:var(--panel2)}

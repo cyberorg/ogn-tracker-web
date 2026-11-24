@@ -10,6 +10,8 @@ const NAME_CACHE_MAX = 1000;
 const WX_CACHE_TTL_MS = 30 * 60 * 1000;
 const ALERT_24H_TTL_MS = 24 * 60 * 60 * 1000;
 const SOUNDING_NO_DATA_MSG = 'Not enough circling tracks in the last hour to reconstruct wind aloft.';
+const SOUNDING_CEILING_TIP = 'Estimated from the last hour of local sailplane/paraglider climbs (≥0.5 m/s, at least 2 aircraft); 90th percentile, rounded to 10 m. Not a forecast or hard ceiling.';
+const SOUNDING_CLOUD_TIP = 'Estimated cloud base from the nearest recent station temperature and humidity using the Magnus dewpoint and Bolton LCL. AGL is above ground; MSL is shown when station elevation is known.';
 const OFFLINE_THRESHOLD_SEC = 180;
 const MIN_VALID_TEMP_C = -50;
 const MAX_VALID_TEMP_C = 55;
@@ -2958,6 +2960,7 @@ function setSoundingOpen(open) {
   if (!panel) return;
   if (open && mapFilterPanel && !mapFilterPanel.hidden) closeFilterPanel(false);
   panel.hidden = !open;
+  if (!open) hideSoundingTip();
   const btn = $('btnSounding');
   if (btn) {
     btn.classList.toggle('active', open);
@@ -2980,6 +2983,26 @@ function soundingWindArrow(deg) {
 function soundingSpeedClass(kmh) {
   if (!Number.isFinite(kmh)) return '';
   return kmh < 20 ? 'weak' : kmh < 40 ? 'mid' : 'strong';
+}
+
+// Tooltips are rendered inside the sounding panel instead of as absolutely
+// positioned pseudo-elements, so they cannot be clipped by the panel scroll
+// area or the map edge on narrow screens.
+function showSoundingTip(el) {
+  const tip = $('soundingTip');
+  if (!tip || !el) return;
+  const text = el.getAttribute('data-tip') || '';
+  if (!text) {
+    tip.hidden = true;
+    return;
+  }
+  tip.textContent = text;
+  tip.hidden = false;
+}
+
+function hideSoundingTip() {
+  const tip = $('soundingTip');
+  if (tip) tip.hidden = true;
 }
 
 async function fetchSounding(force = false) {
@@ -3029,12 +3052,22 @@ function renderSounding() {
   const ceiling = Number.isFinite(data.thermal_ceiling_m) ? data.thermal_ceiling_m : null;
   const pills = [];
   if (ceiling !== null) {
-    pills.push(`<span class="sounding-pill ceiling">Thermal top ≈ ${esc(fmtAltValue(ceiling))}</span>`);
+    pills.push(
+      `<span class="sounding-pill ceiling has-tip" tabindex="0" ` +
+      `data-tip="${esc(SOUNDING_CEILING_TIP)}" ` +
+      `aria-label="Thermal top. ${esc(SOUNDING_CEILING_TIP)}">` +
+      `Thermal top ≈ ${esc(fmtAltValue(ceiling))}</span>`
+    );
   }
   if (surface && Number.isFinite(surface.lcl_agl_m)) {
     const msl = Number.isFinite(surface.lcl_msl_m)
       ? ` / ${esc(fmtAltValue(surface.lcl_msl_m))} MSL` : '';
-    pills.push(`<span class="sounding-pill cloud">Cu base ≈ ${esc(fmtAltValue(surface.lcl_agl_m))} AGL${msl}</span>`);
+    pills.push(
+      `<span class="sounding-pill cloud has-tip" tabindex="0" ` +
+      `data-tip="${esc(SOUNDING_CLOUD_TIP)}" ` +
+      `aria-label="Cu base. ${esc(SOUNDING_CLOUD_TIP)}">` +
+      `Cu base ≈ ${esc(fmtAltValue(surface.lcl_agl_m))} AGL${msl}</span>`
+    );
   }
 
   const surfaceBits = [];
@@ -3083,6 +3116,7 @@ function renderSounding() {
 
   body.innerHTML =
     (pills.length ? `<div class="sounding-pills">${pills.join('')}</div>` : '') +
+    `<div class="sounding-tip" id="soundingTip" hidden></div>` +
     (surfaceBits.length ? `<div class="sounding-surface">${surfaceBits.join(' · ')}</div>` : '') +
     layerHtml +
     `<div class="sounding-note">${esc(notes.join(' '))}</div>`;
@@ -4055,6 +4089,40 @@ function syncClearAirspaceButton() {
 
 $('btnSounding').addEventListener('click', () => setSoundingOpen($('soundingPanel').hidden));
 $('soundingClose').addEventListener('click', () => setSoundingOpen(false));
+
+const soundingPanel = $('soundingPanel');
+soundingPanel.addEventListener('pointerover', e => {
+  const pill = e.target.closest?.('.sounding-pill.has-tip');
+  if (pill && soundingPanel.contains(pill)) showSoundingTip(pill);
+});
+soundingPanel.addEventListener('pointerout', e => {
+  const pill = e.target.closest?.('.sounding-pill.has-tip');
+  if (!pill || pill.contains(e.relatedTarget)) return;
+  const next = e.relatedTarget?.closest?.('.sounding-pill.has-tip');
+  if (next && soundingPanel.contains(next)) {
+    showSoundingTip(next);
+    return;
+  }
+  if (document.activeElement === pill) return;
+  hideSoundingTip();
+});
+soundingPanel.addEventListener('focusin', e => {
+  const pill = e.target.closest?.('.sounding-pill.has-tip');
+  if (pill) showSoundingTip(pill);
+});
+soundingPanel.addEventListener('focusout', e => {
+  const pill = e.target.closest?.('.sounding-pill.has-tip');
+  if (!pill) return;
+  const next = e.relatedTarget?.closest?.('.sounding-pill.has-tip');
+  if (next && soundingPanel.contains(next)) showSoundingTip(next);
+  else hideSoundingTip();
+});
+soundingPanel.addEventListener('scroll', hideSoundingTip, { passive: true });
+document.addEventListener('click', e => {
+  const pill = e.target.closest?.('.sounding-pill.has-tip');
+  if (pill && soundingPanel.contains(pill)) showSoundingTip(pill);
+  else hideSoundingTip();
+});
 
 $('btnAirspace').addEventListener('click', () => $('airspaceFile').click());
 $('airspaceFile').addEventListener('change', async e => {
