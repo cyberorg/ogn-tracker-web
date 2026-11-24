@@ -15,6 +15,7 @@ $altRecordNearM = 500.0; // A record needs another packet this close to its alti
 $cacheDir = rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache';
 $cacheFile = $cacheDir . '/insights_page.html';
 $cacheMeta = $cacheDir . '/insights_page.meta.json';
+$historyFile = $cacheDir . '/insights_history.json';
 
 // SQLite's 'localtime' modifier follows the process TZ env var, which can differ
 // from PHP's timezone. Use an explicit offset in the SQL so hour grouping always
@@ -91,6 +92,17 @@ $FANET_STATUS = [
 function h($v): string { return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); }
 function n(int|float $v): string { return number_format((int)$v); }
 function pct(int $n, int $total): string { return $total > 0 ? number_format($n * 100 / $total, 1) . '%' : '0%'; }
+function kpiDelta(int $current, ?int $previous): string {
+    if ($previous === null || $previous <= 0) return '';
+    $change = (int)round(($current - $previous) * 100 / $previous);
+    if ($change > 0) {
+        return '<span class="ins-delta ins-delta-up">' . h('↑ +' . $change . '% vs prior 24h') . '</span>';
+    }
+    if ($change < 0) {
+        return '<span class="ins-delta ins-delta-down">' . h('↓ ' . $change . '% vs prior 24h') . '</span>';
+    }
+    return '<span class="ins-delta ins-delta-flat">' . h('→ 0% vs prior 24h') . '</span>';
+}
 
 function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
     $dLat = deg2rad($lat2 - $lat1);
@@ -549,6 +561,47 @@ try {
     $telStmt->execute([':cutoff' => $cutoff]);
     $telemetryTotal = (int)$telStmt->fetchColumn();
 
+    // ---- Rolling history for 24h KPI deltas -------------------------------
+    $linksTotal = (int)$pdo->query('SELECT COUNT(*) FROM station_heard')->fetchColumn();
+    $currentSnapshot = [
+        'ts'           => $generatedAt,
+        'aircraft'     => $aircraftTotal,
+        'track_points' => $trackPoints,
+        'stations'     => $stationTotal,
+        'thermals'     => $thermalTotal,
+        'links'        => $linksTotal,
+        'alerts'       => $alertAircraft,
+    ];
+    $history = [];
+    if (is_readable($historyFile)) {
+        $decoded = json_decode((string)@file_get_contents($historyFile), true);
+        if (is_array($decoded)) $history = $decoded;
+    }
+    $previous = null;
+    $bestDiff = null;
+    foreach ($history as $entry) {
+        if (!is_array($entry) || !isset($entry['ts'])) continue;
+        $age = $generatedAt - (int)$entry['ts'];
+        if ($age < 20 * 3600 || $age > 28 * 3600) continue;
+        $diff = abs($age - 86400);
+        if ($bestDiff === null || $diff < $bestDiff) {
+            $previous = $entry;
+            $bestDiff = $diff;
+        }
+    }
+    $history[] = $currentSnapshot;
+    $keepAfter = $generatedAt - 7 * 86400;
+    $history = array_values(array_filter($history, static function ($entry) use ($keepAfter): bool {
+        return is_array($entry) && isset($entry['ts']) && (int)$entry['ts'] >= $keepAfter;
+    }));
+    usort($history, static fn($a, $b): int => (int)$a['ts'] <=> (int)$b['ts']);
+    $tmpHistory = $historyFile . '.tmp';
+    @file_put_contents($tmpHistory, json_encode($history), LOCK_EX);
+    @rename($tmpHistory, $historyFile);
+    $prevVal = static function (string $key) use ($previous): ?int {
+        return ($previous !== null && isset($previous[$key])) ? (int)$previous[$key] : null;
+    };
+
 } catch (Throwable $e) {
     http_response_code(500);
     $fatal = $e->getMessage();
@@ -586,6 +639,10 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-kpis-secondary .ins-kpi-value{font-size:20px}
   .ins-kpis-secondary .ins-kpi-sub{font-size:10px}
   .ins-kpi-sub{font-size:11px;color:#b7c7d2;margin-top:3px}
+  .ins-delta{display:inline-block;margin-left:5px;padding:1px 5px;border:1px solid currentColor;border-radius:999px;font-size:9px;font-weight:700;white-space:nowrap;vertical-align:1px}
+  .ins-delta-up{color:#57d3b0;background:#10332b}
+  .ins-delta-down{color:#ff8e8e;background:#3d1118}
+  .ins-delta-flat{color:#9aabba;background:#22313e}
   .ins-grid{display:grid;grid-template-columns:1fr;gap:12px;align-items:start}
   .ins-section{grid-column:1/-1;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:6px 0 -2px;padding-bottom:6px;border-bottom:1px solid var(--line)}
   .ins-card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;min-width:0}
@@ -691,17 +748,17 @@ $genDuration = microtime(true) - $generationStarted;
   </nav>
 
   <div class="ins-kpis">
-    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Unique aircraft</div><div class="ins-kpi-value"><?php echo n($aircraftTotal); ?></div><div class="ins-kpi-sub"><?php echo n($trackAircraft); ?> with track data</div></div>
-    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Track points</div><div class="ins-kpi-value"><?php echo n($trackPoints); ?></div><div class="ins-kpi-sub"><?php echo $maxAlt !== null ? 'max altitude ' . n(round($maxAlt)) . ' m' : 'altitude n/a'; ?></div></div>
-    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Ground stations</div><div class="ins-kpi-value"><?php echo n($stationTotal); ?></div><div class="ins-kpi-sub"><?php echo n($stationsWithWeather); ?> reporting weather</div></div>
-    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Thermal samples</div><div class="ins-kpi-value"><?php echo n($thermalTotal); ?></div><div class="ins-kpi-sub">gliders / paragliders only</div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Unique aircraft</div><div class="ins-kpi-value"><?php echo n($aircraftTotal); ?></div><div class="ins-kpi-sub"><?php echo n($trackAircraft); ?> with track data<?php echo kpiDelta($aircraftTotal, $prevVal('aircraft')); ?></div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Track points</div><div class="ins-kpi-value"><?php echo n($trackPoints); ?></div><div class="ins-kpi-sub"><?php echo $maxAlt !== null ? 'max altitude ' . n(round($maxAlt)) . ' m' : 'altitude n/a'; ?><?php echo kpiDelta($trackPoints, $prevVal('track_points')); ?></div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Ground stations</div><div class="ins-kpi-value"><?php echo n($stationTotal); ?></div><div class="ins-kpi-sub"><?php echo n($stationsWithWeather); ?> reporting weather<?php echo kpiDelta($stationTotal, $prevVal('stations')); ?></div></div>
+    <div class="ins-kpi ins-kpi-hero"><div class="ins-kpi-label">Thermal samples</div><div class="ins-kpi-value"><?php echo n($thermalTotal); ?></div><div class="ins-kpi-sub">gliders / paragliders only<?php echo kpiDelta($thermalTotal, $prevVal('thermals')); ?></div></div>
   </div>
 
   <div class="ins-kpis ins-kpis-secondary">
-    <div class="ins-kpi"><div class="ins-kpi-label">Station ↔ aircraft links</div><div class="ins-kpi-value"><?php echo n((int)$pdo->query('SELECT COUNT(*) FROM station_heard')->fetchColumn()); ?></div><div class="ins-kpi-sub">reception pairs in 24h</div></div>
+    <div class="ins-kpi"><div class="ins-kpi-label">Station ↔ aircraft links</div><div class="ins-kpi-value"><?php echo n($linksTotal); ?></div><div class="ins-kpi-sub">reception pairs in 24h</div></div>
     <div class="ins-kpi"><div class="ins-kpi-label">Identified</div><div class="ins-kpi-value"><?php echo n($identifiedCount); ?></div><div class="ins-kpi-sub"><?php echo pct($identifiedCount, max(1, $aircraftTotal)); ?> have a stream name</div></div>
     <div class="ins-kpi"><div class="ins-kpi-label">DDB metadata</div><div class="ins-kpi-value"><?php echo n($ddbKnown); ?></div><div class="ins-kpi-sub">of <?php echo n($ddbTotal); ?> catalogue records</div></div>
-    <div class="ins-kpi"><div class="ins-kpi-label">Alerts / emergencies</div><div class="ins-kpi-value"><?php echo n($alertAircraft); ?></div><div class="ins-kpi-sub"><?php echo n($emergencyCount); ?> emergency-flagged packets</div></div>
+    <div class="ins-kpi"><div class="ins-kpi-label">Alerts / emergencies</div><div class="ins-kpi-value"><?php echo n($alertAircraft); ?></div><div class="ins-kpi-sub"><?php echo n($emergencyCount); ?> emergency-flagged packets<?php echo kpiDelta($alertAircraft, $prevVal('alerts')); ?></div></div>
   </div>
 
   <div class="ins-grid">

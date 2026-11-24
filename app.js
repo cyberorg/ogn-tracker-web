@@ -6,6 +6,7 @@ const MENU_PREFS_STORAGE_KEY = 'ogn_menu_prefs';
 const ALERTS_24H_STORAGE_KEY = 'ogn_alerts_24h';
 const NAME_CACHE_STORAGE_KEY = 'ogn_name_cache';
 const AIRSPACE_STORAGE_KEY = 'ogn_custom_airspace_geojson';
+const BOOKMARKS_STORAGE_KEY = 'ogn_map_bookmarks';
 const NAME_CACHE_MAX = 1000;
 const WX_CACHE_TTL_MS = 30 * 60 * 1000;
 const ALERT_24H_TTL_MS = 24 * 60 * 60 * 1000;
@@ -61,6 +62,9 @@ let lastStatusKind = 'connecting';
 let lastStatusText = 'Connecting…';
 let hashLookupMessageUntilMs = 0;
 let hashMessagePopup = null;
+let bookmarks = [];
+let measureMode = false;
+let measurePoints = [];
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -81,6 +85,20 @@ try {
   if (typeof prefs.baseLayer === 'string' && prefs.baseLayer) savedBaseLayer = prefs.baseLayer;
   if (Array.isArray(prefs.overlays)) savedOverlays = prefs.overlays.filter(v => typeof v === 'string');
   if (['name', 'type', 'climb', 'latest'].includes(prefs.listSort)) listSort = prefs.listSort;
+} catch (e) {}
+
+try {
+  const raw = JSON.parse(localStorage.getItem(BOOKMARKS_STORAGE_KEY) || '[]');
+  if (Array.isArray(raw)) {
+    bookmarks = raw.filter(b => b && typeof b === 'object' && Number.isFinite(Number(b.lat)) &&
+      Number.isFinite(Number(b.lon)) && Number.isFinite(Number(b.zoom)))
+      .slice(0, 4)
+      .map((b, i) => ({
+        id: typeof b.id === 'string' && b.id ? b.id : `bm${i}`,
+        name: String(b.name || `Site ${i + 1}`).slice(0, 24),
+        lat: Number(b.lat), lon: Number(b.lon), zoom: Number(b.zoom)
+      }));
+  }
 } catch (e) {}
 
 function getCurrentTypesArray() {
@@ -267,6 +285,14 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = d => d * Math.PI / 180;
+  const p1 = toRad(lat1), p2 = toRad(lat2), dl = toRad(lon2 - lon1);
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
 function distMeters(lat1, lon1, lat2, lon2) {
   return haversineKm(lat1, lon1, lat2, lon2) * 1000;
 }
@@ -413,6 +439,7 @@ function syncUnitButtons() {
   syncVarioLegend();
   updateFilterBadge();
   syncScaleControl();
+  renderMeasure();
   renderSounding();
 }
 
@@ -550,6 +577,7 @@ const clusterGroup = L.markerClusterGroup({
 const emergencyGroup = L.layerGroup().addTo(map);
 const replayGroup = L.layerGroup();
 const replayTrackGroup = L.layerGroup();
+const measureLayer = L.layerGroup().addTo(map);
 let isSpiderfied = false;
 clusterGroup.on('spiderfied', () => { isSpiderfied = true; });
 clusterGroup.on('unspiderfied', () => { isSpiderfied = false; render(); });
@@ -839,6 +867,20 @@ async function copyTextToClipboard(text, okMsg = 'Copied') {
       return false;
     }
   }
+}
+
+function buildSarText(a) {
+  const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
+  const shareUrl = `${location.href.replace(/#.*/, '')}#${a.lat.toFixed(4)},${a.lon.toFixed(4)},${Math.max(map.getZoom(), 12)},${encodeURIComponent(a.address)}`;
+  return [
+    `SAR Info: ${displayName(a)}`,
+    `Status: ${getDisplayStatus(a) || 'Unknown'}`,
+    `Coords: ${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
+    `Alt: ${a.altitude != null ? fmtAlt(a.altitude) : 'N/A'}`,
+    `Last heard: ${fmtAge(ageSec)}`,
+    `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`,
+    `Tracker: ${shareUrl}`
+  ].join('\n');
 }
 
 function pickTrackColor() {
@@ -1421,7 +1463,57 @@ function toggleSelection(address, openOnMap = false) {
   requestAnimationFrame(() => focusListRow(address));
 }
 
-map.on('click', () => {
+function clearMeasure() {
+  measurePoints = [];
+  measureLayer.clearLayers();
+  const readout = $('measureReadout');
+  if (readout) readout.hidden = true;
+}
+
+function renderMeasure() {
+  measureLayer.clearLayers();
+  const readout = $('measureReadout');
+  if (!readout) return;
+  if (measurePoints.length < 2) {
+    readout.hidden = true;
+    return;
+  }
+  const [p1, p2] = measurePoints;
+  const km = haversineKm(p1[0], p1[1], p2[0], p2[1]);
+  const brg = bearingDeg(p1[0], p1[1], p2[0], p2[1]);
+  L.polyline([p1, p2], { color: '#38bdf8', weight: 2, dashArray: '6 4', interactive: false }).addTo(measureLayer);
+  for (const p of [p1, p2]) {
+    L.circleMarker(p, { radius: 4, color: '#38bdf8', weight: 1, fillColor: '#38bdf8', fillOpacity: 1, interactive: false }).addTo(measureLayer);
+  }
+  readout.innerHTML =
+    `<span>${esc(fmtDistanceKm(km))} · ${Math.round(brg)}°</span>` +
+    `<button type="button" class="measure-clear" data-measure-clear title="Clear measurement" aria-label="Clear measurement">✕</button>`;
+  readout.hidden = false;
+}
+
+function addMeasurePoint(lat, lon) {
+  if (!measureMode || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  if (measurePoints.length >= 2) measurePoints = [];
+  measurePoints.push([lat, lon]);
+  renderMeasure();
+}
+
+function setMeasureMode(on) {
+  measureMode = !!on;
+  const btn = $('btnMeasure');
+  if (btn) {
+    btn.classList.toggle('active', measureMode);
+    btn.setAttribute('aria-pressed', String(measureMode));
+  }
+  map.getContainer().style.cursor = measureMode ? 'crosshair' : '';
+  if (!measureMode) clearMeasure();
+}
+
+map.on('click', e => {
+  if (measureMode) {
+    addMeasurePoint(e.latlng.lat, e.latlng.lng);
+    return;
+  }
   if (selectedTracks.size > 0) {
     clearAllTracks();
     render();
@@ -2377,8 +2469,11 @@ function filtered() {
   return aircraft.filter(a => {
     if (a.address === pendingHashSelect || lastKnownCache.has(a.address)) return true;
     const matches = !q || `${displayName(a)} ${a.id} ${a.callsign} ${a.registration} ${a.model} ${a.ognId} ${a.address}`.toLowerCase().includes(q);
-    if (isEmergency(a)) return matches;
-    return matches && matchesSelectedTypes(a, selectedTypes);
+    if (!matches) return false;
+    // An explicit search should find the aircraft even when its type is
+    // unchecked in the preference filter; emergencies always stay visible.
+    if (isEmergency(a) || q) return true;
+    return matchesSelectedTypes(a, selectedTypes);
   });
 }
 
@@ -2420,6 +2515,11 @@ async function fetchSearch24h(q) {
   }
 }
 
+function findAircraftByAddress(address) {
+  return aircraft.find(x => x.address === address) ||
+    search24hResults.find(x => x.address === address) || null;
+}
+
 function buildRowHtml(a, now) {
   const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
   const trackEntry = selectedTracks.get(a.address);
@@ -2450,7 +2550,13 @@ function buildRowHtml(a, now) {
   }
   if (rType !== 15) {
     const isFollowed = followedAddress === a.address;
-    rightColHtml += `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${esc(displayName(a))}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
+    const name = esc(displayName(a));
+    rightColHtml +=
+      `<span class="row-mini-actions">` +
+      `<button type="button" class="row-mini-btn" data-center="${esc(a.address)}" title="Center map on ${name}" aria-label="Center map on ${name}">⌖</button>` +
+      `<button type="button" class="row-mini-btn" data-coords="${esc(a.address)}" title="Copy coordinates" aria-label="Copy coordinates for ${name}">📋</button>` +
+      `</span>` +
+      `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
   }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
@@ -2508,9 +2614,9 @@ function render() {
   const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon));
   const searchQ = $('search').value.trim();
   const useSearch24h = !!searchQ && viewportList.length === 0 && search24hResults.length > 0;
-  const listVisible = useSearch24h
-    ? search24hResults.filter(a => matchesSelectedTypes(a, getSelectedTypes()))
-    : viewportList;
+  // The 24h fallback is already driven by the search term, so do not hide its
+  // results because of the type preference filter.
+  const listVisible = useSearch24h ? search24hResults.slice() : viewportList;
   const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
 
@@ -2553,7 +2659,16 @@ function render() {
       if (isSpiderfied && !emerg) return;
       m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0 });
       m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a; m._trackerMarker = true;
-      m.on('click', () => toggleSelection(key, false));
+      m.on('click', e => {
+        if (measureMode) {
+          if (e && typeof e.originalEvent !== 'undefined') L.DomEvent.stopPropagation(e.originalEvent);
+          const lat = Number.isFinite(a.lat) ? a.lat : m.getLatLng().lat;
+          const lon = Number.isFinite(a.lon) ? a.lon : m.getLatLng().lng;
+          addMeasurePoint(lat, lon);
+          return;
+        }
+        toggleSelection(key, false);
+      });
       m._detailsOpen = false;
       m._popupSig = '';
       m.on('popupopen', () => {
@@ -2741,6 +2856,24 @@ $('aircraftList').addEventListener('click', e => {
     else if (act === 'refresh') fetchLive(true);
     return;
   }
+  const centerBtn = e.target.closest('[data-center]');
+  if (centerBtn) {
+    e.stopPropagation();
+    const a = findAircraftByAddress(centerBtn.dataset.center);
+    if (a && Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
+      map.setView([a.lat, a.lon], Math.max(map.getZoom(), 13));
+    }
+    return;
+  }
+  const coordsBtn = e.target.closest('[data-coords]');
+  if (coordsBtn) {
+    e.stopPropagation();
+    const a = findAircraftByAddress(coordsBtn.dataset.coords);
+    if (a && Number.isFinite(a.lat) && Number.isFinite(a.lon)) {
+      copyTextToClipboard(`${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`, 'Coordinates copied');
+    }
+    return;
+  }
   const pinBtn = e.target.closest('.pin-btn');
   if (pinBtn) {
     e.stopPropagation();
@@ -2782,6 +2915,19 @@ $('aircraftList').addEventListener('keydown', e => {
     if (idx === -1) return;
     const next = rows[e.key === 'ArrowDown' ? idx + 1 : idx - 1];
     if (next) next.focus();
+  } else if (row.contains(e.target) && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleFollow(row.dataset.key);
+  } else if (row.contains(e.target) && (e.key === 'c' || e.key === 'C')) {
+    e.preventDefault();
+    e.stopPropagation();
+    const a = findAircraftByAddress(row.dataset.key);
+    if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
+    copyTextToClipboard(
+      e.shiftKey ? buildSarText(a) : `${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
+      e.shiftKey ? 'SAR info copied' : 'Coordinates copied'
+    );
   }
 });
 
@@ -2834,17 +2980,7 @@ document.addEventListener('click', e => {
     const url = addr ? `${base.replace(/#.*/, '')}#${map.getCenter().lat.toFixed(4)},${map.getCenter().lng.toFixed(4)},${map.getZoom()},${encodeURIComponent(addr)}` : base;
     copyTextToClipboard(url, 'Link copied');
   } else if (act === 'sar' && a) {
-    const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
-    const shareUrl = `${location.href.replace(/#.*/, '')}#${a.lat.toFixed(4)},${a.lon.toFixed(4)},${Math.max(map.getZoom(), 12)},${encodeURIComponent(a.address)}`;
-    const txt = [
-      `SAR Info: ${displayName(a)}`,
-      `Status: ${getDisplayStatus(a) || 'Unknown'}`,
-      `Coords: ${a.lat.toFixed(6)}, ${a.lon.toFixed(6)}`,
-      `Alt: ${a.altitude != null ? fmtAlt(a.altitude) : 'N/A'}`,
-      `Last heard: ${fmtAge(ageSec)}`,
-      `Map: https://www.google.com/maps?q=${a.lat.toFixed(6)},${a.lon.toFixed(6)}`,
-      `Tracker: ${shareUrl}`
-    ].join('\n');
+    const txt = buildSarText(a);
     navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
   } else if (act === 'igc') {
     // Export always uses the full 24h fix history, independent of the map's
@@ -3924,6 +4060,86 @@ mapFilterToggle.addEventListener('click', event => {
   else closeFilterPanel(true);
 });
 mapFilterPanel.addEventListener('click', event => event.stopPropagation());
+
+function saveBookmarks() {
+  try {
+    localStorage.setItem(BOOKMARKS_STORAGE_KEY, JSON.stringify(bookmarks));
+  } catch (e) {}
+}
+
+function bookmarkItems() {
+  return [
+    { id: 'bir', name: 'Bir Billing (Default)', lat: BIR[0], lon: BIR[1], zoom: 11, builtin: true },
+    ...bookmarks.map(b => ({ ...b, builtin: false }))
+  ];
+}
+
+function renderBookmarks() {
+  const list = $('bookmarkList');
+  if (!list) return;
+  list.innerHTML = bookmarkItems().map(b =>
+    `<span class="bookmark-item">` +
+    `<button type="button" class="bookmark-pill" data-bookmark="${esc(b.id)}" title="Go to ${esc(b.name)}">${esc(b.name)}</button>` +
+    (b.builtin ? '' : `<button type="button" class="bookmark-delete" data-bookmark-delete="${esc(b.id)}" title="Delete ${esc(b.name)}" aria-label="Delete ${esc(b.name)}">×</button>`) +
+    `</span>`
+  ).join('');
+}
+
+$('bookmarkList').addEventListener('click', e => {
+  const del = e.target.closest('[data-bookmark-delete]');
+  if (del) {
+    e.stopPropagation();
+    bookmarks = bookmarks.filter(b => b.id !== del.dataset.bookmarkDelete);
+    saveBookmarks();
+    renderBookmarks();
+    return;
+  }
+  const pill = e.target.closest('[data-bookmark]');
+  if (!pill) return;
+  const b = bookmarkItems().find(x => x.id === pill.dataset.bookmark);
+  if (!b) return;
+  e.stopPropagation();
+  map.setView([b.lat, b.lon], b.zoom);
+  closeFilterPanel(false);
+  fetchLive(true);
+});
+
+$('btnSaveBookmark').addEventListener('click', () => {
+  const row = $('bookmarkSaveRow');
+  row.hidden = !row.hidden;
+  if (!row.hidden) {
+    $('bookmarkName').value = '';
+    $('bookmarkName').focus();
+  }
+});
+$('bookmarkSaveCancel').addEventListener('click', () => { $('bookmarkSaveRow').hidden = true; });
+$('bookmarkName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); $('bookmarkSaveConfirm').click(); }
+  else if (e.key === 'Escape') { e.preventDefault(); $('bookmarkSaveRow').hidden = true; }
+});
+$('bookmarkSaveConfirm').addEventListener('click', () => {
+  if (bookmarks.length >= 4) {
+    showToast('Maximum of 4 saved locations reached.', 2800);
+    $('bookmarkSaveRow').hidden = true;
+    return;
+  }
+  const input = $('bookmarkName');
+  const name = cleanName(input.value).slice(0, 24) || `Site ${bookmarks.length + 1}`;
+  const center = map.getCenter();
+  bookmarks.push({
+    id: (globalThis.crypto && typeof crypto.randomUUID === 'function') ? crypto.randomUUID() : `bm${Date.now()}`,
+    name,
+    lat: center.lat,
+    lon: center.lng,
+    zoom: map.getZoom()
+  });
+  saveBookmarks();
+  renderBookmarks();
+  input.value = '';
+  $('bookmarkSaveRow').hidden = true;
+  showToast(`Saved "${name}"`);
+});
+
 document.addEventListener('click', e => {
   if (!mapFilterControl.contains(e.target)) closeFilterPanel(false);
 });
@@ -3937,7 +4153,8 @@ document.addEventListener('keydown', event => {
 
   if (event.key === 'Escape') {
     event.preventDefault();
-    if (!mapFilterPanel.hidden) closeFilterPanel(true);
+    if (measureMode) setMeasureMode(false);
+    else if (!mapFilterPanel.hidden) closeFilterPanel(true);
     else if (soundingIsOpen()) setSoundingOpen(false);
     else if ($('mapWrap').classList.contains('map-fullscreen')) toggleMapFullscreen();
     else if (selectedTracks.size > 0) { clearAllTracks(); render(); }
@@ -3969,6 +4186,12 @@ $('emergencyBannerClose').addEventListener('click', () => {
 
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
+$('btnMeasure').addEventListener('click', () => setMeasureMode(!measureMode));
+$('measureReadout').addEventListener('click', e => {
+  if (!e.target.closest('[data-measure-clear]')) return;
+  e.stopPropagation();
+  clearMeasure();
+});
 function handleReplayScrub() {
   const slider = $('replaySlider');
   // Some mobile browsers only fire change at the end of a drag; input fires
@@ -4202,6 +4425,7 @@ $('locate').addEventListener('click', () => {
 render24hAlertsSummary(serverNow());
 syncUnitButtons();
 updateSearchUi();
+renderBookmarks();
 if (hashSelectAddress) loadHashAircraft(hashSelectAddress);
 fetchLive(true);
 setInterval(() => fetchLive(false), 5000);

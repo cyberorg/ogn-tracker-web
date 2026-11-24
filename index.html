@@ -18,6 +18,7 @@
   <div class="toolbar">
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
+    <button id="btnMeasure" type="button" title="Measure distance and bearing between points" aria-pressed="false">📏 Measure</button>
     <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
     <button id="btnSounding" type="button" title="Live wind aloft & thermal ceiling from aircraft drift" aria-pressed="false">🌬 Wind Aloft</button>
     <a class="tool-link" href="insights.php" title="24-hour network insights">📊 Insights</a>
@@ -95,6 +96,17 @@
           </div>
         </div>
 
+        <div class="menu-section">
+          <span class="group-label">Saved Locations</span>
+          <div id="bookmarkList" class="bookmark-list" aria-label="Saved map locations"></div>
+          <div id="bookmarkSaveRow" class="bookmark-save-row" hidden>
+            <input id="bookmarkName" type="text" maxlength="24" placeholder="Site name" aria-label="Bookmark name">
+            <button type="button" id="bookmarkSaveConfirm" title="Save bookmark">Save</button>
+            <button type="button" id="bookmarkSaveCancel" title="Cancel" aria-label="Cancel bookmark">✕</button>
+          </div>
+          <button type="button" class="menu-compact-btn" id="btnSaveBookmark" title="Save current map view">+ Save current view</button>
+        </div>
+
         <div class="menu-inline-head">
           <span class="group-label">Pinned alerts</span>
           <button type="button" class="menu-compact-btn" id="btnNotify" title="Toggle notifications for pinned aircraft" aria-pressed="false">🔔 OFF</button>
@@ -115,6 +127,7 @@
       <div id="soundingBody" class="sounding-body"></div>
     </div>
     <div id="map" aria-label="Map showing live OGN aircraft"></div>
+    <div id="measureReadout" class="measure-readout" role="status" aria-live="polite" hidden></div>
     <div id="varioLegend" class="vario-legend" role="img" aria-label="Vario colour scale from sink to climb" hidden>
       <span id="varioLegendLow" class="vario-legend-label"></span>
       <span class="vario-legend-bar"></span>
@@ -184,6 +197,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261124s"></script>
+<script src="app.js?v=20261124u"></script>
 </body>
 </html>
