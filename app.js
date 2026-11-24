@@ -2597,9 +2597,10 @@ function matchesSelectedTypes(a, selectedTypes) {
   if (!selectedTypes) return true;
   const rType = getResolvedType(a);
   return (selectedTypes.has('glider') && rType === 1) ||
+    (selectedTypes.has('hang') && rType === 6) ||
     (selectedTypes.has('para') && rType === 7) ||
     (selectedTypes.has('fanet') && isFanet(a) && rType !== 15) ||
-    (selectedTypes.has('other') && rType !== 1 && rType !== 7 && rType !== 15) ||
+    (selectedTypes.has('other') && rType !== 1 && rType !== 6 && rType !== 7 && rType !== 15) ||
     (selectedTypes.has('station') && rType === 15) ||
     (selectedTypes.has('wx') && Boolean(a.weather));
 }
