@@ -287,6 +287,11 @@ function sounding_aircraft_type(string $raw, $ddbType): int {
     return ($ddb >= 1 && $ddb <= 16) ? $ddb : 0;
 }
 
+/** Aircraft types admitted to sounding and thermal analysis. */
+function sounding_type_allowed(int $type): bool {
+    return $type === 1 || $type === 6 || $type === 7; // glider, hang glider, paraglider
+}
+
 /** Bolton convective LCL above ground, in metres. Null for unusable humidity. */
 function sounding_lcl_agl(?float $tempC, ?float $humidityPct): ?float {
     if ($tempC === null || $humidityPct === null) return null;
@@ -769,7 +774,7 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
     $n02 = ceil($north * 5.0) / 5.0;
     $w02 = floor($w * 5.0) / 5.0;
     $e02 = ceil($e * 5.0) / 5.0;
-    $cacheKey = 'snd_v2_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
+    $cacheKey = 'snd_v3_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
     if (($cached = cache_get($cacheDir, $cacheKey, SOUNDING_CACHE_TTL)) !== null) {
         echo $cached;
         exit;
@@ -848,10 +853,10 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
         $groupInfo = [];
         foreach ($typeInfo as $id => $info) {
             $type = sounding_aircraft_type($info['raw'], $info['ddb']);
-            if ($type === 1 || $type === 7) $soundingIds[] = (string)$id;
-            if ($type !== 1 && $type !== 7) continue;
-            // OGN/FLR/FNT aliases of one device must share one bucket, one
-            // point budget and one vote in the distinct-aircraft checks.
+            if (sounding_type_allowed($type)) $soundingIds[] = (string)$id;
+            if (!sounding_type_allowed($type)) continue;
+            // OGN/FLR/FNT aliases of one device must share one bucket and one
+            // vote in the distinct-aircraft checks.
             $groupKey = $info['group'] ?? ('id:' . $id);
             // Keep one eligible alias's raw/DDB pair together: mixing raw from
             // one relay with DDB data from another could reclassify the device.
@@ -912,12 +917,12 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
         foreach ($byAircraft as &$entry) $entry['pts'] = array_reverse($entry['pts']);
         unset($entry);
 
-        // Only densely logged sailplanes/paragliders are useful soundings. Keep
-        // at most the newest 200 fixes per aircraft so one busy ID cannot fill
-        // the whole global budget.
+        // Only densely logged sailplanes, hang gliders and paragliders are
+        // useful soundings. Keep at most the newest 200 fixes per aircraft so
+        // one busy ID cannot fill the whole global budget.
         foreach ($byAircraft as $id => &$entry) {
             $type = sounding_aircraft_type($entry['raw'], $entry['ddb']);
-            if ($type !== 1 && $type !== 7) {
+            if (!sounding_type_allowed($type)) {
                 unset($byAircraft[$id]);
                 continue;
             }

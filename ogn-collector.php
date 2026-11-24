@@ -1287,10 +1287,11 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         }
                     }
 
-                    // Gliders and paragliders are the aircraft whose dense 3D tracks
-                    // are useful for wind-aloft reconstruction and thermal soundings.
-                    // Keep every fix for them; other types stay throttled to limit DB growth.
-                    if ($type === 1 || $type === 7) {
+                    // Gliders, hang gliders and paragliders are the aircraft whose
+                    // dense 3D tracks are useful for wind-aloft reconstruction and
+                    // thermal soundings. Keep every fix for them; other types stay
+                    // throttled to limit DB growth.
+                    if ($type === 1 || $type === 6 || $type === 7) {
                         $logPoint = true;
                     } else {
                         $prev = $lastTrackPoint[$id] ?? null;

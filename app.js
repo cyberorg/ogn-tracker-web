@@ -17,6 +17,7 @@ const OFFLINE_THRESHOLD_SEC = 180;
 const MIN_VALID_TEMP_C = -50;
 const MAX_VALID_TEMP_C = 55;
 const TRACK_COLORS = ['#38bdf8','#f97316','#a855f7','#22c55e','#f43f5e','#eab308','#ec4899','#14b8a6','#818cf8','#84cc16'];
+const LIVE_TRACK_MAX_POINTS = 1500; // matches the backend's non-full track thinning target
 
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -1174,6 +1175,17 @@ function clearAllTracks() {
   updateListHint();
   updateUrlHash();
   syncClearTracksButton();
+}
+
+function trackWindowCutoffSec(nowMs = serverNow()) {
+  const val = $('trackWindow')?.value || '900';
+  if (val === 'today') {
+    const d = new Date(nowMs);
+    d.setHours(0, 0, 0, 0);
+    return Math.floor(d.getTime() / 1000);
+  }
+  const seconds = Number(val);
+  return Math.floor(nowMs / 1000) - (Number.isFinite(seconds) && seconds > 0 ? seconds : 900);
 }
 
 function buildTrackQuery(address) {
@@ -2825,6 +2837,11 @@ function render() {
         const trackEntry = selectedTracks.get(key);
         if (trackEntry && trackEntry.points) {
           trackEntry.points.push([a.lat, a.lon, a.altitude, Math.floor(a.receivedAtMs / 1000)]);
+          const cutoffSec = trackWindowCutoffSec(now);
+          while (trackEntry.points.length > LIVE_TRACK_MAX_POINTS ||
+                 (trackEntry.points.length > 1 && Number(trackEntry.points[0][3] || 0) < cutoffSec)) {
+            trackEntry.points.shift();
+          }
           if (trackEntry.layer) map.removeLayer(trackEntry.layer);
           trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
           if (trackEntry.layer) trackEntry.layer.addTo(map);
