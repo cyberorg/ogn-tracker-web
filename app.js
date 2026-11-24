@@ -78,7 +78,7 @@ try {
   }
   if (typeof prefs.baseLayer === 'string' && prefs.baseLayer) savedBaseLayer = prefs.baseLayer;
   if (Array.isArray(prefs.overlays)) savedOverlays = prefs.overlays.filter(v => typeof v === 'string');
-  if (['name', 'type', 'latest'].includes(prefs.listSort)) listSort = prefs.listSort;
+  if (['name', 'type', 'climb', 'latest'].includes(prefs.listSort)) listSort = prefs.listSort;
 } catch (e) {}
 
 function getCurrentTypesArray() {
@@ -2366,8 +2366,7 @@ function matchesSelectedTypes(a, selectedTypes) {
     (selectedTypes.has('fanet') && isFanet(a) && rType !== 15) ||
     (selectedTypes.has('other') && rType !== 1 && rType !== 7 && rType !== 15) ||
     (selectedTypes.has('station') && rType === 15) ||
-    (selectedTypes.has('wx') && Boolean(a.weather)) ||
-    (selectedTypes.has('climbing') && rType !== 15 && a.climb != null && Number(a.climb) >= 1.0);
+    (selectedTypes.has('wx') && Boolean(a.weather));
 }
 
 function filtered() {
@@ -2619,6 +2618,18 @@ function render() {
     if (listSort === 'type') {
       const typeCmp = typeName(a).localeCompare(typeName(b), undefined, { sensitivity: 'base', numeric: true });
       if (typeCmp) return typeCmp;
+      return byName(a, b);
+    }
+    if (listSort === 'climb') {
+      const climbValue = x => {
+        if (x.climb == null) return null;
+        const v = Number(x.climb);
+        return Number.isFinite(v) ? v : null;
+      };
+      const ca = climbValue(a), cb = climbValue(b);
+      if (ca === null && cb !== null) return 1;
+      if (cb === null && ca !== null) return -1;
+      if (ca !== null && cb !== null && ca !== cb) return cb - ca;
       return byName(a, b);
     }
     if (listSort === 'latest') {
