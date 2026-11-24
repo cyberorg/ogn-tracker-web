@@ -100,7 +100,7 @@
         </div>
         <div class="menu-section menu-actions">
           <div class="action-grid">
-            <button type="button" class="menu-compact-btn" id="btnResetFilters" title="Reset filters, windows, and units to defaults">Reset filters</button>
+            <button type="button" class="menu-compact-btn" id="btnResetFilters" title="Reset filters, windows, units, and sort to defaults">Reset filters</button>
           </div>
         </div>
       </div>
@@ -122,7 +122,7 @@
       <button id="replayPlay" type="button" aria-label="Play replay">▶</button>
       <button id="replayReverse" type="button" aria-label="Rewind replay" aria-pressed="false" title="Rewind replay">⏪</button>
       <button id="replayRange" type="button" aria-label="Replay window: Today" title="Replay window: Today (from midnight) (click to cycle)">Today</button>
-      <span id="replaySpeedValue" class="replay-speed-readout" title="Replay speed: 1×">1×</span>
+      <button id="replaySpeedValue" class="replay-speed-readout" type="button" aria-label="Replay speed: 1×, tap to cycle speeds" title="Replay speed: 1× — tap to cycle 1× / 10× / 20× / 30× / 50×">1×</button>
       <button id="replayPrevTrack" type="button" title="Previous track" aria-label="Previous track" hidden>⏮ 1/1</button>
       <button id="replayNextTrack" type="button" title="Next track" aria-label="Next track" hidden>⏭ 1/1</button>
       <label class="sr-only" for="replaySlider">Replay position within the selected window</label>
@@ -152,7 +152,18 @@
       </button>
     </div>
     <div id="alerts24hSummary" class="alerts-panel" aria-label="Emergency alerts in the last 24 hours" hidden></div>
-    <div class="section-head"><h2>Aircrafts/Stations</h2><span class="muted" id="listCount">0</span></div>
+    <div class="section-head">
+      <h2>Aircrafts/Stations</h2>
+      <div class="list-head-actions">
+        <label class="sr-only" for="listSort">Sort aircraft list</label>
+        <select id="listSort" aria-label="Sort aircraft list" title="Sort aircraft list">
+          <option value="name" selected>Name</option>
+          <option value="type">Aircraft type</option>
+          <option value="latest">Latest seen</option>
+        </select>
+        <span class="muted" id="listCount">0</span>
+      </div>
+    </div>
     <div id="listHint" class="list-hint" aria-live="polite"></div>
     <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>

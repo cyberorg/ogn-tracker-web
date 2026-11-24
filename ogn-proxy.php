@@ -39,22 +39,8 @@ function cache_set(string $cacheDir, string $key, string $payload): void {
     if (@file_put_contents($tmp, $payload, LOCK_EX) !== false) {
         @rename($tmp, $file);
     }
-    if (mt_rand(1, 100) === 1) {
-        $now = time();
-        foreach (glob($cacheDir . '/*.json') ?: [] as $old) {
-            $name = basename($old);
-            if (str_starts_with($name, 'thm_')) {
-                $ttl = THERMAL_CACHE_TTL;
-            } elseif (str_starts_with($name, 'live_')) {
-                $ttl = STALE_CACHE_MAX_AGE;
-            } else {
-                $ttl = 120;
-            }
-            if (($now - (int)@filemtime($old)) > $ttl) {
-                @unlink($old);
-            }
-        }
-    }
+    // Expired cache files are pruned by the collector's hourly maintenance
+    // (prune_proxy_cache()); do not scan the directory on viewer requests.
 }
 
 function clean_ogn_name($value): string {
@@ -81,6 +67,13 @@ function open_db(string $dbFile): PDO {
     return $pdo;
 }
 
+function normalize_lon_value(float $lon): float {
+    $lon = fmod($lon, 360.0);
+    if ($lon < -180.0) $lon += 360.0;
+    if ($lon > 180.0) $lon -= 360.0;
+    return $lon;
+}
+
 function parse_bounds(): ?array {
     $north = filter_input(INPUT_GET, 'north', FILTER_VALIDATE_FLOAT);
     $south = filter_input(INPUT_GET, 'south', FILTER_VALIDATE_FLOAT);
@@ -94,19 +87,35 @@ function parse_bounds(): ?array {
 
     $south = max(-90.0, min(90.0, floor($south * 10.0) / 10.0));
     $north = max(-90.0, min(90.0, ceil($north * 10.0) / 10.0));
-    $fullWorld = (($east - $west) >= 360.0);
+    $wRaw  = floor($west * 10.0) / 10.0;
+    $eRaw  = ceil($east * 10.0) / 10.0;
+    $fullWorld = (($east - $west) >= 360.0) || (($eRaw - $wRaw) >= 360.0);
 
     if ($fullWorld) {
-        $w = -180.0;
-        $e = 180.0;
-    } else {
-        $w = floor($west * 10.0) / 10.0;
-        $e = ceil($east * 10.0) / 10.0;
-        $w = fmod(fmod($w + 180.0, 360.0) + 360.0, 360.0) - 180.0;
-        $e = fmod(fmod($e + 180.0, 360.0) + 360.0, 360.0) - 180.0;
+        return [$south, $north, -180.0, 180.0, true];
     }
 
-    return [$south, $north, $w, $e, $fullWorld];
+    if ($eRaw < $wRaw) {
+        // The client can send either 179.9,-180.0 (a short step east) or
+        // -179.5,-180.5 (a short step west across the antimeridian). Pick the
+        // shorter world-copy interval before normalizing so a normal viewport
+        // is not turned into a near-world span or a wrong-hemisphere sliver.
+        $viaEast = ($eRaw + 360.0) - $wRaw;
+        $viaWest = $wRaw - $eRaw;
+        if ($viaWest < $viaEast) {
+            $w = normalize_lon_value($eRaw);
+            $e = normalize_lon_value($wRaw);
+        } else {
+            $w = normalize_lon_value($wRaw);
+            $e = normalize_lon_value($eRaw + 360.0);
+        }
+    } else {
+        $w = normalize_lon_value($wRaw);
+        $e = normalize_lon_value($eRaw);
+    }
+
+    // $w > $e is the existing convention for an antimeridian-crossing viewport.
+    return [$south, $north, $w, $e, false];
 }
 
 function link_station_alias(array &$aliasGraph, string $a, string $b): void {

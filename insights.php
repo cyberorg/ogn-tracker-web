@@ -11,6 +11,7 @@ $dbFile = __DIR__ . '/ogn-live.sqlite';
 $cutoff = time() - 86400;
 $cacheTtl = 4 * 3600;
 $trackGapSeconds = 600; // A gap longer than this starts a new continuous track
+$altRecordNearM = 500.0; // A record needs another packet this close to its altitude
 $cacheDir = rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache';
 $cacheFile = $cacheDir . '/insights_page.html';
 $cacheMeta = $cacheDir . '/insights_page.meta.json';
@@ -174,9 +175,10 @@ function barRow(string $label, int $count, int $total, string $color = 'var(--ac
         $subHtml .= '<a class="ins-bar-link" href="' . h($link['url']) . '" title="' . h($link['title'] ?? '') . '">' . h($link['text']) . '</a>';
     }
     return '<div class="ins-bar-row">'
-        . '<div class="ins-bar-label">' . h($label) . ($subHtml !== '' ? '<span class="ins-bar-sub">' . $subHtml . '</span>' : '') . '</div>'
+        . '<div class="ins-bar-label">' . h($label) . '</div>'
         . '<div class="ins-bar-track"><div class="ins-bar-fill" style="width:' . number_format($w, 2) . '%;background:' . h($color) . '"></div></div>'
         . '<div class="ins-bar-value">' . n($count) . '</div>'
+        . ($subHtml !== '' ? '<div class="ins-bar-sub">' . $subHtml . '</div>' : '')
         . '</div>';
 }
 
@@ -280,8 +282,10 @@ try {
 
     // Max altitude per aircraft in the rolling window, rolled up by type below.
     $altByAircraft = [];
-    // Ignore aircraft with only one altitude sample — a lone point cannot establish a record.
-    $altStmt = $pdo->prepare('SELECT id, MAX(alt) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff AND alt IS NOT NULL GROUP BY id HAVING COUNT(*) >= 2');
+    // Ignore lone altitude samples, and records not supported by another packet
+    // from the same aircraft within 500 m of the record altitude (spike filter).
+    $nearSql = number_format($altRecordNearM, 1, '.', '');
+    $altStmt = $pdo->prepare('WITH pts AS (SELECT id, alt, MAX(alt) OVER (PARTITION BY id) AS ma FROM tracks INDEXED BY sqlite_autoindex_tracks_1 WHERE ts >= :cutoff AND alt IS NOT NULL) SELECT id, ma FROM pts GROUP BY id, ma HAVING COUNT(*) >= 2 AND SUM(CASE WHEN ABS(alt - ma) <= ' . $nearSql . ' THEN 1 ELSE 0 END) >= 2');
     $altStmt->execute([':cutoff' => $cutoff]);
     foreach ($altStmt as $r) $altByAircraft[strtolower((string)$r['id'])] = (float)$r['ma'];
 
@@ -323,9 +327,10 @@ try {
         if ($type === 15) {
             $stationCounts['Ground station'] = ($stationCounts['Ground station'] ?? 0) + 1;
         } else {
-            $label = $OGN_TYPES[$type] ?? ($type > 0 ? 'Type ' . $type : 'Unknown / unspecified');
+            $label = $OGN_TYPES[$type] ?? ($type > 0 ? 'Type ' . $type : 'Unknown');
             $typeCounts[$label] = ($typeCounts[$label] ?? 0) + 1;
-            if (isset($altByAircraft[$id])) {
+            // Records are only for aircraft still inside the 24h aircraft window.
+            if (isset($altByAircraft[$id]) && isset($posById[$id])) {
                 note_type_record($label, $id, $altByAircraft[$id], $typeMaxAlt, $typeMaxAltId);
             }
         }
@@ -350,23 +355,57 @@ try {
     // The per-hop speed guard mirrors the collector so corrupt jumps cannot inflate the result.
     $distByAircraft = [];
     $distCur = [];
+    // Pull a little history before the window so a track that started earlier
+    // can be recognised and excluded: only tracks with both ends inside the
+    // 24h window count as records.
     $trackStmt = $pdo->prepare('SELECT id, ts, lat, lon FROM tracks WHERE ts >= :cutoff ORDER BY id, ts');
-    $trackStmt->execute([':cutoff' => $cutoff]);
+    $trackStmt->execute([':cutoff' => $cutoff - $trackGapSeconds]);
     $distPrev = [];
+    $preWindow = [];
+    $inWindow = [];
+    $trackStartsInWindow = [];
     while ($tr = $trackStmt->fetch(PDO::FETCH_ASSOC)) {
         $tid = strtolower((string)$tr['id']);
         $tts = (int)$tr['ts'];
         $tlat = (float)$tr['lat'];
         $tlon = (float)$tr['lon'];
+        if ($tts < $cutoff) {
+            $preWindow[$tid] = ['ts' => $tts, 'lat' => $tlat, 'lon' => $tlon];
+            continue;
+        }
+        if (!isset($inWindow[$tid])) {
+            $inWindow[$tid] = true;
+            $startsInWindow = true;
+            $pre = $preWindow[$tid] ?? null;
+            if ($pre !== null) {
+                $dt = max(0, $tts - $pre['ts']);
+                $km = haversine_km($pre['lat'], $pre['lon'], $tlat, $tlon);
+                $allowedKm = max_plausible_speed_kmh($typeById[$tid] ?? 0) * $dt / 3600.0 + 2.0;
+                if ($dt <= $trackGapSeconds && $km <= $allowedKm) $startsInWindow = false;
+            }
+            $trackStartsInWindow[$tid] = $startsInWindow;
+            $distPrev[$tid] = ['ts' => $tts, 'lat' => $tlat, 'lon' => $tlon];
+            continue;
+        }
         $p = $distPrev[$tid] ?? null;
         if ($p !== null) {
-            $km = haversine_km($p['lat'], $p['lon'], $tlat, $tlon);
             $dt = max(0, $tts - $p['ts']);
+            // Stationary hovers are common; skip the trig when the fix has not
+            // moved far enough to matter (~11 m) inside the same gap.
+            if ($dt <= $trackGapSeconds &&
+                abs($tlat - $p['lat']) < 0.0001 && abs($tlon - $p['lon']) < 0.0001) {
+                $distPrev[$tid] = ['ts' => $tts, 'lat' => $tlat, 'lon' => $tlon];
+                continue;
+            }
+            $km = haversine_km($p['lat'], $p['lon'], $tlat, $tlon);
             $allowedKm = max_plausible_speed_kmh($typeById[$tid] ?? 0) * $dt / 3600.0 + 2.0;
             if ($km > $allowedKm || $dt > $trackGapSeconds) {
-                // Close the current track and keep its best distance.
-                $distByAircraft[$tid] = max($distByAircraft[$tid] ?? 0.0, $distCur[$tid] ?? 0.0);
+                // Close the current track, but only keep it if it began inside the window.
+                if ($trackStartsInWindow[$tid]) {
+                    $distByAircraft[$tid] = max($distByAircraft[$tid] ?? 0.0, $distCur[$tid] ?? 0.0);
+                }
                 $distCur[$tid] = 0.0;
+                $trackStartsInWindow[$tid] = true;
                 if ($km > $allowedKm) continue; // corrupt hop: skip it, keep last valid point
             }
             $distCur[$tid] = ($distCur[$tid] ?? 0.0) + $km;
@@ -374,12 +413,14 @@ try {
         $distPrev[$tid] = ['ts' => $tts, 'lat' => $tlat, 'lon' => $tlon];
     }
     foreach ($distCur as $tid => $km) {
+        if (!($trackStartsInWindow[$tid] ?? false)) continue;
         $distByAircraft[$tid] = max($distByAircraft[$tid] ?? 0.0, $km);
     }
     foreach ($distByAircraft as $tid => $km) {
+        if (!isset($posById[$tid])) continue; // outside the 24h aircraft window
         $tt = $typeById[$tid] ?? 0;
         if ($tt === 15) continue;
-        $label = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown / unspecified');
+        $label = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown');
         note_type_record($label, $tid, $km, $typeMaxDist, $typeMaxDistId);
     }
 
@@ -535,9 +576,9 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-card-head h2{font-size:13px;margin:0;font-weight:800}
   .ins-card-sub{font-size:10px;color:var(--muted);white-space:nowrap}
   .ins-card-body{padding:11px 14px 14px}
-  .ins-bar-row{display:grid;grid-template-columns:minmax(210px,290px) minmax(70px,1fr) 58px;gap:9px;align-items:center;margin:7px 0;font-size:12px}
+  .ins-bar-row{display:grid;grid-template-columns:minmax(210px,290px) minmax(70px,1fr) 58px;gap:9px;row-gap:1px;align-items:center;margin:7px 0;font-size:12px}
   .ins-bar-label{min-width:0;white-space:normal;color:#d8e4eb}
-  .ins-bar-sub{color:var(--muted);font-size:10px;margin-left:5px;white-space:nowrap}
+  .ins-bar-sub{grid-column:1/-1;color:var(--muted);font-size:10px;line-height:1.35;white-space:normal}
   .ins-bar-link{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
   .ins-bar-link:hover{color:#fff;border-bottom-color:#fff}
   .ins-bar-track{height:8px;border-radius:5px;background:#223442;overflow:hidden;max-width:180px}
@@ -588,7 +629,7 @@ $genDuration = microtime(true) - $generationStarted;
     .ins-kpi-hero{padding:13px 14px}
     .ins-kpi-hero .ins-kpi-value{font-size:27px}
     .ins-section{margin-top:10px}
-    .ins-bar-row{grid-template-columns:minmax(150px,210px) minmax(40px,1fr) 50px;gap:6px;font-size:11px}
+    .ins-bar-row{grid-template-columns:minmax(150px,210px) minmax(40px,1fr) 50px;gap:6px;row-gap:1px;font-size:11px}
     .ins-bar-track{max-width:120px}
     .ins-table{font-size:11px}
     .ins-table th,.ins-table td{padding:5px 6px}

@@ -28,6 +28,29 @@ const MAX_VALID_TEMP_C     = 55.0;
 // it is not useful for a glider/paraglider tracker.
 const DROP_PACKET_SOURCES  = ['OGADSB'];
 
+const PROXY_CACHE_TTL          = 120;
+const PROXY_STALE_CACHE_TTL    = 300;
+const PROXY_THERMAL_CACHE_TTL  = 600;
+
+/** Remove expired viewer cache files during hourly maintenance, not in web requests. */
+function prune_proxy_cache(string $cacheDir): void {
+    if (!is_dir($cacheDir)) return;
+    $now = time();
+    foreach (glob($cacheDir . '/*.json') ?: [] as $old) {
+        $name = basename($old);
+        if (str_starts_with($name, 'thm_')) {
+            $ttl = PROXY_THERMAL_CACHE_TTL;
+        } elseif (str_starts_with($name, 'live_')) {
+            $ttl = PROXY_STALE_CACHE_TTL;
+        } else {
+            $ttl = PROXY_CACHE_TTL;
+        }
+        if (($now - (int)@filemtime($old)) > $ttl) {
+            @unlink($old);
+        }
+    }
+}
+
 $lockFile = __DIR__ . '/ogn-collector.lock';
 $dbFile   = __DIR__ . '/ogn-live.sqlite';
 
@@ -874,6 +897,7 @@ function flush_batch(
         $stationStatsDirty = [];
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) $pdo->rollBack();
+        error_log('ogn-collector flush failed: ' . $e->getMessage());
     }
 
     $posBatch       = [];
@@ -1217,6 +1241,7 @@ while (microtime(true) < $deadline && !feof($socket)) {
         $flushStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtMetaNames, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doPrune);
         if ($doPrune) {
             $lastPruneTs = $nowTs;
+            prune_proxy_cache(rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache');
             $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
             $stmtMetaKey->execute([':k' => 'last_prune_ts', ':v' => (string)$nowTs]);
             $deletedRows = (int)($flushStats['deleted_rows'] ?? 0);
@@ -1239,6 +1264,7 @@ $nowTs = time();
 $doFinalPrune = ($nowTs - $lastPruneTs) >= 3600;
 $finalStats = flush_batch($pdo, $stmtUpsertPos, $stmtUpsertAlert, $stmtUpsertTelemetry, $stmtUpsertStationWx, $stmtUpsertHeard, $stmtInsertTrack, $stmtInsertThermal, $stmtThermalAllowed, $stmtTouchPos, $stmtUpsertName, $stmtMetaNames, $stmtUpsertStation, $stmtMeta, $posBatch, $alertBatch, $telemetryBatch, $stationWxBatch, $heardBatch, $trackBatch, $thermalBatch, $touchBatch, $nameBatch, $stationBatch, $stationState, $stationAliases, $stationStatsDirty, $doFinalPrune);
 if ($doFinalPrune) {
+    prune_proxy_cache(rtrim(sys_get_temp_dir(), '/\\') . '/ogn_tracker_cache');
     $stmtMetaKey = $pdo->prepare('INSERT INTO meta (key, value) VALUES (:k, :v) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
     $stmtMetaKey->execute([':k' => 'last_prune_ts', ':v' => (string)$nowTs]);
     $lastPruneTs = $nowTs;
