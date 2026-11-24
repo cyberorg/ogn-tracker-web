@@ -19,6 +19,7 @@
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
     <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
+    <button id="btnSounding" type="button" title="Live wind aloft & thermal ceiling from aircraft drift" aria-pressed="false">🌬 Wind Aloft</button>
     <a class="tool-link" href="insights.php" title="24-hour network insights">📊 Insights</a>
     <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
@@ -35,6 +36,7 @@
             <label class="type-option"><input type="checkbox" value="para" checked><span>Paragliders</span></label>
             <label class="type-option"><input type="checkbox" value="wx" checked><span>Wx Stations</span></label>
             <label class="type-option"><input type="checkbox" value="glider"><span>Gliders</span></label>
+            <label class="type-option"><input type="checkbox" value="climbing"><span>Climbing (+1 m/s)</span></label>
             <label class="type-option"><input type="checkbox" value="fanet"><span>FANET</span></label>
             <label class="type-option"><input type="checkbox" value="other"><span>Other</span></label>
             <label class="type-option"><input type="checkbox" value="station"><span>Stations</span></label>
@@ -101,9 +103,17 @@
         <div class="menu-section menu-actions">
           <div class="action-grid">
             <button type="button" class="menu-compact-btn" id="btnResetFilters" title="Reset filters, windows, units, and sort to defaults">Reset filters</button>
+            <button type="button" class="menu-compact-btn" id="btnClearAirspace" hidden>Clear airspace</button>
           </div>
         </div>
       </div>
+    </div>
+    <div id="soundingPanel" class="sounding-panel" role="region" aria-label="Live wind aloft profile" hidden>
+      <div class="sounding-head">
+        <strong>🌬 Wind Aloft</strong>
+        <button id="soundingClose" type="button" class="sounding-close" aria-label="Close wind aloft panel" title="Close">✕</button>
+      </div>
+      <div id="soundingBody" class="sounding-body"></div>
     </div>
     <div id="map" aria-label="Map showing live OGN aircraft"></div>
     <div id="varioLegend" class="vario-legend" role="img" aria-label="Vario colour scale from sink to climb" hidden>
@@ -174,6 +184,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261124n"></script>
+<script src="app.js?v=20261124p"></script>
 </body>
 </html>

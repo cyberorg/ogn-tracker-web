@@ -3,13 +3,16 @@
  * OGN Viewport, Track, Thermal & Replay API (SQLite + local DDB + Gzip + Cache)
  *   Live viewport: ogn-proxy.php?live=1&north=...&south=...&east=...&west=...&window=<sec>&meta=<0|1>
  *   Last known:    ogn-proxy.php?info=1&id=<aircraft_id> (24-hour last-known position for shared links)
- *   Track:         ogn-proxy.php?track=1&id=<aircraft_id>&window=<sec> (or &since=<unix_ts>)
+ *   Track:         ogn-proxy.php?track=1&id=<aircraft_id>&window=<sec> (or &since=<unix_ts>, &full=1)
  *   Thermals:      ogn-proxy.php?thermals=1&north=...&south=...&east=...&west=...
  *   Replay:        ogn-proxy.php?replay=1&ts=<unix_ts>&north=...&south=...&east=...&west=...
  */
 declare(strict_types=1);
 
 const THERMAL_CACHE_TTL = 600;
+const SOUNDING_CACHE_TTL = 60;
+const SOUNDING_MAX_TRACK_ROWS = 24000;
+const SOUNDING_MAX_POINTS_PER_AC = 200;
 const STALE_CACHE_MAX_AGE = 300;
 
 if (!ob_start('ob_gzhandler')) {
@@ -116,6 +119,82 @@ function parse_bounds(): ?array {
 
     // $w > $e is the existing convention for an antimeridian-crossing viewport.
     return [$south, $north, $w, $e, false];
+}
+
+function sounding_haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $dLat = deg2rad($lat2 - $lat1);
+    $dLon = deg2rad($lon2 - $lon1);
+    $a = sin($dLat / 2.0) ** 2 + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon / 2.0) ** 2;
+    return 6371.0 * 2.0 * atan2(sqrt($a), sqrt(1.0 - $a));
+}
+
+function sounding_bearing_deg(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $phi1 = deg2rad($lat1);
+    $phi2 = deg2rad($lat2);
+    $dLon = deg2rad($lon2 - $lon1);
+    $y = sin($dLon) * cos($phi2);
+    $x = cos($phi1) * sin($phi2) - sin($phi1) * cos($phi2) * cos($dLon);
+    return (rad2deg(atan2($y, $x)) + 360.0) % 360.0;
+}
+
+function sounding_angle_delta(float $from, float $to): float {
+    $delta = ($to - $from + 540.0) % 360.0 - 180.0;
+    return $delta;
+}
+
+/** Circular median direction: the observed direction with the lowest total angular distance. */
+function sounding_circular_median_dir(array $dirs): ?float {
+    if (!$dirs) return null;
+    $bestDir = (float)$dirs[0];
+    $bestScore = INF;
+    foreach ($dirs as $candidate) {
+        $score = 0.0;
+        foreach ($dirs as $dir) {
+            $score += abs(sounding_angle_delta((float)$candidate, (float)$dir));
+        }
+        if ($score < $bestScore) {
+            $bestScore = $score;
+            $bestDir = (float)$candidate;
+        }
+    }
+    return $bestDir;
+}
+
+/** Resolved type: packet-derived type first, DDB only when the packet has none. */
+function sounding_aircraft_type(string $raw, $ddbType): int {
+    if (preg_match('/\bid([0-9a-fA-F]{2})[0-9a-fA-F]{6,8}\b/', $raw, $m)) {
+        $parsed = (hexdec($m[1]) >> 2) & 0x0F;
+        if ($parsed > 0) return $parsed === 15 ? 7 : $parsed; // FANET ground beacons use type 15 in the packet
+    }
+    if (preg_match('/[NS][\\\\\/][0-9]{5}\.[0-9]{2}[EW]([_&#r])/', $raw)) return 15;
+    $ddb = (int)$ddbType;
+    return ($ddb >= 1 && $ddb <= 16) ? $ddb : 0;
+}
+
+/** Bolton convective LCL above ground, in metres. Null for unusable humidity. */
+function sounding_lcl_agl(?float $tempC, ?float $humidityPct): ?float {
+    if ($tempC === null || $humidityPct === null) return null;
+    if ($tempC < -50.0 || $tempC > 55.0 || $humidityPct < 10.0 || $humidityPct > 100.0) return null;
+    $t = $tempC;
+    $rh = max(1.0, $humidityPct) / 100.0;
+    $a = 17.625;
+    $b = 243.04;
+    $gamma = log($rh) + ($a * $t) / ($b + $t);
+    $td = $b * $gamma / ($a - $gamma);
+    $tk = $t + 273.15;
+    $tdk = $td + 273.15;
+    $lclK = 1.0 / (1.0 / ($tdk - 56.0) + log($tk / $tdk) / 800.0) + 56.0;
+    // Bolton gives the LCL temperature; convert the temperature deficit to
+    // height with the dry adiabatic lapse rate (9.8 K/km).
+    $agl = ($tk - $lclK) / 0.0098;
+    return is_finite($agl) ? max(0.0, $agl) : null;
+}
+
+function sounding_percentile(array $values, float $pct): ?float {
+    if (!$values) return null;
+    sort($values, SORT_NUMERIC);
+    $idx = (int)ceil(count($values) * $pct / 100.0) - 1;
+    return $values[max(0, min(count($values) - 1, $idx))];
 }
 
 function link_station_alias(array &$aliasGraph, string $a, string $b): void {
@@ -285,17 +364,20 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
     $now   = time();
     $since = filter_input(INPUT_GET, 'since', FILTER_VALIDATE_INT);
+    // Exports need every recorded fix; normal map display keeps the 1500-point
+    // thinning below to stay light on the client.
+    $full = isset($_GET['full']) && $_GET['full'] === '1';
 
     if ($since !== false && $since !== null) {
         $cutoff     = max($now - 86400, min($now, $since));
-        $cacheKey   = 'trk_' . md5($id . '_since_' . $cutoff);
+        $cacheKey   = 'trk_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
         $metaWindow = max(0, $now - $cutoff);
     } else {
         $window = filter_input(INPUT_GET, 'window', FILTER_VALIDATE_INT);
         if ($window === false || $window === null) $window = 900;
         $window     = max(60, min(86400, $window));
         $cutoff     = $now - $window;
-        $cacheKey   = 'trk_' . md5($id . '_win_' . $window);
+        $cacheKey   = 'trk_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
         $metaWindow = $window;
     }
 
@@ -317,7 +399,7 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
             FROM tracks
             WHERE id = :id AND ts >= :cutoff
             ORDER BY ts ASC
-            LIMIT 20000
+            LIMIT ' . ($full ? 100000 : 20000) . '
         ');
         $stmt->execute([':id' => $id, ':cutoff' => $cutoff]);
 
@@ -332,7 +414,7 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
         }
 
         $total = count($points);
-        if ($total > 1500) {
+        if (!$full && $total > 1500) {
             $step = (int)ceil($total / 1500);
             $thinned = [];
             for ($i = 0; $i < $total; $i += $step) {
@@ -433,6 +515,319 @@ if (isset($_GET['thermals']) && $_GET['thermals'] === '1') {
         }
         http_response_code(500);
         echo json_encode(['error' => 'Thermal query error']);
+    }
+    exit;
+}
+
+// --- 3b. Live Wind Aloft & Thermal Ceiling Sounding Endpoint ---
+if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
+    $bounds = parse_bounds();
+    if (!$bounds) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid map bounds']);
+        exit;
+    }
+    [$south, $north, $w, $e, $fullWorld] = $bounds;
+
+    header('Cache-Control: public, max-age=' . SOUNDING_CACHE_TTL);
+    $spanLat = max(0.0, $north - $south);
+    $spanLon = $fullWorld ? 360.0 : fmod(($e - $w) + 360.0, 360.0);
+    if ($fullWorld || ($spanLat * $spanLon) > 25.0) {
+        echo json_encode([
+            'available' => false,
+            'reason' => 'Zoom in to a regional/valley view for local wind sounding.',
+            'layers' => [],
+        ]);
+        exit;
+    }
+
+    // Coarse 0.2° snapping so small pans reuse the same sounding payload.
+    $s02 = floor($south * 5.0) / 5.0;
+    $n02 = ceil($north * 5.0) / 5.0;
+    $w02 = floor($w * 5.0) / 5.0;
+    $e02 = ceil($e * 5.0) / 5.0;
+    $cacheKey = 'snd_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
+    if (($cached = cache_get($cacheDir, $cacheKey, SOUNDING_CACHE_TTL)) !== null) {
+        echo $cached;
+        exit;
+    }
+
+    if (!is_file($dbFile)) {
+        echo json_encode(['available' => false, 'reason' => 'Sounding data is not available yet.', 'layers' => []]);
+        exit;
+    }
+
+    try {
+        $pdo = open_db($dbFile);
+        $cutoff = time() - 3600;
+        $params = [':south' => $south, ':north' => $north, ':cutoff' => $cutoff];
+        if ($fullWorld) {
+            $lonClause = '1=1';
+            $stationLonClause = '1=1';
+        } else {
+            $lonClause = ($w <= $e) ? 't.lon BETWEEN :west AND :east' : '(t.lon >= :west OR t.lon <= :east)';
+            $stationLonClause = ($w <= $e) ? 's.lon BETWEEN :west AND :east' : '(s.lon >= :west OR s.lon <= :east)';
+            $params[':west'] = $w;
+            $params[':east'] = $e;
+        }
+
+        $stmt = $pdo->prepare("
+            SELECT t.id, t.ts, t.lat, t.lon, t.alt,
+                   COALESCE(a.raw, '') AS aircraft_raw,
+                   COALESCE(d.aircraft_type, '') AS ddb_type
+            FROM tracks t
+            LEFT JOIN aircraft a ON a.id = t.id
+            LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+            WHERE t.ts >= :cutoff
+              AND t.lat BETWEEN :south AND :north
+              AND {$lonClause}
+              AND t.alt IS NOT NULL
+            ORDER BY t.ts DESC
+            LIMIT " . SOUNDING_MAX_TRACK_ROWS . "
+        ");
+        $stmt->execute($params);
+        $byAircraft = [];
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $id = (string)$row['id'];
+            if (!isset($byAircraft[$id])) {
+                $byAircraft[$id] = [
+                    'raw' => (string)$row['aircraft_raw'],
+                    'ddb' => (string)$row['ddb_type'],
+                    'pts' => [],
+                ];
+            }
+            $byAircraft[$id]['pts'][] = [
+                'ts' => (int)$row['ts'],
+                'lat' => (float)$row['lat'],
+                'lon' => (float)$row['lon'],
+                'alt' => (float)$row['alt'],
+            ];
+        }
+
+        // Only densely logged sailplanes/paragliders are useful soundings. Keep
+        // at most the newest 200 fixes per aircraft so one busy ID cannot fill
+        // the whole global budget.
+        foreach ($byAircraft as $id => &$entry) {
+            $type = sounding_aircraft_type($entry['raw'], $entry['ddb']);
+            if ($type !== 1 && $type !== 7) {
+                unset($byAircraft[$id]);
+                continue;
+            }
+            usort($entry['pts'], fn($a, $b) => $a['ts'] <=> $b['ts']);
+            if (count($entry['pts']) > SOUNDING_MAX_POINTS_PER_AC) {
+                $entry['pts'] = array_slice($entry['pts'], -SOUNDING_MAX_POINTS_PER_AC);
+            }
+        }
+        unset($entry);
+
+        $turnSamples = [];
+        $climbAlts = [];
+        $climbIds = [];
+        foreach ($byAircraft as $id => $entry) {
+            $pts = $entry['pts'];
+            $n = count($pts);
+
+            // Complete-turn drift: a full circle cancels airspeed and leaves
+            // the wind vector. Require dense fixes and reject straight tow legs.
+            $turnStart = null;
+            $cumTurn = 0.0;
+            $turnDuration = 0;
+            $prevBearing = null;
+            for ($i = 1; $i < $n; $i++) {
+                $p0 = $pts[$i - 1];
+                $p1 = $pts[$i];
+                $dt = $p1['ts'] - $p0['ts'];
+                if ($dt < 1 || $dt > 6) {
+                    $turnStart = null; $cumTurn = 0.0; $turnDuration = 0; $prevBearing = null;
+                    continue;
+                }
+                $segSpeedMps = sounding_haversine_km($p0['lat'], $p0['lon'], $p1['lat'], $p1['lon']) * 1000.0 / $dt;
+                if ($segSpeedMps > 200.0 / 3.6) {
+                    $turnStart = null; $cumTurn = 0.0; $turnDuration = 0; $prevBearing = null;
+                    continue;
+                }
+                $bearing = sounding_bearing_deg($p0['lat'], $p0['lon'], $p1['lat'], $p1['lon']);
+                if ($turnStart === null) {
+                    $turnStart = $i - 1;
+                    $cumTurn = 0.0;
+                    $turnDuration = 0;
+                    $prevBearing = $bearing;
+                    continue;
+                }
+                $cumTurn += sounding_angle_delta($prevBearing, $bearing);
+                $turnDuration += $dt;
+                $prevBearing = $bearing;
+
+                // Prefer a complete 360° turn: at only 300° the aircraft's
+                // airspeed still leaks into the displacement vector and tilts
+                // the derived wind direction. Accept 300° only as a late fallback.
+                $complete = ($turnDuration >= 20 && abs($cumTurn) >= 340.0)
+                    || ($turnDuration > 120 && abs($cumTurn) >= 300.0);
+                if (!$complete) {
+                    if ($turnDuration > 120) {
+                        $turnStart = $i - 1;
+                        $cumTurn = 0.0;
+                        $turnDuration = 0;
+                    }
+                    continue;
+                }
+                $start = $pts[$turnStart];
+                if (($p1['alt'] - $start['alt']) >= -15.0) {
+                    $dLon = $p1['lon'] - $start['lon'];
+                    if ($dLon > 180.0) $dLon -= 360.0;
+                    if ($dLon < -180.0) $dLon += 360.0;
+                    $dNorth = ($p1['lat'] - $start['lat']) * 111320.0;
+                    $dEast = $dLon * 111320.0 * cos(deg2rad(($start['lat'] + $p1['lat']) / 2.0));
+                    $windKmh = hypot($dNorth, $dEast) / $turnDuration * 3.6;
+                    if ($windKmh <= 110.0) {
+                        $meanAlt = ($start['alt'] + $p1['alt']) / 2.0;
+                        $band = (int)(floor($meanAlt / 250.0) * 250.0);
+                        $dir = fmod(rad2deg(atan2(-$dEast, -$dNorth)) + 360.0, 360.0);
+                        $turnSamples[$band][] = ['dir' => $dir, 'spd' => $windKmh, 'id' => $id];
+                    }
+                }
+                $turnStart = $i;
+                $cumTurn = 0.0;
+                $turnDuration = 0;
+            }
+
+            // Empirical thermal ceiling support: climbing segments only.
+            for ($i = 1; $i < $n; $i++) {
+                $dt = $pts[$i]['ts'] - $pts[$i - 1]['ts'];
+                // Dense fixes can be 1–2 s apart; allow those as climb support.
+                if ($dt < 2 || $dt > 60) continue;
+                if (($pts[$i]['alt'] - $pts[$i - 1]['alt']) / $dt >= 0.5) {
+                    $climbAlts[] = $pts[$i]['alt'];
+                    $climbIds[$id] = true;
+                }
+            }
+        }
+
+        $layers = [];
+        foreach ($turnSamples as $band => $samples) {
+            $allIds = [];
+            foreach ($samples as $s) $allIds[$s['id']] = true;
+            if (count($allIds) < 2) continue; // one aircraft must not define a layer
+
+            // Reject wind vectors >60° from the layer's circular median before
+            // averaging, so one bad turn cannot drag the reference direction.
+            $medianDir = sounding_circular_median_dir(array_column($samples, 'dir'));
+            $kept = [];
+            foreach ($samples as $s) {
+                if (abs(sounding_angle_delta($medianDir, $s['dir'])) <= 60.0) $kept[] = $s;
+            }
+            $keptIds = [];
+            foreach ($kept as $s) $keptIds[$s['id']] = true;
+            if (count($kept) < 2 || count($keptIds) < 2) continue;
+
+            $sx = 0.0; $sy = 0.0; $sumSpd = 0.0;
+            foreach ($kept as $s) {
+                $r = deg2rad($s['dir']);
+                $sx += cos($r); $sy += sin($r);
+                $sumSpd += $s['spd'];
+            }
+            $layers[] = [
+                'alt_m' => (int)$band,
+                'dir_deg' => (int)round(fmod(rad2deg(atan2($sy, $sx)) + 360.0, 360.0)),
+                'spd_kmh' => (int)round($sumSpd / count($kept)),
+                'samples' => count($kept),
+                'aircraft' => count($keptIds),
+            ];
+        }
+        usort($layers, fn($a, $b) => $b['alt_m'] <=> $a['alt_m']);
+
+        $thermalCeiling = null;
+        if (count($climbAlts) >= 5 && count($climbIds) >= 2) {
+            $p90 = sounding_percentile($climbAlts, 90.0);
+            if ($p90 !== null) $thermalCeiling = (int)round($p90 / 10.0) * 10;
+        }
+
+        // Surface reference: nearest active weather station to the map centre.
+        $centerLat = ($south + $north) / 2.0;
+        $midLon = ($e < $w) ? $w + (($e + 360.0 - $w) / 2.0) : ($w + $e) / 2.0;
+        $centerLon = fmod($midLon + 540.0, 360.0) - 180.0;
+        $wxStmt = $pdo->prepare("
+            SELECT sw.id, sw.wx_json, sw.updated, s.lat, s.lon,
+                   COALESCE(n.name, '') AS station_name,
+                   COALESCE(a2.raw, '') AS station_raw
+            FROM station_weather sw
+            INNER JOIN stations s ON s.id = sw.id
+            LEFT JOIN names n ON n.id = sw.id
+            LEFT JOIN aircraft a2 ON a2.id = sw.id
+            WHERE sw.updated >= :wxCutoff
+              AND s.lat BETWEEN :south AND :north
+              AND {$stationLonClause}
+            ORDER BY sw.updated DESC
+            LIMIT 300
+        ");
+        $wxParams = [
+            ':wxCutoff' => time() - 1800,
+            ':south' => $south, ':north' => $north,
+        ];
+        if (!$fullWorld) {
+            $wxParams[':west'] = $w;
+            $wxParams[':east'] = $e;
+        }
+        $wxStmt->execute($wxParams);
+        $best = null;
+        while ($wr = $wxStmt->fetch(PDO::FETCH_ASSOC)) {
+            $wx = json_decode((string)$wr['wx_json'], true);
+            if (!is_array($wx)) continue;
+            $tempC = isset($wx['tempC']) && is_numeric($wx['tempC']) ? (float)$wx['tempC'] : null;
+            $humidity = isset($wx['humidityPct']) && is_numeric($wx['humidityPct']) ? (float)$wx['humidityPct'] : null;
+            $lclAgl = sounding_lcl_agl($tempC, $humidity);
+            if ($tempC === null || $lclAgl === null) continue;
+            $dir = isset($wx['dir']) && is_numeric($wx['dir']) ? (int)round((float)$wx['dir']) % 360 : null;
+            $spd = isset($wx['spdKmh']) && is_numeric($wx['spdKmh']) ? (float)$wx['spdKmh'] : null;
+            if ($spd !== null && ($spd < 0.0 || $spd > 200.0)) $spd = null;
+            $distance = sounding_haversine_km($centerLat, $centerLon, (float)$wr['lat'], (float)$wr['lon']);
+            if ($best === null || $distance < $best['distance']) {
+                $elevM = null;
+                if (preg_match('/\/A=(-?\d{6})/', (string)$wr['station_raw'], $am)) {
+                    $elevM = round((int)$am[1] * 0.3048, 1);
+                }
+                $best = [
+                    'distance' => $distance,
+                    'surface' => [
+                        'station' => (string)$wr['station_name'] !== '' ? (string)$wr['station_name'] : strtoupper((string)$wr['id']),
+                        'temp_c' => round($tempC, 1),
+                        'humidity_pct' => (int)round((float)$humidity),
+                        'wind_dir' => $dir,
+                        'wind_kmh' => $spd === null ? null : (int)round($spd),
+                        'lcl_agl_m' => (int)round($lclAgl),
+                        'lcl_msl_m' => $elevM === null ? null : (int)round($lclAgl + $elevM),
+                        'elevation_m' => $elevM === null ? null : (int)round($elevM),
+                        'distance_km' => round($distance, 1),
+                    ],
+                ];
+            }
+        }
+
+        $json = json_encode([
+            'available' => true,
+            'generated_at' => time(),
+            'window_sec' => 3600,
+            'thermal_ceiling_m' => $thermalCeiling,
+            'surface' => $best === null ? null : $best['surface'],
+            'layers' => $layers,
+        ], JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json !== false) {
+            cache_set($cacheDir, $cacheKey, $json);
+            echo $json;
+        } else {
+            echo json_encode(['available' => false, 'reason' => 'Sounding response could not be encoded.', 'layers' => []]);
+        }
+    } catch (Throwable $e) {
+        error_log('ogn-proxy sounding error: ' . $e->getMessage() . ' at ' . basename($e->getFile()) . ':' . $e->getLine());
+        $stale = cache_get($cacheDir, $cacheKey, SOUNDING_CACHE_TTL);
+        if ($stale !== null) {
+            header('X-OGN-Stale: 1');
+            header('Cache-Control: public, max-age=60');
+            echo $stale;
+            exit;
+        }
+        http_response_code(500);
+        echo json_encode(['error' => 'Sounding query error']);
     }
     exit;
 }

@@ -21,6 +21,12 @@ const PURETRACK_LABELS_URL = 'https://puretrack.io/api/labels.json';
 const MAX_RX_RANGE_KM      = 500.0; // Reject impossible RF glitch distances
 const POS_JUMP_TOLERANCE_KM = 2.0;  // Allow small GPS jitter between closely spaced fixes
 const ALT_JUMP_TOLERANCE_M  = 300.0; // Allow barometric/GPS altitude noise between fixes
+// Thermal heatmap gate: towed gliders climb fast and straight, which otherwise
+// looks exactly like a thermal. Fast climbs are kept only when the aircraft is
+// visibly circling.
+const THERMAL_CIRCLE_WINDOW_S     = 60;    // Window for accumulating heading change
+const THERMAL_CIRCLE_MIN_TURN_DEG = 180.0; // A half turn in that window means circling
+const THERMAL_CIRCLE_MAX_SPEED_KMH = 150.0; // Hard ceiling even for circling aircraft
 const POS_SEED_MAX_AGE     = 600;   // Seed continuity state from recent last-known positions
 const MIN_VALID_TEMP_C     = -50.0;
 const MAX_VALID_TEMP_C     = 55.0;
@@ -40,6 +46,8 @@ function prune_proxy_cache(string $cacheDir): void {
         $name = basename($old);
         if (str_starts_with($name, 'thm_')) {
             $ttl = PROXY_THERMAL_CACHE_TTL;
+        } elseif (str_starts_with($name, 'snd_')) {
+            $ttl = 120;
         } elseif (str_starts_with($name, 'live_')) {
             $ttl = PROXY_STALE_CACHE_TTL;
         } else {
@@ -235,6 +243,27 @@ function haversine_km(float $lat1, float $lon1, float $lat2, float $lon2): float
     return 6371.0 * 2.0 * atan2(sqrt($a), sqrt(1.0 - $a));
 }
 
+function bearing_deg(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $phi1 = deg2rad($lat1);
+    $phi2 = deg2rad($lat2);
+    $dLon = deg2rad($lon2 - $lon1);
+    $y = sin($dLon) * cos($phi2);
+    $x = cos($phi1) * sin($phi2) - sin($phi1) * cos($phi2) * cos($dLon);
+    return (rad2deg(atan2($y, $x)) + 360.0) % 360.0;
+}
+
+function angle_delta_deg(float $a, float $b): float {
+    $delta = abs($a - $b) % 360.0;
+    return $delta > 180.0 ? 360.0 - $delta : $delta;
+}
+
+/** Ground-speed ceiling for thermal samples; fast, straight climbs are tow flights. */
+function max_thermal_speed_kmh(int $type): float {
+    if ($type === 7) return 55.0; // paraglider
+    if ($type === 1) return 90.0; // glider
+    return 100.0;                 // unknown / DDB-resolved types
+}
+
 /** Credible ground-speed ceiling, mirroring the per-type reported-speed caps below. */
 function max_plausible_speed_kmh(int $type): float {
     if (in_array($type, [4, 6, 7, 13], true)) return 250.0;
@@ -256,6 +285,27 @@ function max_plausible_climb_mps(int $type): float {
     if (in_array($type, [4, 6, 7, 13], true)) return 40.0; // parachutist / hang glider / paraglider / drone
     if ($type === 1) return 40.0;                          // glider (strong lift / wave)
     return 50.0;                                           // powered and other aircraft
+}
+
+/** DDB aircraft type for a 6-digit device ID, or 0 when unavailable/invalid. */
+function ddb_aircraft_type(PDO $pdo, string $ddbId): int {
+    static $cache = [];
+    if ($ddbId === '' || !preg_match('/^[0-9a-f]{6}$/', $ddbId)) return 0;
+    if (array_key_exists($ddbId, $cache)) return $cache[$ddbId];
+
+    $type = 0;
+    try {
+        $stmt = $pdo->prepare('SELECT aircraft_type FROM ddb WHERE id = :id LIMIT 1');
+        $stmt->execute([':id' => $ddbId]);
+        $raw = $stmt->fetchColumn();
+        if ($raw !== false && $raw !== null && $raw !== '') {
+            $parsed = filter_var($raw, FILTER_VALIDATE_INT);
+            if ($parsed !== false && $parsed >= 1 && $parsed <= 16) $type = (int)$parsed;
+        }
+    } catch (Throwable $e) {
+        $type = 0;
+    }
+    return $cache[$ddbId] = $type;
 }
 
 /** True when an altitude would need impossible climb/descent since the last accepted altitude. */
@@ -1044,6 +1094,11 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     elseif ($sym === 'X') $type = 3;
                     elseif ($sym === 'O') $type = 11;
                 }
+                // An unknown packet type must not loosen the guards when the DDB
+                // knows the aircraft. Never override an explicit packet-derived type.
+                if (!$isStation && $type === 0 && $ddbId !== '') {
+                    $type = ddb_aircraft_type($pdo, $ddbId);
+                }
 
                 $remainder = substr($line, $bm[0][1] + strlen($bm[0][0]));
                 $speed = null;
@@ -1161,7 +1216,10 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         }
                     }
 
-                    if ($type === 7) {
+                    // Gliders and paragliders are the aircraft whose dense 3D tracks
+                    // are useful for wind-aloft reconstruction and thermal soundings.
+                    // Keep every fix for them; other types stay throttled to limit DB growth.
+                    if ($type === 1 || $type === 7) {
                         $logPoint = true;
                     } else {
                         $prev = $lastTrackPoint[$id] ?? null;
@@ -1187,24 +1245,60 @@ while (microtime(true) < $deadline && !feof($socket)) {
                     // Packet type wins; DDB is only consulted when the packet has no type.
                     if ($alt !== null) {
                         $thermalPrev = $lastThermalPoint[$id] ?? null;
+                        $thermalFix = [
+                            'ts' => $now, 'alt' => $alt, 'lat' => $lat, 'lon' => $lon,
+                            'bearing' => null, 'turnDeg' => 0.0, 'turnStartTs' => $now,
+                        ];
                         if ($thermalPrev !== null) {
                             $dt = $now - $thermalPrev['ts'];
                             if ($dt >= 3 && $dt <= 120) {
+                                // Track heading continuously so a fast climb can still be
+                                // accepted when it is clearly a circling thermal.
+                                $bearing = bearing_deg(
+                                    (float)($thermalPrev['lat'] ?? $lat),
+                                    (float)($thermalPrev['lon'] ?? $lon),
+                                    $lat,
+                                    $lon
+                                );
+                                $turnStartTs = $now;
+                                $turnDeg = 0.0;
+                                $prevTurnStart = (int)($thermalPrev['turnStartTs'] ?? $thermalPrev['ts']);
+                                if ($thermalPrev['bearing'] !== null && ($now - $prevTurnStart) <= THERMAL_CIRCLE_WINDOW_S) {
+                                    $turnDeg = (float)($thermalPrev['turnDeg'] ?? 0.0)
+                                        + angle_delta_deg($bearing, (float)$thermalPrev['bearing']);
+                                    $turnStartTs = $prevTurnStart;
+                                }
+                                $thermalFix['bearing'] = $bearing;
+                                $thermalFix['turnDeg'] = $turnDeg;
+                                $thermalFix['turnStartTs'] = $turnStartTs;
+
                                 $climb = ($alt - $thermalPrev['alt']) / $dt;
                                 if ($climb >= 1.5 && $climb <= 15.0) {
-                                    $thermalBatch[$id . '|' . $now] = [
-                                        'id'        => $id,
-                                        'ts'        => $now,
-                                        'lat'       => $lat,
-                                        'lon'       => $lon,
-                                        'intensity' => round(min(1.0, $climb / 5.0), 2),
-                                        'type'      => (int)$type,
-                                        'typeKnown' => $type > 0,
-                                    ];
+                                    $speedKmh = haversine_km(
+                                        (float)($thermalPrev['lat'] ?? $lat),
+                                        (float)($thermalPrev['lon'] ?? $lon),
+                                        $lat,
+                                        $lon
+                                    ) / $dt * 3600.0;
+                                    $maxSpeed = max_thermal_speed_kmh((int)$type);
+                                    $circling = $speedKmh > $maxSpeed
+                                        && $speedKmh <= THERMAL_CIRCLE_MAX_SPEED_KMH
+                                        && $turnDeg >= THERMAL_CIRCLE_MIN_TURN_DEG;
+                                    if ($speedKmh <= $maxSpeed || $circling) {
+                                        $thermalBatch[$id . '|' . $now] = [
+                                            'id'        => $id,
+                                            'ts'        => $now,
+                                            'lat'       => $lat,
+                                            'lon'       => $lon,
+                                            'intensity' => round(min(1.0, $climb / 5.0), 2),
+                                            'type'      => (int)$type,
+                                            'typeKnown' => $type > 0,
+                                        ];
+                                    }
                                 }
                             }
                         }
-                        $lastThermalPoint[$id] = ['ts' => $now, 'alt' => $alt];
+                        $lastThermalPoint[$id] = $thermalFix;
                     }
                 }
             } else {

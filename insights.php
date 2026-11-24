@@ -424,6 +424,23 @@ try {
         note_type_record($label, $tid, $km, $typeMaxDist, $typeMaxDistId);
     }
 
+    // Leaderboards use the same filtered records as the per-type links above.
+    $topDistance = [];
+    foreach ($distByAircraft as $tid => $km) {
+        if (!isset($posById[$tid]) || ($typeById[$tid] ?? 0) === 15) continue;
+        $topDistance[$tid] = $km;
+    }
+    arsort($topDistance, SORT_NUMERIC);
+    $topDistance = array_slice($topDistance, 0, 10, true);
+
+    $topAltitude = [];
+    foreach ($altByAircraft as $tid => $alt) {
+        if (!isset($posById[$tid]) || ($typeById[$tid] ?? 0) === 15) continue;
+        $topAltitude[$tid] = $alt;
+    }
+    arsort($topAltitude, SORT_NUMERIC);
+    $topAltitude = array_slice($topAltitude, 0, 10, true);
+
     arsort($typeCounts);
     arsort($stationCounts);
     arsort($networkCounts);
@@ -717,6 +734,38 @@ $genDuration = microtime(true) - $generationStarted;
         $typeHtml .= barRow($label, $c, $typeTotal, $colors[$i++ % count($colors)], $sub, $links);
     }
     echo sectionCard('Aircraft types', n($typeTotal) . ' aircraft', $typeHtml ?: '<div class="ins-empty">No aircraft seen.</div>');
+
+    // Top flights leaderboards, built from the same 24h record arrays as the links above.
+    $topDistanceRows = [];
+    foreach ($topDistance as $id => $km) {
+        $pos = $posById[$id] ?? [null, null];
+        $url = tracker_hash_url($pos[0], $pos[1], $id);
+        $label = h($names[$id] ?? strtoupper($id));
+        $nameHtml = $url !== ''
+            ? '<a href="' . h($url) . '" title="Show ' . h($id) . ' on the tracker">' . $label . '</a>'
+            : $label;
+        $tt = $typeById[$id] ?? 0;
+        $typeLabel = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown');
+        $topDistanceRows[] = [$nameHtml, h($typeLabel), '<span class="num">' . number_format($km, 1) . ' km</span>'];
+    }
+    $topAltitudeRows = [];
+    foreach ($topAltitude as $id => $alt) {
+        $pos = $posById[$id] ?? [null, null];
+        $url = tracker_hash_url($pos[0], $pos[1], $id);
+        $label = h($names[$id] ?? strtoupper($id));
+        $nameHtml = $url !== ''
+            ? '<a href="' . h($url) . '" title="Show ' . h($id) . ' on the tracker">' . $label . '</a>'
+            : $label;
+        $tt = $typeById[$id] ?? 0;
+        $typeLabel = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown');
+        $topAltitudeRows[] = [$nameHtml, h($typeLabel), '<span class="num">' . n(round($alt)) . ' m</span>'];
+    }
+    $topHtml = '<div class="ins-split">'
+        . simpleTable(['Aircraft', 'Type', 'Distance'], $topDistanceRows)
+        . simpleTable(['Aircraft', 'Type', 'Max alt'], $topAltitudeRows)
+        . '</div>'
+        . '<p class="ins-note">Plausibility-filtered track data, not verified flights: corrupted positions or reused IDs can still appear. Open a tracker link to inspect the path before relying on a value.</p>';
+    echo sectionCard('Top flights (24h)', 'longest tracks & highest climbs (unverified)', $topHtml);
 
     // Hourly traffic chart.
     $hourData = [];

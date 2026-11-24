@@ -5,9 +5,11 @@ const PINNED_STORAGE_KEY = 'ogn_pinned_aircraft';
 const MENU_PREFS_STORAGE_KEY = 'ogn_menu_prefs';
 const ALERTS_24H_STORAGE_KEY = 'ogn_alerts_24h';
 const NAME_CACHE_STORAGE_KEY = 'ogn_name_cache';
+const AIRSPACE_STORAGE_KEY = 'ogn_custom_airspace_geojson';
 const NAME_CACHE_MAX = 1000;
 const WX_CACHE_TTL_MS = 30 * 60 * 1000;
 const ALERT_24H_TTL_MS = 24 * 60 * 60 * 1000;
+const SOUNDING_NO_DATA_MSG = 'Not enough circling tracks in the last hour to reconstruct wind aloft.';
 const OFFLINE_THRESHOLD_SEC = 180;
 const MIN_VALID_TEMP_C = -50;
 const MAX_VALID_TEMP_C = 55;
@@ -36,6 +38,8 @@ let speedUnit = 'kmh';
 let tempUnit = 'c';
 let climbUnit = 'mps';
 let alertsEnabled = false;
+let lastSoundingData = null;
+let lastSoundingBoundsKey = '';
 let savedTypes = ['para', 'wx'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
@@ -353,11 +357,6 @@ function syncMapFullscreenUi() {
 
 const mapFullscreenControl = new FullscreenControl().addTo(map);
 document.addEventListener('fullscreenchange', syncMapFullscreenUi);
-document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && $('mapWrap').classList.contains('map-fullscreen')) {
-    toggleMapFullscreen();
-  }
-});
 syncMapFullscreenUi();
 
 raisePopupPane();
@@ -412,6 +411,7 @@ function syncUnitButtons() {
   syncVarioLegend();
   updateFilterBadge();
   syncScaleControl();
+  renderSounding();
 }
 
 function applyUnitPreset(mode) {
@@ -447,6 +447,24 @@ const airspaceLayer = L.geoJSON(null, {
     }
   }
 });
+// Restore a previously uploaded airspace/hazard file without asking the user again.
+// Adding the layer programmatically does not fire Leaflet's overlayadd event, so
+// also record it in the saved selection or applySavedLayers() would hide it again.
+let restoredAirspace = false;
+try {
+  const savedAirspace = localStorage.getItem(AIRSPACE_STORAGE_KEY);
+  if (savedAirspace) {
+    airspaceLayer.addData(JSON.parse(savedAirspace));
+    restoredAirspace = airspaceLayer.getLayers().length > 0;
+  }
+} catch (err) {
+  localStorage.removeItem(AIRSPACE_STORAGE_KEY);
+}
+if (restoredAirspace) {
+  if (!savedOverlays.includes('airspace')) savedOverlays.push('airspace');
+  if (!map.hasLayer(airspaceLayer)) airspaceLayer.addTo(map);
+}
+syncClearAirspaceButton();
 
 const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
 const overlayMaps = { "Thermals (Today)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
@@ -530,7 +548,6 @@ const clusterGroup = L.markerClusterGroup({
 const emergencyGroup = L.layerGroup().addTo(map);
 const replayGroup = L.layerGroup();
 const replayTrackGroup = L.layerGroup();
-
 let isSpiderfied = false;
 clusterGroup.on('spiderfied', () => { isSpiderfied = true; });
 clusterGroup.on('unspiderfied', () => { isSpiderfied = false; render(); });
@@ -1120,43 +1137,188 @@ async function loadTrack(address) {
   }
 }
 
-function downloadIgc(address) {
-  const entry = selectedTracks.get(address);
-  if (!entry || !entry.points || entry.points.length < 2) {
-    showToast('No track points loaded yet.', 3200);
-    return;
+const IGC_CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    table[i] = c >>> 0;
   }
-  const a = aircraft.find(x => x.address === address);
-  const name = a ? displayName(a) : address.toUpperCase();
-  const d0 = new Date(entry.points[0][3] * 1000);
-  const pad = (n, l = 2) => String(Math.floor(Math.abs(n))).padStart(l, '0');
-  const dateStr = `${pad(d0.getUTCDate())}${pad(d0.getUTCMonth() + 1)}${pad(d0.getUTCFullYear() % 100)}`;
+  return table;
+})();
 
+const igcPad = (n, len = 2) => String(Math.floor(Math.abs(n))).padStart(len, '0');
+
+function igcCrc32(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = IGC_CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function splitTrackSegments(points, gapSec = 600) {
+  const segments = [];
+  let current = [];
+  for (const point of points) {
+    if (!Array.isArray(point) || point.length < 4) continue;
+    const ts = Number(point[3]);
+    if (!Number.isFinite(ts)) continue;
+    if (current.length && ts - Number(current[current.length - 1][3]) > gapSec) {
+      if (current.length >= 2) segments.push(current);
+      current = [];
+    }
+    current.push(point);
+  }
+  if (current.length >= 2) segments.push(current);
+  return segments;
+}
+
+function buildIgcText(points, name) {
+  const d0 = new Date(Number(points[0][3]) * 1000);
+  const dateStr = `${igcPad(d0.getUTCDate())}${igcPad(d0.getUTCMonth() + 1)}${igcPad(d0.getUTCFullYear() % 100)}`;
   const lines = [
     'AOGN001',
     `HFDTE${dateStr}`,
     `HFPLTPILOTINCHARGE:${name}`,
     `HFGIDGLIDERID:${name}`
   ];
-
-  for (const [lat, lon, alt, ts] of entry.points) {
+  for (const point of points) {
+    const lat = Number(point[0]);
+    const lon = Number(point[1]);
+    const alt = point[2] === null || point[2] === undefined ? null : Number(point[2]);
+    const ts = Number(point[3]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(ts)) continue;
     const dt = new Date(ts * 1000);
-    const hms = `${pad(dt.getUTCHours())}${pad(dt.getUTCMinutes())}${pad(dt.getUTCSeconds())}`;
+    const hms = `${igcPad(dt.getUTCHours())}${igcPad(dt.getUTCMinutes())}${igcPad(dt.getUTCSeconds())}`;
     const latDeg = Math.floor(Math.abs(lat)), latMin = Math.round((Math.abs(lat) - latDeg) * 60000);
     const lonDeg = Math.floor(Math.abs(lon)), lonMin = Math.round((Math.abs(lon) - lonDeg) * 60000);
-    const latStr = `${pad(latDeg, 2)}${pad(latMin, 5)}${lat >= 0 ? 'N' : 'S'}`;
-    const lonStr = `${pad(lonDeg, 3)}${pad(lonMin, 5)}${lon >= 0 ? 'E' : 'W'}`;
-    const altVal = Math.max(0, Math.round(alt || 0));
-    lines.push(`B${hms}${latStr}${lonStr}A00000${pad(altVal, 5)}`);
+    const latStr = `${igcPad(latDeg, 2)}${igcPad(latMin, 5)}${lat >= 0 ? 'N' : 'S'}`;
+    const lonStr = `${igcPad(lonDeg, 3)}${igcPad(lonMin, 5)}${lon >= 0 ? 'E' : 'W'}`;
+    const altVal = Math.max(0, Math.round(Number.isFinite(alt) ? alt : 0));
+    lines.push(`B${hms}${latStr}${lonStr}A00000${igcPad(altVal, 5)}`);
+  }
+  return lines.join('\r\n') + '\r\n';
+}
+
+async function fetchFullTrackPoints(address) {
+  const res = await fetch(`ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&window=86400&full=1`, { cache: 'no-store' });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data.points) ? data.points : [];
+}
+
+function buildIgcZip(files) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const locals = [];
+  const central = [];
+  let offset = 0;
+
+  for (const file of files) {
+    const nameBytes = enc.encode(file.name);
+    const dataBytes = enc.encode(file.data);
+    const crc = igcCrc32(dataBytes);
+
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, dataBytes.length, true);
+    lv.setUint32(22, dataBytes.length, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+    locals.push(local, dataBytes);
+
+    const dir = new Uint8Array(46 + nameBytes.length);
+    const dv = new DataView(dir.buffer);
+    dv.setUint32(0, 0x02014b50, true);
+    dv.setUint16(4, 20, true);
+    dv.setUint16(6, 20, true);
+    dv.setUint16(8, 0x0800, true);
+    dv.setUint16(10, 0, true);
+    dv.setUint16(12, dosTime, true);
+    dv.setUint16(14, dosDate, true);
+    dv.setUint32(16, crc, true);
+    dv.setUint32(20, dataBytes.length, true);
+    dv.setUint32(24, dataBytes.length, true);
+    dv.setUint16(28, nameBytes.length, true);
+    dv.setUint16(30, 0, true);
+    dv.setUint16(32, 0, true);
+    dv.setUint16(34, 0, true);
+    dv.setUint16(36, 0, true);
+    dv.setUint32(38, 0, true);
+    dv.setUint32(42, offset, true);
+    dir.set(nameBytes, 46);
+    central.push(dir);
+
+    offset += local.length + dataBytes.length;
   }
 
-  const blob = new Blob([lines.join('\r\n') + '\r\n'], { type: 'application/octet-stream' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `${name.replace(/[^a-z0-9_-]/gi, '_')}_${dateStr}.igc`;
-  link.click();
-  URL.revokeObjectURL(url);
+  const centralSize = central.reduce((sum, chunk) => sum + chunk.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, central.length, true);
+  ev.setUint16(10, central.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, offset, true);
+  ev.setUint16(20, 0, true);
+
+  return new Blob([...locals, ...central, eocd], { type: 'application/zip' });
+}
+
+async function downloadIgc(address) {
+  showToast('Preparing IGC export…', 1200);
+  const points = await fetchFullTrackPoints(address);
+  if (points.length < 2) {
+    showToast('No track points in the last 24 hours.', 3200);
+    return;
+  }
+  const segments = splitTrackSegments(points);
+  if (!segments.length) {
+    showToast('No complete track in the last 24 hours.', 3200);
+    return;
+  }
+  const a = aircraft.find(x => x.address === address);
+  const name = a ? displayName(a) : String(address).toUpperCase();
+  const safeName = name.replace(/[^a-z0-9_-]/gi, '_');
+  const first = new Date(Number(points[0][3]) * 1000);
+  const dateStr = `${igcPad(first.getUTCDate())}${igcPad(first.getUTCMonth() + 1)}${igcPad(first.getUTCFullYear() % 100)}`;
+
+  if (segments.length === 1) {
+    downloadBlob(new Blob([buildIgcText(segments[0], name)], { type: 'application/octet-stream' }), `${safeName}_${dateStr}.igc`);
+    showToast('IGC downloaded');
+    return;
+  }
+
+  const files = segments.map((segment, index) => {
+    const start = new Date(Number(segment[0][3]) * 1000);
+    const startHms = `${igcPad(start.getUTCHours())}${igcPad(start.getUTCMinutes())}${igcPad(start.getUTCSeconds())}`;
+    return {
+      name: `${safeName}_${dateStr}_T${igcPad(index + 1)}_${startHms}.igc`,
+      data: buildIgcText(segment, name)
+    };
+  });
+  downloadBlob(buildIgcZip(files), `${safeName}_${dateStr}_tracks.zip`);
+  showToast(`${segments.length} IGC tracks downloaded`, 2400);
 }
 
 function jumpToAlertAddress(address) {
@@ -2204,7 +2366,8 @@ function matchesSelectedTypes(a, selectedTypes) {
     (selectedTypes.has('fanet') && isFanet(a) && rType !== 15) ||
     (selectedTypes.has('other') && rType !== 1 && rType !== 7 && rType !== 15) ||
     (selectedTypes.has('station') && rType === 15) ||
-    (selectedTypes.has('wx') && Boolean(a.weather));
+    (selectedTypes.has('wx') && Boolean(a.weather)) ||
+    (selectedTypes.has('climbing') && rType !== 15 && a.climb != null && Number(a.climb) >= 1.0);
 }
 
 function filtered() {
@@ -2671,15 +2834,9 @@ document.addEventListener('click', e => {
     ].join('\n');
     navigator.clipboard.writeText(txt).then(() => { btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = '📋 SAR'; }, 1500); }).catch(() => copyTextToClipboard(txt, 'SAR copied'));
   } else if (act === 'igc') {
-    if (!selectedTracks.has(addr)) {
-      selectedTracks.set(addr, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
-      loadTrack(addr).then(ok => {
-        if (ok) downloadIgc(addr);
-        else showToast('Track unavailable or still loading', 3200);
-      });
-    } else {
-      downloadIgc(addr);
-    }
+    // Export always uses the full 24h fix history, independent of the map's
+    // current track window and thinning.
+    downloadIgc(addr);
   }
 });
 
@@ -2748,6 +2905,177 @@ map.on('overlayremove', e => {
 });
 
 setInterval(() => fetchThermals(true), 600000);
+
+// Wind aloft sounding: 0.2° snapped bounds mirror ogn-proxy.php's cache key so
+// small pans reuse the same payload instead of starting another query.
+function soundingParamsForBounds(b) {
+  const step = 5;
+  const south = Math.max(-90, Math.min(90, Math.floor(b.getSouth() * step) / step));
+  const north = Math.max(-90, Math.min(90, Math.ceil(b.getNorth() * step) / step));
+  const rawWest = b.getWest(), rawEast = b.getEast();
+  const wRaw = Math.floor(rawWest * step) / step;
+  const eRaw = Math.ceil(rawEast * step) / step;
+  const fullWorld = (rawEast - rawWest) >= 360 || (eRaw - wRaw) >= 360;
+  let west, east;
+  if (fullWorld) {
+    west = -180; east = 180;
+  } else if (eRaw < wRaw) {
+    const viaEast = (eRaw + 360) - wRaw;
+    const viaWest = wRaw - eRaw;
+    if (viaWest < viaEast) {
+      west = thermalNormLon(eRaw); east = thermalNormLon(wRaw);
+    } else {
+      west = thermalNormLon(wRaw); east = thermalNormLon(eRaw + 360);
+    }
+  } else {
+    west = thermalNormLon(wRaw); east = thermalNormLon(eRaw);
+  }
+  return new URLSearchParams({
+    sounding: '1',
+    south: south.toFixed(1), north: north.toFixed(1),
+    west: west.toFixed(1), east: east.toFixed(1)
+  });
+}
+
+function soundingIsOpen() {
+  const panel = $('soundingPanel');
+  return !!panel && !panel.hidden;
+}
+
+function setSoundingOpen(open) {
+  const panel = $('soundingPanel');
+  if (!panel) return;
+  if (open && mapFilterPanel && !mapFilterPanel.hidden) closeFilterPanel(false);
+  panel.hidden = !open;
+  const btn = $('btnSounding');
+  if (btn) {
+    btn.classList.toggle('active', open);
+    btn.setAttribute('aria-pressed', String(open));
+  }
+  if (open) {
+    if (!lastSoundingData) {
+      $('soundingBody').innerHTML = '<div class="sounding-empty">Loading sounding…</div>';
+    }
+    fetchSounding(true);
+  }
+}
+
+function soundingWindArrow(deg) {
+  if (!Number.isFinite(deg)) return '·';
+  const dirs = ['↑','↗','→','↘','↓','↙','←','↖'];
+  return dirs[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+}
+
+function soundingSpeedClass(kmh) {
+  if (!Number.isFinite(kmh)) return '';
+  return kmh < 20 ? 'weak' : kmh < 40 ? 'mid' : 'strong';
+}
+
+async function fetchSounding(force = false) {
+  if (!soundingIsOpen()) return;
+  const params = soundingParamsForBounds(map.getBounds());
+  const key = params.toString();
+  if (!force && key === lastSoundingBoundsKey) return;
+  lastSoundingBoundsKey = key;
+
+  const seq = (fetchSounding._seq = (fetchSounding._seq || 0) + 1);
+  if (!lastSoundingData) {
+    $('soundingBody').innerHTML = '<div class="sounding-empty">Loading sounding…</div>';
+  }
+  try {
+    const res = await fetch(`ogn-proxy.php?${params}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (seq !== fetchSounding._seq || !soundingIsOpen()) return;
+    lastSoundingData = { ...data, _key: key };
+    renderSounding();
+  } catch (e) {
+    if (seq !== fetchSounding._seq || !soundingIsOpen()) return;
+    lastSoundingData = {
+      available: false,
+      reason: 'Could not load wind aloft right now.',
+      layers: []
+    };
+    renderSounding();
+  }
+}
+
+function renderSounding() {
+  const body = $('soundingBody');
+  if (!body || !soundingIsOpen()) return;
+  const data = lastSoundingData;
+  if (!data) {
+    body.innerHTML = '<div class="sounding-empty">Loading sounding…</div>';
+    return;
+  }
+  if (data.available === false || data.error) {
+    body.innerHTML = `<div class="sounding-empty">${esc(data.reason || data.error || 'Wind aloft is unavailable.')}</div>`;
+    return;
+  }
+
+  const layers = Array.isArray(data.layers) ? data.layers : [];
+  const surface = data.surface || null;
+  const ceiling = Number.isFinite(data.thermal_ceiling_m) ? data.thermal_ceiling_m : null;
+  const pills = [];
+  if (ceiling !== null) {
+    pills.push(`<span class="sounding-pill ceiling">Thermal top ≈ ${esc(fmtAltValue(ceiling))}</span>`);
+  }
+  if (surface && Number.isFinite(surface.lcl_agl_m)) {
+    const msl = Number.isFinite(surface.lcl_msl_m)
+      ? ` / ${esc(fmtAltValue(surface.lcl_msl_m))} MSL` : '';
+    pills.push(`<span class="sounding-pill cloud">Cu base ≈ ${esc(fmtAltValue(surface.lcl_agl_m))} AGL${msl}</span>`);
+  }
+
+  const surfaceBits = [];
+  if (surface) {
+    if (surface.station) surfaceBits.push(esc(surface.station));
+    if (Number.isFinite(surface.distance_km)) {
+      const d = fmtDistanceKm(surface.distance_km);
+      if (d) surfaceBits.push(d);
+    }
+    const temp = fmtTemp(surface.temp_c);
+    if (temp) surfaceBits.push(temp);
+    if (Number.isFinite(surface.humidity_pct)) surfaceBits.push(`${Math.round(surface.humidity_pct)}% RH`);
+    if (Number.isFinite(surface.wind_dir) && Number.isFinite(surface.wind_kmh)) {
+      const spd = fmtWindSpeed(surface.wind_kmh);
+      if (spd) surfaceBits.push(`${soundingWindArrow(surface.wind_dir)} ${Math.round(surface.wind_dir)}° from ${spd}`);
+    }
+  }
+
+  const notes = [];
+  if (Number.isFinite(data.generated_at)) {
+    const stamp = new Date(data.generated_at * 1000);
+    if (!Number.isNaN(stamp.getTime())) {
+      notes.push(`Updated ${stamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+    }
+  }
+  notes.push('From completed circles in the last hour; estimates only.');
+  if (!surface) notes.push('No recent station weather in view for cloud base.');
+
+  const layerHtml = layers.length ? layers.map(l => {
+    const alt = fmtAltCompact(l.alt_m);
+    const dir = Number.isFinite(l.dir_deg) ? Math.round(l.dir_deg) : null;
+    const spd = Number.isFinite(l.spd_kmh) ? l.spd_kmh : null;
+    const spdText = spd === null ? '—' : fmtWindSpeed(spd);
+    const arrow = dir === null ? '·' : soundingWindArrow(dir);
+    const dirText = dir === null ? 'Variable' : `${dir}° from`;
+    const ac = Math.max(0, Math.round(l.aircraft || 0));
+    const samples = Math.max(0, Math.round(l.samples || 0));
+    return `<div class="sounding-layer">` +
+      `<span class="sounding-alt">${esc(alt)}</span>` +
+      `<span class="sounding-arrow">${esc(arrow)}</span>` +
+      `<span class="sounding-dir">${esc(dirText)}</span>` +
+      `<span class="sounding-spd ${soundingSpeedClass(spd)}">${esc(spdText)}</span>` +
+      `<span class="sounding-count">${ac} aircraft · ${samples} turn${samples === 1 ? '' : 's'}</span>` +
+      `</div>`;
+  }).join('') : `<div class="sounding-empty">${esc(SOUNDING_NO_DATA_MSG)}</div>`;
+
+  body.innerHTML =
+    (pills.length ? `<div class="sounding-pills">${pills.join('')}</div>` : '') +
+    (surfaceBits.length ? `<div class="sounding-surface">${surfaceBits.join(' · ')}</div>` : '') +
+    layerHtml +
+    `<div class="sounding-note">${esc(notes.join(' '))}</div>`;
+}
 
 const WIDE_VIEW_AREA = 100;
 let nextLivePollAtMs = 0;
@@ -3399,7 +3727,7 @@ map.on('moveend', () => {
   clearTimeout(moveTimer);
   moveTimer = setTimeout(() => {
     if (replayActive) loadReplaySlice();
-    else { fetchLive(true); fetchThermals(); }
+    else { fetchLive(true); fetchThermals(); fetchSounding(); }
   }, 300);
 });
 
@@ -3533,6 +3861,7 @@ const mapFilterControl = $('mapFilterControl');
 const mapFilterToggle = $('mapFilterToggle');
 const mapFilterPanel = $('mapFilterPanel');
 function openFilterPanel() {
+  if (soundingIsOpen()) setSoundingOpen(false);
   mapFilterPanel.hidden = false;
   mapFilterToggle.setAttribute('aria-expanded', 'true');
   const first = mapFilterPanel.querySelector('input,select,button');
@@ -3554,9 +3883,33 @@ document.addEventListener('click', e => {
   if (!mapFilterControl.contains(e.target)) closeFilterPanel(false);
 });
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && !mapFilterPanel.hidden) {
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  const target = event.target;
+  const tag = target && target.tagName ? String(target.tagName).toUpperCase() : '';
+  const editable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !!(target && target.isContentEditable);
+
+  if (editable) return;
+
+  if (event.key === 'Escape') {
     event.preventDefault();
-    closeFilterPanel(true);
+    if (!mapFilterPanel.hidden) closeFilterPanel(true);
+    else if (soundingIsOpen()) setSoundingOpen(false);
+    else if ($('mapWrap').classList.contains('map-fullscreen')) toggleMapFullscreen();
+    else if (selectedTracks.size > 0) { clearAllTracks(); render(); }
+    return;
+  }
+
+  const key = event.key.toLowerCase();
+  if (event.key === '/') {
+    event.preventDefault();
+    $('search').focus();
+    $('search').select();
+  } else if (key === 'r') {
+    event.preventDefault();
+    setReplayMode(!replayActive);
+  } else if (key === 'f') {
+    event.preventDefault();
+    if (!replayActive && activeTrackAddress) toggleFollow(activeTrackAddress);
   }
 });
 
@@ -3684,6 +4037,14 @@ $('btnNotify').addEventListener('click', async () => {
   $('btnNotify').setAttribute('aria-pressed', String(alertsEnabled));
 });
 
+function syncClearAirspaceButton() {
+  const btn = $('btnClearAirspace');
+  if (btn) btn.hidden = airspaceLayer.getLayers().length === 0;
+}
+
+$('btnSounding').addEventListener('click', () => setSoundingOpen($('soundingPanel').hidden));
+$('soundingClose').addEventListener('click', () => setSoundingOpen(false));
+
 $('btnAirspace').addEventListener('click', () => $('airspaceFile').click());
 $('airspaceFile').addEventListener('change', async e => {
   const file = e.target.files[0];
@@ -3694,10 +4055,28 @@ $('airspaceFile').addEventListener('change', async e => {
     airspaceLayer.clearLayers();
     airspaceLayer.addData(gj);
     if (!map.hasLayer(airspaceLayer)) airspaceLayer.addTo(map);
+    let saved = false;
+    try {
+      const json = JSON.stringify(gj);
+      if (json.length < 1_500_000) {
+        localStorage.setItem(AIRSPACE_STORAGE_KEY, json);
+        saved = true;
+      }
+    } catch (err) {
+      saved = false;
+    }
+    if (!saved) showToast('Airspace loaded (too large to save across reloads)', 3200);
+    syncClearAirspaceButton();
   } catch (err) {
     showToast('Could not parse airspace file. Please use valid GeoJSON or OpenAir (.txt).', 3200);
   }
   e.target.value = '';
+});
+$('btnClearAirspace').addEventListener('click', () => {
+  airspaceLayer.clearLayers();
+  localStorage.removeItem(AIRSPACE_STORAGE_KEY);
+  syncClearAirspaceButton();
+  showToast('Airspace cleared');
 });
 
 $('locate').addEventListener('click', () => {
