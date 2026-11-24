@@ -71,6 +71,112 @@ function packet_hex_id(string $raw): string {
     return strtolower(substr($m[1], -6));
 }
 
+/**
+ * Canonical device key for one stored aircraft ID. OGN/FLR/FNT share the same
+ * 24-bit device hex, so the relay prefix in the callsign is deliberately
+ * ignored. Rows without a usable hex keep their own lowercase ID and are never
+ * merged with unrelated aircraft.
+ */
+function device_group_key(string $ddbId, string $raw, string $fallbackId): string {
+    $hex = strtolower(trim($ddbId));
+    if ($hex === '') $hex = packet_hex_id($raw);
+    return $hex !== '' ? 'hex:' . $hex : 'id:' . strtolower($fallbackId);
+}
+
+/**
+ * All stored aircraft IDs belonging to the same device as $id. Used by replay
+ * follow filtering so a followed OGN alias also sees FLR/FNT history.
+ *
+ * @return string[] lowercase IDs, always including $id first
+ */
+function alias_ids_for_device(PDO $pdo, string $id): array {
+    $id = strtolower(trim($id));
+    if ($id === '') return [];
+    $ids = [$id];
+    $stmt = $pdo->prepare('SELECT ddb_id, raw FROM aircraft WHERE id = :id LIMIT 1');
+    $stmt->execute([':id' => $id]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) return $ids;
+    $hex = strtolower(trim((string)($row['ddb_id'] ?? '')));
+    if ($hex === '') $hex = packet_hex_id((string)($row['raw'] ?? ''));
+    if ($hex === '') return $ids;
+    $aliasStmt = $pdo->prepare('SELECT DISTINCT id FROM aircraft WHERE ddb_id = :hex');
+    $aliasStmt->execute([':hex' => $hex]);
+    while (($alias = $aliasStmt->fetchColumn()) !== false) {
+        $alias = strtolower((string)$alias);
+        if ($alias !== '' && !in_array($alias, $ids, true)) $ids[] = $alias;
+    }
+    return $ids;
+}
+
+/**
+ * Newest aircraft packet per device group for a set of stored IDs. Alerts can
+ * be raised by one relay while a different relay of the same hex is the one
+ * still sending packets, so alert display needs the whole device's latest row.
+ *
+ * @return array<string,array> keyed by device_group_key()
+ */
+function latest_aircraft_by_group(PDO $pdo, array $ids): array {
+    $ids = array_values(array_unique(array_filter(array_map(
+        static fn($id): string => strtolower(trim((string)$id)),
+        $ids
+    ))));
+    if ($ids === []) return [];
+
+    $select = "
+        SELECT a.id, a.ddb_id, a.raw, a.lat, a.lon, a.timestamp, a.is_emergency,
+               COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
+        FROM aircraft a
+        LEFT JOIN names n ON a.id = n.id
+        LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
+        LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+    ";
+    $latest = [];
+    $ddbIds = [];
+    $collect = static function (PDOStatement $stmt) use (&$latest, &$ddbIds): void {
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $key = device_group_key(
+                (string)($row['ddb_id'] ?? ''),
+                (string)($row['raw'] ?? ''),
+                (string)$row['id']
+            );
+            if (!isset($latest[$key]) || (int)$row['timestamp'] > (int)$latest[$key]['timestamp']) {
+                $latest[$key] = $row;
+            }
+            $ddbId = strtolower(trim((string)($row['ddb_id'] ?? '')));
+            if ($ddbId !== '') $ddbIds[$ddbId] = true;
+        }
+    };
+
+    foreach (array_chunk($ids, 400) as $chunk) {
+        $names = [];
+        $params = [];
+        foreach ($chunk as $i => $id) {
+            $name = ':aid' . $i;
+            $names[] = $name;
+            $params[$name] = $id;
+        }
+        $stmt = $pdo->prepare($select . ' WHERE a.id IN (' . implode(',', $names) . ') ORDER BY a.timestamp DESC');
+        $stmt->execute($params);
+        $collect($stmt);
+    }
+    if ($ddbIds === []) return $latest;
+
+    foreach (array_chunk(array_keys($ddbIds), 400) as $chunk) {
+        $names = [];
+        $params = [];
+        foreach ($chunk as $i => $ddbId) {
+            $name = ':did' . $i;
+            $names[] = $name;
+            $params[$name] = $ddbId;
+        }
+        $stmt = $pdo->prepare($select . ' WHERE a.ddb_id IN (' . implode(',', $names) . ') ORDER BY a.timestamp DESC');
+        $stmt->execute($params);
+        $collect($stmt);
+    }
+    return $latest;
+}
+
 function open_db(string $dbFile): PDO {
     $pdo = new PDO('sqlite:' . $dbFile, null, null, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
@@ -286,6 +392,100 @@ function extract_altitude_from_raw(string $raw): ?float
     return null;
 }
 
+/**
+ * Collapse several alert rows for one physical device into one display row.
+ * Candidates carry the fields produced by the alerts queries. The earliest
+ * first_ts and newest alert reason survive; status/position come from the
+ * newest last packet of any alias so OGN/FLR/FNT relays cannot create duplicate
+ * alerts or hide a later "all clear".
+ */
+function merge_alert_candidates(array $candidates): array {
+    $candidates = array_values($candidates);
+    if ($candidates === []) return [];
+
+    // The alert reason/time come from the newest alert event, while the shown
+    // position/status come from the newest packet of any alias. Keeping the two
+    // winners separate stops an older "all clear" relay from hiding a newer
+    // alert reason from another relay of the same device.
+    $alertCandidates = $candidates;
+    usort($alertCandidates, static function (array $a, array $b): int {
+        $cmp = (int)($b['ts'] ?? 0) <=> (int)($a['ts'] ?? 0);
+        if ($cmp !== 0) return $cmp;
+        return (int)($b['latest_ts'] ?? 0) <=> (int)($a['latest_ts'] ?? 0);
+    });
+    $alertWinner = $alertCandidates[0];
+
+    $latestCandidates = $candidates;
+    usort($latestCandidates, static function (array $a, array $b): int {
+        $cmp = (int)($b['latest_ts'] ?? 0) <=> (int)($a['latest_ts'] ?? 0);
+        if ($cmp !== 0) return $cmp;
+        return (int)($b['ts'] ?? 0) <=> (int)($a['ts'] ?? 0);
+    });
+    $latestWinner = $latestCandidates[0];
+
+    $firstTs = PHP_INT_MAX;
+    foreach ($candidates as $c) {
+        $cFirst = (int)($c['first_ts'] ?? 0);
+        if ($cFirst <= 0) $cFirst = (int)($c['ts'] ?? 0);
+        if ($cFirst > 0 && $cFirst < $firstTs) $firstTs = $cFirst;
+    }
+    if ($firstTs === PHP_INT_MAX) $firstTs = (int)($alertWinner['ts'] ?? 0);
+
+    $alertTs    = (int)($alertWinner['ts'] ?? 0);
+    $alertRaw   = (string)($alertWinner['alert_raw'] ?? $alertWinner['raw'] ?? '');
+    $latestRaw  = (string)($latestWinner['latest_raw'] ?? $latestWinner['raw'] ?? $alertRaw);
+    $rawForAlt  = (string)($latestWinner['raw'] ?? $latestRaw);
+    if ($rawForAlt === '') $rawForAlt = $alertRaw;
+    $latestTs   = (int)($latestWinner['latest_ts'] ?? $alertTs);
+    $latestEmerg = !empty($latestWinner['latest_emerg']);
+    $latestHasAlert = $latestEmerg
+        || (bool)preg_match('/\bFNT7[cdef]\b/i', $latestRaw)
+        || (bool)preg_match('/\bsq(7700|7600|7500)\b/i', $latestRaw)
+        || (bool)preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $latestRaw);
+    $subsequentNormal = ($latestTs > $alertTs) && !$latestHasAlert;
+    $stillAlertOnLast = !$subsequentNormal && $latestHasAlert;
+
+    $storedStatus = clean_alert_status((string)($alertWinner['status'] ?? ''));
+    $decodedAlertStatus = format_packet_status($alertRaw, $storedStatus !== '' ? $storedStatus : 'Alert');
+    if ($decodedAlertStatus !== 'Alert') $storedStatus = clean_alert_status($decodedAlertStatus);
+    $lastStatus = $subsequentNormal
+        ? format_packet_status($latestRaw, 'Normal packet')
+        : format_packet_status($latestRaw, $storedStatus);
+
+    $alt = extract_altitude_from_raw($rawForAlt);
+    if ($alt === null) $alt = extract_altitude_from_raw($alertRaw);
+    if ($alt === null) $alt = $alertWinner['alt'] ?? $latestWinner['alt'] ?? null;
+
+    $label = extract_ogn_stream_name($rawForAlt);
+    if ($label === '') $label = clean_ogn_name((string)($alertWinner['name'] ?? ''));
+    if ($label === '') $label = clean_ogn_name((string)($alertWinner['callsign'] ?? ''));
+    if ($label === '') $label = clean_ogn_name((string)($alertWinner['registration'] ?? ''));
+    if ($label === '') $label = strtoupper((string)($latestWinner['address'] ?? ''));
+
+    $mergedIds = [];
+    foreach ($candidates as $c) {
+        $addr = strtolower((string)($c['address'] ?? ''));
+        if ($addr !== '' && !in_array($addr, $mergedIds, true)) $mergedIds[] = $addr;
+    }
+
+    return [
+        'address'        => (string)($latestWinner['address'] ?? ''),
+        'name'           => $label,
+        'status'         => $storedStatus,
+        'last_status'    => $lastStatus,
+        'lat'            => $latestWinner['lat'] ?? null,
+        'lon'            => $latestWinner['lon'] ?? null,
+        'alt'            => $alt,
+        'raw'            => $rawForAlt,
+        'ts'             => $alertTs,
+        'first_ts'       => $firstTs,
+        'latest_ts'      => $latestTs > 0 ? $latestTs : $alertTs,
+        'normal_after'   => $subsequentNormal,
+        'alert_still_on' => $stillAlertOnLast,
+        'merged_ids'     => $mergedIds,
+    ];
+}
+
 // --- 1. Last-known aircraft info (for shared links) ---
 if (isset($_GET['info']) && $_GET['info'] === '1') {
     $id = strtolower(trim((string)($_GET['id'] ?? '')));
@@ -407,23 +607,7 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
         // Resolve OGN/FLR/FNT aliases of the same device so one selected
         // aircraft draws one continuous history instead of three fragments.
-        $trackIds = [$id];
-        $hexStmt = $pdo->prepare('SELECT ddb_id, raw FROM aircraft WHERE id = :id LIMIT 1');
-        $hexStmt->execute([':id' => $id]);
-        $metaRow = $hexStmt->fetch(PDO::FETCH_ASSOC);
-        $hex = '';
-        if ($metaRow) {
-            $hex = strtolower((string)($metaRow['ddb_id'] ?? ''));
-            if ($hex === '') $hex = packet_hex_id((string)($metaRow['raw'] ?? ''));
-        }
-        if ($hex !== '') {
-            $aliasStmt = $pdo->prepare('SELECT DISTINCT id FROM aircraft WHERE ddb_id = :hex');
-            $aliasStmt->execute([':hex' => $hex]);
-            while (($alias = $aliasStmt->fetchColumn()) !== false) {
-                $alias = strtolower((string)$alias);
-                if ($alias !== '' && !in_array($alias, $trackIds, true)) $trackIds[] = $alias;
-            }
-        }
+        $trackIds = alias_ids_for_device($pdo, $id);
 
         $placeholders = implode(',', array_fill(0, count($trackIds), '?'));
         $stmt = $pdo->prepare('
@@ -585,7 +769,7 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
     $n02 = ceil($north * 5.0) / 5.0;
     $w02 = floor($w * 5.0) / 5.0;
     $e02 = ceil($e * 5.0) / 5.0;
-    $cacheKey = 'snd_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
+    $cacheKey = 'snd_v2_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
     if (($cached = cache_get($cacheDir, $cacheKey, SOUNDING_CACHE_TTL)) !== null) {
         echo $cached;
         exit;
@@ -638,6 +822,7 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             }
             $typeStmt = $pdo->prepare("
                 SELECT a.id,
+                       COALESCE(a.ddb_id, '') AS ddb_id,
                        COALESCE(a.raw, '') AS aircraft_raw,
                        COALESCE(d.aircraft_type, '') AS ddb_type
                 FROM aircraft a
@@ -646,22 +831,38 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             ");
             $typeStmt->execute($typeParams);
             while ($typeRow = $typeStmt->fetch(PDO::FETCH_ASSOC)) {
-                $typeInfo[(string)$typeRow['id']] = [
-                    'raw' => (string)$typeRow['aircraft_raw'],
-                    'ddb' => (string)$typeRow['ddb_type'],
+                $storedId = (string)$typeRow['id'];
+                $typeInfo[$storedId] = [
+                    'raw'   => (string)$typeRow['aircraft_raw'],
+                    'ddb'   => (string)$typeRow['ddb_type'],
+                    'group' => device_group_key(
+                        (string)$typeRow['ddb_id'],
+                        (string)$typeRow['aircraft_raw'],
+                        $storedId
+                    ),
                 ];
             }
         }
 
         $soundingIds = [];
+        $groupInfo = [];
         foreach ($typeInfo as $id => $info) {
             $type = sounding_aircraft_type($info['raw'], $info['ddb']);
             if ($type === 1 || $type === 7) $soundingIds[] = (string)$id;
+            if ($type !== 1 && $type !== 7) continue;
+            // OGN/FLR/FNT aliases of one device must share one bucket, one
+            // point budget and one vote in the distinct-aircraft checks.
+            $groupKey = $info['group'] ?? ('id:' . $id);
+            // Keep one eligible alias's raw/DDB pair together: mixing raw from
+            // one relay with DDB data from another could reclassify the device.
+            if (!isset($groupInfo[$groupKey])) {
+                $groupInfo[$groupKey] = ['raw' => $info['raw'], 'ddb' => $info['ddb']];
+            }
         }
 
         $byAircraft = [];
         $collectedRows = 0;
-        $perAircraftCounts = [];
+        $perGroupCounts = [];
         foreach (array_chunk($soundingIds, 400) as $idChunk) {
             if ($collectedRows >= SOUNDING_MAX_TRACK_ROWS) break;
             $names = [];
@@ -685,22 +886,24 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             while ($row = $pointStmt->fetch(PDO::FETCH_ASSOC)) {
                 if ($collectedRows >= SOUNDING_MAX_TRACK_ROWS) break;
                 $id = (string)$row['id'];
-                $count = $perAircraftCounts[$id] ?? 0;
+                $groupKey = $typeInfo[$id]['group'] ?? ('id:' . $id);
+                $count = $perGroupCounts[$groupKey] ?? 0;
                 if ($count >= SOUNDING_MAX_POINTS_PER_AC) continue;
-                if (!isset($byAircraft[$id])) {
-                    $byAircraft[$id] = [
-                        'raw' => $typeInfo[$id]['raw'] ?? '',
-                        'ddb' => $typeInfo[$id]['ddb'] ?? '',
+                if (!isset($byAircraft[$groupKey])) {
+                    $group = $groupInfo[$groupKey] ?? ['raw' => '', 'ddb' => ''];
+                    $byAircraft[$groupKey] = [
+                        'raw' => $group['raw'],
+                        'ddb' => $group['ddb'],
                         'pts' => [],
                     ];
                 }
-                $byAircraft[$id]['pts'][] = [
+                $byAircraft[$groupKey]['pts'][] = [
                     'ts' => (int)$row['ts'],
                     'lat' => (float)$row['lat'],
                     'lon' => (float)$row['lon'],
                     'alt' => (float)$row['alt'],
                 ];
-                $perAircraftCounts[$id] = $count + 1;
+                $perGroupCounts[$groupKey] = $count + 1;
                 $collectedRows++;
             }
         }
@@ -955,7 +1158,7 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
     }
 
     header('Cache-Control: public, max-age=30');
-    $cacheKey = 'rpl_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%s', $south, $north, $w, $e, $fullWorld ? 1 : 0, $tsBucket, $followId));
+    $cacheKey = 'rpl2_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%s', $south, $north, $w, $e, $fullWorld ? 1 : 0, $tsBucket, $followId));
     if (($cached = cache_get($cacheDir, $cacheKey, 30)) !== null) {
         echo $cached;
         exit;
@@ -976,8 +1179,16 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
         ];
         $idClause = '';
         if ($followId !== '') {
-            $idClause = ' AND id = :id';
-            $params[':id'] = $followId;
+            // A followed OGN alias must also see FLR/FNT history from the same
+            // 24-bit device, otherwise replay fragments one flight into three.
+            $followIds = alias_ids_for_device($pdo, $followId);
+            $idNames = [];
+            foreach ($followIds as $i => $alias) {
+                $name = ':rid' . $i;
+                $idNames[] = $name;
+                $params[$name] = $alias;
+            }
+            $idClause = ' AND id IN (' . implode(',', $idNames) . ')';
         }
         if ($fullWorld) {
             $lonClause = '1=1';
@@ -989,7 +1200,8 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
 
         $stmt = $pdo->prepare("
             SELECT latest.id, latest.lat, latest.lon, latest.alt, latest.ts,
-                   COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
+                   COALESCE(n.name, pn.name) AS name, d.callsign, d.registration,
+                   a.ddb_id, a.raw
             FROM (
                 SELECT id, lat, lon, alt, MAX(ts) AS ts
                 FROM tracks
@@ -1003,20 +1215,44 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
             LEFT JOIN names n ON latest.id = n.id
             LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+            ORDER BY latest.ts DESC
         ");
         $stmt->execute($params);
 
-        $out = [];
+        $groups = [];
         while ($r = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $label = clean_ogn_name($r['name']) ?: (clean_ogn_name($r['callsign']) ?: (clean_ogn_name($r['registration']) ?: strtoupper((string)$r['id'])));
-            $out[] = [
-                'id'    => $r['id'],
+            $storedId = strtolower((string)$r['id']);
+            // When following one alias, keep that exact ID in the response so
+            // the client's focused-marker comparison (p.id === follow id) works.
+            $entryId = ($followId !== '') ? $followId : $storedId;
+            $key = device_group_key((string)($r['ddb_id'] ?? ''), (string)($r['raw'] ?? ''), $storedId);
+            $label = clean_ogn_name($r['name'])
+                ?: (clean_ogn_name($r['callsign'])
+                ?: (clean_ogn_name($r['registration'])
+                ?: strtoupper($entryId)));
+            $entry = [
+                'id'    => $entryId,
                 'label' => $label,
                 'lat'   => (float)$r['lat'],
                 'lon'   => (float)$r['lon'],
                 'alt'   => $r['alt'] !== null ? round((float)$r['alt']) : null,
                 'ts'    => (int)$r['ts'],
             ];
+            if (!isset($groups[$key])) {
+                $groups[$key] = ['entry' => null, 'ids' => []];
+            }
+            $groups[$key]['ids'][$storedId] = true;
+            if ($groups[$key]['entry'] === null || $entry['ts'] > (int)$groups[$key]['entry']['ts']) {
+                $groups[$key]['entry'] = $entry;
+            }
+        }
+
+        $out = [];
+        foreach ($groups as $group) {
+            $entry = $group['entry'];
+            if ($entry === null) continue;
+            $entry['merged_ids'] = array_keys($group['ids']);
+            $out[] = $entry;
         }
 
         $json = json_encode(['ts' => $tsBucket, 'aircraft' => $out], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
@@ -1184,7 +1420,7 @@ try {
     $namesUpdated = (int)($metaRows['names_updated'] ?? 0);
 
     // v2: packets sharing a device hex are collapsed to one representative.
-    $cacheKey = 'live2_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0, $namesUpdated));
+    $cacheKey = 'live3_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f_%d_%d_%d_%d', $south, $north, $w, $e, $fullWorld ? 1 : 0, $window, $includeMeta ? 1 : 0, $namesUpdated));
     if (!$noCache && ($cached = cache_get($cacheDir, $cacheKey, $liveTtl)) !== null) {
         echo $cached;
         exit;
@@ -1323,7 +1559,7 @@ try {
 
     // 24-hour alerts (excluding routine 'Need a ride' / FNT78) with alert reason, last-seen coords/time, and post-alert state
     $alerts24h = [];
-    $alertsCacheKey = 'alerts24h_v10';
+    $alertsCacheKey = 'alerts24h_v11';
     $alertsCached = cache_get($cacheDir, $alertsCacheKey, 10);
     if ($alertsCached !== null) {
         $decodedAlerts = json_decode($alertsCached, true);
@@ -1338,11 +1574,12 @@ try {
         }
     } else {
         try {
-            $byAddr = [];
+            $groups = [];
             $hasAlertsTable = (bool)$pdo->query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alerts'")->fetchColumn();
             if ($hasAlertsTable) {
                 $stmtAl = $pdo->prepare("
                     SELECT al.id, al.status, al.lat, al.lon, al.alt, al.raw, al.last_ts, al.first_ts,
+                           a.ddb_id AS latest_ddb_id,
                            a.lat AS latest_lat, a.lon AS latest_lon,
                            a.timestamp AS latest_ts, a.is_emergency AS latest_emerg, a.raw AS latest_raw,
                            COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
@@ -1354,7 +1591,7 @@ try {
                     WHERE al.last_ts >= :cutoff24
                       AND lower(al.status) NOT LIKE 'need a ride%'
                     ORDER BY al.last_ts DESC
-                    LIMIT 100
+                    LIMIT 500
                 ");
                 $stmtAl->execute([':cutoff24' => $cutoff24]);
                 while ($ar = $stmtAl->fetch(PDO::FETCH_ASSOC)) {
@@ -1364,22 +1601,6 @@ try {
                     $alertRaw = (string)$ar['raw'];
                     $latestTs = $ar['latest_ts'] !== null ? (int)$ar['latest_ts'] : $alertTs;
                     $latestRaw = (string)($ar['latest_raw'] ?? $alertRaw);
-                    $latestEmerg = (int)($ar['latest_emerg'] ?? 0) === 1;
-                    $latestHasAlert = $latestEmerg
-                        || (bool)preg_match('/\bFNT7[cdef]\b/i', $latestRaw)
-                        || (bool)preg_match('/\bsq(7700|7600|7500)\b/i', $latestRaw)
-                        || (bool)preg_match('/\b(MAYDAY|SOS|EMERGENCY)\b/i', $latestRaw);
-                    $subsequentNormal = ($latestTs > $alertTs) && !$latestHasAlert;
-                    $stillAlertOnLast = !$subsequentNormal && $latestHasAlert;
-
-                    $storedStatus = clean_alert_status($ar['status'] ?? '');
-                    $decodedAlertStatus = format_packet_status($alertRaw, $storedStatus !== '' ? $storedStatus : 'Alert');
-                    if ($decodedAlertStatus !== 'Alert') {
-                        $storedStatus = clean_alert_status($decodedAlertStatus);
-                    }
-                    $lastStatus = $subsequentNormal
-                        ? format_packet_status($latestRaw, 'Normal packet')
-                        : format_packet_status($latestRaw, $storedStatus);
 
                     $lastLat = $ar['latest_lat'] !== null ? (float)$ar['latest_lat'] : ($ar['lat'] !== null ? (float)$ar['lat'] : null);
                     $lastLon = $ar['latest_lon'] !== null ? (float)$ar['latest_lon'] : ($ar['lon'] !== null ? (float)$ar['lon'] : null);
@@ -1388,27 +1609,36 @@ try {
                     if ($alertAlt === null) $alertAlt = extract_altitude_from_raw($rawForAlt);
                     if ($alertAlt === null) $alertAlt = extract_altitude_from_raw($alertRaw);
 
-                    $label = extract_ogn_stream_name($rawForAlt) ?: (clean_ogn_name($ar['name']) ?: (clean_ogn_name($ar['callsign']) ?: (clean_ogn_name($ar['registration']) ?: strtoupper((string)$ar['id']))));
-                    $byAddr[$addr] = [
+                    // Keep every alias as a candidate; merge_alert_candidates()
+                    // decides which one supplies status/position after all rows
+                    // for this physical device have been collected.
+                    $key = device_group_key(
+                        (string)($ar['latest_ddb_id'] ?? ''),
+                        $latestRaw !== '' ? $latestRaw : $alertRaw,
+                        $addr
+                    );
+                    $groups[$key][] = [
                         'address'        => $addr,
-                        'name'           => $label,
-                        'status'         => $storedStatus,
-                        'last_status'    => $lastStatus,
+                        'name'           => (string)($ar['name'] ?? ''),
+                        'callsign'       => (string)($ar['callsign'] ?? ''),
+                        'registration'   => (string)($ar['registration'] ?? ''),
+                        'status'         => (string)($ar['status'] ?? ''),
+                        'alert_raw'      => $alertRaw,
+                        'raw'            => $rawForAlt,
+                        'latest_raw'     => $latestRaw,
                         'lat'            => $lastLat,
                         'lon'            => $lastLon,
                         'alt'            => $alertAlt,
-                        'raw'            => $rawForAlt,
                         'ts'             => $alertTs,
                         'first_ts'       => $firstTs,
                         'latest_ts'      => $latestTs,
-                        'normal_after'   => $subsequentNormal,
-                        'alert_still_on' => $stillAlertOnLast,
+                        'latest_emerg'   => (int)($ar['latest_emerg'] ?? 0) === 1,
                     ];
                 }
             }
 
             $stmtA24 = $pdo->prepare("
-                SELECT a.id, a.lat, a.lon, a.raw, a.timestamp, a.is_emergency,
+                SELECT a.id, a.ddb_id, a.lat, a.lon, a.raw, a.timestamp, a.is_emergency,
                        COALESCE(n.name, pn.name) AS name, d.callsign, d.registration
                 FROM aircraft a
                 LEFT JOIN names n ON a.id = n.id
@@ -1429,29 +1659,81 @@ try {
             while ($ar = $stmtA24->fetch(PDO::FETCH_ASSOC)) {
                 $addr = strtolower((string)$ar['id']);
                 $ts = (int)$ar['timestamp'];
-                if (isset($byAddr[$addr]) && $byAddr[$addr]['ts'] >= $ts) continue;
                 $raw = (string)$ar['raw'];
-                $status = format_packet_status($raw, 'Alert');
-                $label = extract_ogn_stream_name($raw) ?: (clean_ogn_name($ar['name']) ?: (clean_ogn_name($ar['callsign']) ?: (clean_ogn_name($ar['registration']) ?: strtoupper((string)$ar['id']))));
-                $byAddr[$addr] = [
+                $key = device_group_key((string)($ar['ddb_id'] ?? ''), $raw, $addr);
+                $groups[$key][] = [
                     'address'        => $addr,
-                    'name'           => $label,
-                    'status'         => $status,
-                    'last_status'    => $status,
+                    'name'           => (string)($ar['name'] ?? ''),
+                    'callsign'       => (string)($ar['callsign'] ?? ''),
+                    'registration'   => (string)($ar['registration'] ?? ''),
+                    'status'         => format_packet_status($raw, 'Alert'),
+                    'alert_raw'      => $raw,
+                    'raw'            => $raw,
+                    'latest_raw'     => $raw,
                     'lat'            => (float)$ar['lat'],
                     'lon'            => (float)$ar['lon'],
                     'alt'            => extract_altitude_from_raw($raw),
-                    'raw'            => $raw,
                     'ts'             => $ts,
                     'first_ts'       => $ts,
                     'latest_ts'      => $ts,
-                    'normal_after'   => false,
-                    'alert_still_on' => true,
+                    'latest_emerg'   => true,
                 ];
             }
 
-            $alerts24h = array_values($byAddr);
+            // An alert can come from OGN while FNT is the alias still sending
+            // normal packets. Add a synthetic candidate carrying that newest
+            // device packet so the merged row can report the real all-clear.
+            $lookupIds = [];
+            foreach ($groups as $candidates) {
+                foreach ($candidates as $c) {
+                    $addr = strtolower((string)($c['address'] ?? ''));
+                    if ($addr !== '') $lookupIds[$addr] = true;
+                }
+            }
+            $deviceLatest = latest_aircraft_by_group($pdo, array_keys($lookupIds));
+            foreach ($groups as $key => &$candidates) {
+                if (!isset($deviceLatest[$key])) continue;
+                $latestRow = $deviceLatest[$key];
+                $latestTs = (int)($latestRow['timestamp'] ?? 0);
+                $seenLatestTs = 0;
+                $alertBase = null;
+                foreach ($candidates as $c) {
+                    $seenLatestTs = max($seenLatestTs, (int)($c['latest_ts'] ?? 0));
+                    if ($alertBase === null || (int)($c['ts'] ?? 0) > (int)($alertBase['ts'] ?? 0)) {
+                        $alertBase = $c;
+                    }
+                }
+                if ($alertBase === null || $latestTs <= $seenLatestTs) continue;
+                $latestRaw = (string)($latestRow['raw'] ?? '');
+                $candidates[] = [
+                    'address'        => strtolower((string)$latestRow['id']),
+                    'name'           => (string)($latestRow['name'] ?? ''),
+                    'callsign'       => (string)($latestRow['callsign'] ?? ''),
+                    'registration'   => (string)($latestRow['registration'] ?? ''),
+                    'status'         => (string)($alertBase['status'] ?? ''),
+                    'alert_raw'      => (string)($alertBase['alert_raw'] ?? ''),
+                    'raw'            => $latestRaw,
+                    'latest_raw'     => $latestRaw,
+                    'lat'            => $latestRow['lat'] !== null ? (float)$latestRow['lat'] : null,
+                    'lon'            => $latestRow['lon'] !== null ? (float)$latestRow['lon'] : null,
+                    'alt'            => extract_altitude_from_raw($latestRaw),
+                    'ts'             => (int)($alertBase['ts'] ?? 0),
+                    'first_ts'       => (int)($alertBase['first_ts'] ?? 0),
+                    'latest_ts'      => $latestTs,
+                    'latest_emerg'   => (int)($latestRow['is_emergency'] ?? 0) === 1,
+                ];
+            }
+            unset($candidates);
+
+            $alerts24h = [];
+            foreach ($groups as $candidates) {
+                $merged = merge_alert_candidates($candidates);
+                if ($merged !== []) $alerts24h[] = $merged;
+            }
             usort($alerts24h, static fn(array $a, array $b): int => $b['ts'] <=> $a['ts']);
+            // The alert-table query over-fetches so three aliases of one device
+            // cannot consume the whole display budget before they are merged.
+            $alerts24h = array_slice($alerts24h, 0, 100);
             $alertsJson = json_encode($alerts24h, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
             if ($alertsJson !== false) {
                 cache_set($cacheDir, $alertsCacheKey, $alertsJson);
