@@ -44,6 +44,8 @@ let savedBaroEnabled = false;
 let savedBaseLayer = 'terrain';
 let savedOverlays = [];
 let listSort = 'name';
+let search24hResults = [];   // aircraft found outside the viewport via the 24h search fallback
+let search24hSeq = 0;
 let applyingSavedLayers = false;
 let baroEnabled = false;
 let collectorPaused = false;
@@ -164,6 +166,7 @@ function applySavedMenuPrefs() {
 
 function resetFilters() {
   $('search').value = '';
+  clearSearch24h();
   savedTypes = ['para', 'wx'];
   savedMarkerWindow = '900';
   savedTrackWindow = '900';
@@ -1243,6 +1246,9 @@ function toggleSelection(address, openOnMap = false) {
         } else {
           clusterGroup.zoomToShowLayer(m, () => m.openPopup());
         }
+      } else {
+        const fb = search24hResults.find(x => x.address === address);
+        if (fb) map.setView([fb.lat, fb.lon], Math.max(map.getZoom(), 12));
       }
     }
   }
@@ -2190,6 +2196,17 @@ function getSelectedTypes() {
   return chosen.size > 0 ? chosen : null;
 }
 
+function matchesSelectedTypes(a, selectedTypes) {
+  if (!selectedTypes) return true;
+  const rType = getResolvedType(a);
+  return (selectedTypes.has('glider') && rType === 1) ||
+    (selectedTypes.has('para') && rType === 7) ||
+    (selectedTypes.has('fanet') && isFanet(a) && rType !== 15) ||
+    (selectedTypes.has('other') && rType !== 1 && rType !== 7 && rType !== 15) ||
+    (selectedTypes.has('station') && rType === 15) ||
+    (selectedTypes.has('wx') && Boolean(a.weather));
+}
+
 function filtered() {
   const q = $('search').value.trim().toLowerCase();
   const selectedTypes = getSelectedTypes();
@@ -2197,17 +2214,46 @@ function filtered() {
     if (a.address === pendingHashSelect || lastKnownCache.has(a.address)) return true;
     const matches = !q || `${displayName(a)} ${a.id} ${a.callsign} ${a.registration} ${a.model} ${a.ognId} ${a.address}`.toLowerCase().includes(q);
     if (isEmergency(a)) return matches;
-    if (!selectedTypes) return matches;
-    const rType = getResolvedType(a);
-    const typeMatch =
-      (selectedTypes.has('glider') && rType === 1) ||
-      (selectedTypes.has('para') && rType === 7) ||
-      (selectedTypes.has('fanet') && isFanet(a) && rType !== 15) ||
-      (selectedTypes.has('other') && rType !== 1 && rType !== 7 && rType !== 15) ||
-      (selectedTypes.has('station') && rType === 15) ||
-      (selectedTypes.has('wx') && Boolean(a.weather));
-    return matches && typeMatch;
+    return matches && matchesSelectedTypes(a, selectedTypes);
   });
+}
+
+function hasViewportSearchMatches() {
+  return filtered().some(a => isInCurrentViewport(a.lat, a.lon));
+}
+
+function clearSearch24h() {
+  search24hSeq++;
+  search24hResults = [];
+}
+
+async function fetchSearch24h(q) {
+  const key = q.trim().toLowerCase();
+  const seq = ++search24hSeq;
+  if (!key) { search24hResults = []; render(); return; }
+  try {
+    const res = await fetch(`ogn-proxy.php?search=1&q=${encodeURIComponent(key)}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error('24h search failed');
+    const data = await res.json();
+    if (seq !== search24hSeq || $('search').value.trim().toLowerCase() !== key) return;
+    search24hResults = (Array.isArray(data.results) ? data.results : []).map(r => {
+      const a = parseAprsLine(String(r.raw || ''), (Number(r.timestamp) || 0) * 1000);
+      if (!a || a.__telemetryOnly || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return null;
+      a.aprsPacket = String(r.raw || '');
+      a.aprsReceivedAt = Number(r.timestamp) || 0;
+      if (r.name) a.streamName = cleanName(r.name);
+      if (r.callsign) a.callsign = String(r.callsign);
+      if (r.registration) a.registration = String(r.registration);
+      if (r.model) a.model = String(r.model);
+      if (r.aircraft_type !== '') a.ddbAircraftType = String(r.aircraft_type);
+      a.search24h = true;
+      applyCachedAircraftMeta(a);
+      return a;
+    }).filter(Boolean);
+    render();
+  } catch (e) {
+    if (seq === search24hSeq) { search24hResults = []; render(); }
+  }
 }
 
 function buildRowHtml(a, now) {
@@ -2274,7 +2320,10 @@ function updateListHint() {
   const hiddenTracks = [...selectedTracks.keys()].filter(k => !visibleKeys.has(k));
   const outsideCount = visible.reduce((n, a) => n + (isInCurrentViewport(a.lat, a.lon) ? 0 : 1), 0);
   const parts = [];
-  if (q) parts.push(`Filtering by "${q}".`);
+  if (q) parts.push(`Filtering by "${q}". Tracks are kept; hidden tracks may not be in list.`);
+  if (q && !hasViewportSearchMatches() && search24hResults.length) {
+    parts.push(`No matches in the current view; showing ${search24hResults.length} aircraft seen in the last 24 hours.`);
+  }
   if (hiddenTracks.length) {
     const names = hiddenTracks.slice(0, 3).map(addr => {
       const a = aircraft.find(x => x.address === addr);
@@ -2292,7 +2341,12 @@ function updateListHint() {
 function render() {
   if (replayActive) return;
   const visible = filtered();
-  const listVisible = visible.filter(a => isInCurrentViewport(a.lat, a.lon));
+  const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon));
+  const searchQ = $('search').value.trim();
+  const useSearch24h = !!searchQ && viewportList.length === 0 && search24hResults.length > 0;
+  const listVisible = useSearch24h
+    ? search24hResults.filter(a => matchesSelectedTypes(a, getSelectedTypes()))
+    : viewportList;
   const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
 
@@ -2506,7 +2560,7 @@ $('aircraftList').addEventListener('click', e => {
   if (emptyAct) {
     const act = emptyAct.dataset.emptyAct;
     if (act === 'reset') resetFilters();
-    else if (act === 'clear-search') { $('search').value = ''; updateSearchUi(); render(); }
+    else if (act === 'clear-search') { $('search').value = ''; updateSearchUi(); clearSearch24h(); render(); }
     else if (act === 'fit') fitToResults();
     else if (act === 'refresh') fetchLive(true);
     return;
@@ -3367,18 +3421,24 @@ $('search').addEventListener('input', () => {
   updateSearchUi();
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
-    render();
     const q = $('search').value.trim();
-    if (q) {
-      $('listHint').textContent = `Filtering by "${q}". Tracks are kept; hidden tracks may not be in list.`;
-    } else if ($('listHint').textContent.startsWith('Filtering by ')) {
-      $('listHint').textContent = '';
+    render();
+    if (!q) {
+      clearSearch24h();
+      render();
+      return;
+    }
+    if (hasViewportSearchMatches()) {
+      if (search24hResults.length) { clearSearch24h(); render(); }
+    } else {
+      fetchSearch24h(q);
     }
   }, 120);
 });
 $('btnClearSearch').addEventListener('click', () => {
   $('search').value = '';
   updateSearchUi();
+  clearSearch24h();
   $('listHint').textContent = '';
   render();
   $('search').focus();

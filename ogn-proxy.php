@@ -531,7 +531,78 @@ if (isset($_GET['replay']) && $_GET['replay'] === '1') {
     exit;
 }
 
-// --- 5. Live Viewport Endpoint ---
+// --- 5. 24-hour aircraft search (fallback when the current view has no matches) ---
+if (isset($_GET['search']) && $_GET['search'] === '1') {
+    $q = strtolower(trim((string)($_GET['q'] ?? '')));
+    header('Cache-Control: public, max-age=30');
+    if ($q === '' || strlen($q) > 80) {
+        echo json_encode(['results' => []]);
+        exit;
+    }
+    $cacheKey = 'search24_' . md5($q);
+    if (!is_file($dbFile)) {
+        echo json_encode(['results' => []]);
+        exit;
+    }
+    $cached = cache_get($cacheDir, $cacheKey, 30);
+    if ($cached !== null) {
+        echo $cached;
+        exit;
+    }
+    try {
+        $pdo = open_db($dbFile);
+        $stmt = $pdo->prepare("
+            SELECT a.id, a.ddb_id, a.raw, a.timestamp, a.lat, a.lon,
+                   COALESCE(n.name, pn.name) AS name,
+                   d.callsign, d.registration, d.model, d.aircraft_type
+            FROM aircraft a
+            LEFT JOIN names n ON a.id = n.id
+            LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
+            LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
+            WHERE a.timestamp >= :cutoff
+              AND (instr(lower(a.id), :needle) > 0
+                OR instr(lower(a.ddb_id), :needle) > 0
+                OR instr(lower(a.raw), :needle) > 0
+                OR instr(lower(COALESCE(n.name, '')), :needle) > 0
+                OR instr(lower(COALESCE(pn.name, '')), :needle) > 0
+                OR instr(lower(COALESCE(d.callsign, '')), :needle) > 0
+                OR instr(lower(COALESCE(d.registration, '')), :needle) > 0
+                OR instr(lower(COALESCE(d.model, '')), :needle) > 0)
+            ORDER BY a.timestamp DESC
+            LIMIT 200
+        ");
+        $stmt->execute([':cutoff' => time() - 86400, ':needle' => $q]);
+        $results = [];
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            $results[] = [
+                'id'            => (string)$row['id'],
+                'ddb_id'        => (string)($row['ddb_id'] ?? ''),
+                'raw'           => (string)$row['raw'],
+                'timestamp'     => (int)$row['timestamp'],
+                'lat'           => (float)$row['lat'],
+                'lon'           => (float)$row['lon'],
+                'name'          => clean_ogn_name((string)($row['name'] ?? '')),
+                'callsign'      => (string)($row['callsign'] ?? ''),
+                'registration'  => (string)($row['registration'] ?? ''),
+                'model'         => (string)($row['model'] ?? ''),
+                'aircraft_type' => (string)($row['aircraft_type'] ?? ''),
+            ];
+        }
+        $json = json_encode(['results' => $results], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+        if ($json !== false) {
+            cache_set($cacheDir, $cacheKey, $json);
+            echo $json;
+        } else {
+            echo json_encode(['results' => []]);
+        }
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['results' => []]);
+    }
+    exit;
+}
+
+// --- 6. Live Viewport Endpoint ---
 if (!isset($_GET['live']) || $_GET['live'] !== '1') {
     http_response_code(400);
     header('Cache-Control: no-store');
