@@ -1219,7 +1219,7 @@ function pauseFollowCentering() {
   syncRecenterButton();
 }
 
-function centerOnFollowed(force = false, animate = true) {
+function centerOnFollowed(force = false, animate = true, panDuration = 0.2) {
   const addr = activeFollowAddress();
   if (!addr) return false;
   if (!force && (followCenteringPaused || map.getZoom() < FOLLOW_CENTER_MIN_ZOOM)) return false;
@@ -1236,7 +1236,9 @@ function centerOnFollowed(force = false, animate = true) {
   followCenteringPaused = false;
   syncRecenterButton();
   const dest = L.latLng(lat, lon);
-  if (map.getCenter().distanceTo(dest) > 1) map.setView(dest, map.getZoom(), { animate });
+  if (map.getCenter().distanceTo(dest) > 1) {
+    map.setView(dest, map.getZoom(), { animate, duration: panDuration });
+  }
   return true;
 }
 
@@ -4425,9 +4427,10 @@ function startReplayPlayback() {
     updateReplayTimeReadout(replayTsMs);
     maybeUpdateReplayTrackLine(wallNow);
     updateReplayFocusMarker();
-    // Non-animated, throttled panning avoids fighting Leaflet's own animation.
+    // Short animated pans keep high-zoom follow smooth; the 200ms throttle
+    // avoids a moveend storm on every animation frame.
     if (wallNow - replayLastPanAtMs >= 200) {
-      centerOnFollowed(false, false);
+      centerOnFollowed(false, true);
       replayLastPanAtMs = wallNow;
     }
     syncReplayTrackUi();
