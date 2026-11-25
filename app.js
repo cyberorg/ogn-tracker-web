@@ -602,6 +602,9 @@ const clusterGroup = L.markerClusterGroup({
   iconCreateFunction: cluster => L.divIcon({ html: `<div>${cluster.getChildCount()}</div>`, className: 'ogn-cluster', iconSize: L.point(34, 34) })
 }).addTo(map);
 const emergencyGroup = L.layerGroup().addTo(map);
+const searchResultGroup = L.layerGroup().addTo(map);
+const searchResultMarkers = new Map();
+const oneTimeSearchBypass = new Set();
 const replayGroup = L.layerGroup();
 const replayTrackGroup = L.layerGroup();
 const measureLayer = L.layerGroup().addTo(map);
@@ -1475,9 +1478,20 @@ function focusListRow(address) {
   if (row) row.focus({ preventScroll: true });
 }
 
+function showSearchResultPopup(a) {
+  if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
+  map.setView([a.lat, a.lon], Math.max(map.getZoom(), 12));
+  const m = ensureSearchResultMarker(a);
+  if (m) requestAnimationFrame(() => m.openPopup());
+}
+
 function toggleSelection(address, openOnMap = false) {
+  const target = findAircraftByAddress(address);
+  // A searched aircraft gets one render free of the type preference filters.
+  if (target?.search24h) oneTimeSearchBypass.add(address);
   if (selectedTracks.has(address)) {
     removeTrack(address);
+    if (openOnMap && target?.search24h) showSearchResultPopup(target);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
     activeTrackAddress = address;
@@ -1495,8 +1509,7 @@ function toggleSelection(address, openOnMap = false) {
           clusterGroup.zoomToShowLayer(m, () => m.openPopup());
         }
       } else {
-        const fb = search24hResults.find(x => x.address === address);
-        if (fb) map.setView([fb.lat, fb.lon], Math.max(map.getZoom(), 12));
+        showSearchResultPopup(target);
       }
     }
   }
@@ -2607,13 +2620,33 @@ function matchesSelectedTypes(a, selectedTypes) {
     (selectedTypes.has('wx') && Boolean(a.weather));
 }
 
+function aircraftSearchTokens(q) {
+  return String(q || '').trim().toLowerCase().split(/\s+/).filter(Boolean).slice(0, 12);
+}
+
+function aircraftSearchText(a) {
+  const values = [displayName(a), a.streamName, a.callsign, a.registration,
+    a.model, typeName(a), a.id, a.ognId, a.ddbId, a.address, a.liveLabel];
+  for (const key of [a.address, a.ddbId, a.id, a.ognId]) {
+    const cached = nameCache.get(String(key || '').trim().toLowerCase());
+    if (cached) values.push(cached);
+  }
+  return values.filter(Boolean).map(v => String(v).toLowerCase()).join(' ');
+}
+
+function matchesAircraftSearch(a, q) {
+  const tokens = aircraftSearchTokens(q);
+  if (!tokens.length) return true;
+  const text = aircraftSearchText(a);
+  return tokens.every(token => text.includes(token));
+}
+
 function filtered() {
   const q = $('search').value.trim().toLowerCase();
   const selectedTypes = getSelectedTypes();
   return aircraft.filter(a => {
-    if (a.address === pendingHashSelect || lastKnownCache.has(a.address)) return true;
-    const matches = !q || `${displayName(a)} ${a.id} ${a.callsign} ${a.registration} ${a.model} ${a.ognId} ${a.address}`.toLowerCase().includes(q);
-    if (!matches) return false;
+    if (a.address === pendingHashSelect || lastKnownCache.has(a.address) || oneTimeSearchBypass.has(a.address)) return true;
+    if (!matchesAircraftSearch(a, q)) return false;
     // An explicit search should find the aircraft even when its type is
     // unchecked in the preference filter; emergencies always stay visible.
     if (isEmergency(a) || q) return true;
@@ -2628,6 +2661,8 @@ function hasViewportSearchMatches() {
 function clearSearch24h() {
   search24hSeq++;
   search24hResults = [];
+  for (const m of searchResultMarkers.values()) searchResultGroup.removeLayer(m);
+  searchResultMarkers.clear();
 }
 
 async function fetchSearch24h(q) {
@@ -2662,6 +2697,42 @@ async function fetchSearch24h(q) {
 function findAircraftByAddress(address) {
   return aircraft.find(x => x.address === address) ||
     search24hResults.find(x => x.address === address) || null;
+}
+
+function ensureSearchResultMarker(a) {
+  if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return null;
+  let m = searchResultMarkers.get(a.address);
+  if (!m) {
+    m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: 1000 });
+    m._searchResult = true;
+    m._data = a;
+    m._detailsOpen = false;
+    m._popupSig = '';
+    m.on('click', () => toggleSelection(a.address, false));
+    m.on('popupopen', () => {
+      const html = popup(m._data);
+      if (m._popupSig !== html) {
+        m._popupSig = html;
+        m.setPopupContent(html);
+      }
+      const d = m.getPopup()?.getElement()?.querySelector('[data-popup-details]');
+      if (d) {
+        d.open = !!m._detailsOpen;
+        d.onTogglePopupDetails = d.onTogglePopupDetails || (() => { m._detailsOpen = d.open; keepOpenPopupAboveBar(m); });
+        d.removeEventListener('toggle', d.onTogglePopupDetails);
+        d.addEventListener('toggle', d.onTogglePopupDetails);
+      }
+      requestAnimationFrame(() => centerPopupInView(m));
+    });
+    m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: false, keepInView: false });
+    searchResultGroup.addLayer(m);
+    searchResultMarkers.set(a.address, m);
+  } else {
+    m._data = a;
+    if (m.getLatLng().lat !== a.lat || m.getLatLng().lng !== a.lon) m.setLatLng([a.lat, a.lon]);
+    m.setIcon(markerIcon(a));
+  }
+  return m;
 }
 
 function buildRowHtml(a, now) {
@@ -2749,6 +2820,7 @@ function updateListHint() {
 
 function render() {
   if (replayActive) return;
+  const consumedSearchBypass = new Set(oneTimeSearchBypass);
   const visible = filtered();
   const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon));
   const searchQ = $('search').value.trim();
@@ -2969,11 +3041,19 @@ function render() {
     }
   }
 
+  for (const [addr, m] of searchResultMarkers) {
+    if (markers.has(addr)) {
+      searchResultGroup.removeLayer(m);
+      searchResultMarkers.delete(addr);
+    }
+  }
+
   if (pendingHashSelect && markers.has(pendingHashSelect)) {
     const target = pendingHashSelect;
     pendingHashSelect = null;
     toggleSelection(target, true);
   }
+  for (const addr of consumedSearchBypass) oneTimeSearchBypass.delete(addr);
   updateMarkerLabels();
 }
 
@@ -3013,7 +3093,10 @@ $('aircraftList').addEventListener('click', e => {
     return;
   }
   const row = e.target.closest('.aircraft');
-  if (row) toggleSelection(row.dataset.key, true);
+  if (row) {
+    if ($('search').value.trim()) oneTimeSearchBypass.add(row.dataset.key);
+    toggleSelection(row.dataset.key, true);
+  }
 });
 
 $('aircraftList').addEventListener('keydown', e => {
@@ -3033,6 +3116,7 @@ $('aircraftList').addEventListener('keydown', e => {
       return;
     }
     e.preventDefault();
+    if ($('search').value.trim()) oneTimeSearchBypass.add(row.dataset.key);
     toggleSelection(row.dataset.key, true);
   } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
@@ -4103,7 +4187,7 @@ $('type').addEventListener('change', e => {
   // Keep tracks for aircraft still visible under the new type selection.
   const visible = new Set(filtered().map(a => a.address));
   for (const addr of [...selectedTracks.keys()]) {
-    if (!visible.has(addr) && addr !== pendingHashSelect && !lastKnownCache.has(addr)) {
+    if (!visible.has(addr) && addr !== pendingHashSelect && !oneTimeSearchBypass.has(addr) && !lastKnownCache.has(addr)) {
       removeTrack(addr);
     }
   }

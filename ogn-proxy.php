@@ -1280,8 +1280,8 @@ if (isset($_GET['search']) && $_GET['search'] === '1') {
         echo json_encode(['results' => []]);
         exit;
     }
-    // v2: collapse OGN/FLR/FNT aliases of the same 24-bit device.
-    $cacheKey = 'search24_v2_' . md5($q);
+    // v3: tokenised partial matches across names/ids/raw and type names.
+    $cacheKey = 'search24_v3_' . md5($q);
     if (!is_file($dbFile)) {
         echo json_encode(['results' => []]);
         exit;
@@ -1293,6 +1293,42 @@ if (isset($_GET['search']) && $_GET['search'] === '1') {
     }
     try {
         $pdo = open_db($dbFile);
+        $needles = preg_split('/\s+/u', $q, -1, PREG_SPLIT_NO_EMPTY);
+        if (!is_array($needles) || !$needles) $needles = [$q];
+        $needles = array_slice($needles, 0, 12);
+        $typeNames = "CASE CAST(COALESCE(NULLIF(d.aircraft_type, ''), '0') AS INTEGER)
+            WHEN 1 THEN 'glider sailplane'
+            WHEN 2 THEN 'towplane'
+            WHEN 3 THEN 'helicopter'
+            WHEN 4 THEN 'parachutist'
+            WHEN 5 THEN 'drop plane'
+            WHEN 6 THEN 'hang glider'
+            WHEN 7 THEN 'paraglider'
+            WHEN 8 THEN 'powered'
+            WHEN 9 THEN 'jet'
+            WHEN 10 THEN 'ufo'
+            WHEN 11 THEN 'balloon'
+            WHEN 12 THEN 'airship'
+            WHEN 13 THEN 'drone'
+            WHEN 15 THEN 'ground station'
+            WHEN 16 THEN 'ultralight'
+            ELSE '' END";
+        $params = [':cutoff' => time() - 86400];
+        $whereParts = [];
+        foreach ($needles as $i => $token) {
+            $param = ':needle' . $i;
+            $params[$param] = $token;
+            $whereParts[] = "(instr(lower(a.id), {$param}) > 0
+                OR instr(lower(a.ddb_id), {$param}) > 0
+                OR instr(lower(a.raw), {$param}) > 0
+                OR instr(lower(COALESCE(n.name, '')), {$param}) > 0
+                OR instr(lower(COALESCE(pn.name, '')), {$param}) > 0
+                OR instr(lower(COALESCE(d.callsign, '')), {$param}) > 0
+                OR instr(lower(COALESCE(d.registration, '')), {$param}) > 0
+                OR instr(lower(COALESCE(d.model, '')), {$param}) > 0
+                OR instr(lower({$typeNames}), {$param}) > 0)";
+        }
+        $whereSql = implode(' AND ', $whereParts);
         $stmt = $pdo->prepare("
             SELECT a.id, a.ddb_id, a.raw, a.timestamp, a.lat, a.lon,
                    COALESCE(n.name, pn.name) AS name,
@@ -1302,18 +1338,11 @@ if (isset($_GET['search']) && $_GET['search'] === '1') {
             LEFT JOIN names pn ON a.ddb_id != '' AND a.ddb_id = pn.id
             LEFT JOIN ddb d ON a.ddb_id != '' AND a.ddb_id = d.id
             WHERE a.timestamp >= :cutoff
-              AND (instr(lower(a.id), :needle) > 0
-                OR instr(lower(a.ddb_id), :needle) > 0
-                OR instr(lower(a.raw), :needle) > 0
-                OR instr(lower(COALESCE(n.name, '')), :needle) > 0
-                OR instr(lower(COALESCE(pn.name, '')), :needle) > 0
-                OR instr(lower(COALESCE(d.callsign, '')), :needle) > 0
-                OR instr(lower(COALESCE(d.registration, '')), :needle) > 0
-                OR instr(lower(COALESCE(d.model, '')), :needle) > 0)
+              AND ({$whereSql})
             ORDER BY a.timestamp DESC
             LIMIT 200
         ");
-        $stmt->execute([':cutoff' => time() - 86400, ':needle' => $q]);
+        $stmt->execute($params);
         $results = [];
         $seenHex = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
