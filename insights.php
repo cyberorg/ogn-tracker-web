@@ -93,13 +93,19 @@ function h($v): string { return htmlspecialchars((string)$v, ENT_QUOTES | ENT_SU
 function n(int|float $v): string { return number_format((int)$v); }
 function pct(int $n, int $total): string { return $total > 0 ? number_format($n * 100 / $total, 1) . '%' : '0%'; }
 function kpiDelta(int $current, ?int $previous): string {
-    if ($previous === null || $previous <= 0) return '';
+    if ($previous === null) return '';
+    if ($previous === 0) {
+        if ($current > 0) {
+            return '<span class="ins-delta ins-delta-up">' . h('↑ +' . n($current) . ' vs prior 24h (was 0)') . '</span>';
+        }
+        return '<span class="ins-delta ins-delta-flat">' . h('→ 0 vs prior 24h (was 0)') . '</span>';
+    }
     $change = (int)round(($current - $previous) * 100 / $previous);
     if ($change > 0) {
         return '<span class="ins-delta ins-delta-up">' . h('↑ +' . $change . '% vs prior 24h') . '</span>';
     }
     if ($change < 0) {
-        return '<span class="ins-delta ins-delta-down">' . h('↓ ' . $change . '% vs prior 24h') . '</span>';
+        return '<span class="ins-delta ins-delta-down">' . h('↓ ' . abs($change) . '% vs prior 24h') . '</span>';
     }
     return '<span class="ins-delta ins-delta-flat">' . h('→ 0% vs prior 24h') . '</span>';
 }
@@ -212,6 +218,29 @@ function sectionCard(string $title, string $subtitle, string $body, string $span
         . ($id !== '' ? ' id="' . h($id) . '"' : '') . '>'
         . '<div class="ins-card-head"><h2>' . h($title) . '</h2><span class="ins-card-sub">' . h($subtitle) . '</span></div>'
         . '<div class="ins-card-body">' . $body . '</div></section>';
+}
+
+/** Rows for a top-flights table, shared by the overall and per-type leaderboards. */
+function top_flight_rows(array $records, array $posById, array $names, array $typeById, array $ognTypes, bool $withType, string $metric): array {
+    $rows = [];
+    foreach ($records as $id => $value) {
+        $pos = $posById[$id] ?? [null, null];
+        $url = tracker_hash_url($pos[0], $pos[1], $id);
+        $label = h($names[$id] ?? strtoupper($id));
+        $nameHtml = $url !== ''
+            ? '<a href="' . h($url) . '" title="Show ' . h($id) . ' on the tracker">' . $label . '</a>'
+            : $label;
+        $row = [$nameHtml];
+        if ($withType) {
+            $tt = $typeById[$id] ?? 0;
+            $row[] = h($ognTypes[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown'));
+        }
+        $row[] = '<span class="num">' . ($metric === 'altitude'
+            ? n(round($value)) . ' m'
+            : number_format($value, 1) . ' km') . '</span>';
+        $rows[] = $row;
+    }
+    return $rows;
 }
 
 /** Horizontally scrollable bar chart. $data = [[label or [date, hour], value, tooltip, epoch], ...] */
@@ -441,10 +470,20 @@ try {
         note_type_record($label, $tid, $km, $typeMaxDist, $typeMaxDistId);
     }
 
-    // Leaderboards use the same filtered records as the per-type links above.
+    // Paragliders, gliders and hang gliders get their own leaderboard cards.
+    $featuredFlightTypes = [
+        7 => 'Top paraglider flights (24h)',
+        1 => 'Top glider flights (24h)',
+        6 => 'Top hang glider flights (24h)',
+    ];
+    $featuredTypeIds = array_keys($featuredFlightTypes);
+
+    // Overall leaderboards use the same filtered records as the per-type links
+    // above, but leave the three featured types to their dedicated cards.
     $topDistance = [];
     foreach ($distByAircraft as $tid => $km) {
-        if (!isset($posById[$tid]) || ($typeById[$tid] ?? 0) === 15) continue;
+        $tt = (int)($typeById[$tid] ?? 0);
+        if (!isset($posById[$tid]) || $tt === 15 || in_array($tt, $featuredTypeIds, true)) continue;
         $topDistance[$tid] = $km;
     }
     arsort($topDistance, SORT_NUMERIC);
@@ -452,11 +491,34 @@ try {
 
     $topAltitude = [];
     foreach ($altByAircraft as $tid => $alt) {
-        if (!isset($posById[$tid]) || ($typeById[$tid] ?? 0) === 15) continue;
+        $tt = (int)($typeById[$tid] ?? 0);
+        if (!isset($posById[$tid]) || $tt === 15 || in_array($tt, $featuredTypeIds, true)) continue;
         $topAltitude[$tid] = $alt;
     }
     arsort($topAltitude, SORT_NUMERIC);
     $topAltitude = array_slice($topAltitude, 0, 10, true);
+
+    // Same 24h, plausibility-filtered records, split out per featured type.
+    $topFlightsByType = [];
+    foreach ($featuredFlightTypes as $typeId => $title) {
+        $distance = [];
+        foreach ($distByAircraft as $tid => $km) {
+            if (!isset($posById[$tid]) || (int)($typeById[$tid] ?? 0) !== $typeId) continue;
+            $distance[$tid] = $km;
+        }
+        arsort($distance, SORT_NUMERIC);
+        $altitude = [];
+        foreach ($altByAircraft as $tid => $alt) {
+            if (!isset($posById[$tid]) || (int)($typeById[$tid] ?? 0) !== $typeId) continue;
+            $altitude[$tid] = $alt;
+        }
+        arsort($altitude, SORT_NUMERIC);
+        $topFlightsByType[$typeId] = [
+            'title'    => $title,
+            'distance' => array_slice($distance, 0, 10, true),
+            'altitude' => array_slice($altitude, 0, 10, true),
+        ];
+    }
 
     arsort($typeCounts);
     arsort($stationCounts);
@@ -798,36 +860,20 @@ $genDuration = microtime(true) - $generationStarted;
     echo sectionCard('Aircraft types', n($typeTotal) . ' aircraft', $typeHtml ?: '<div class="ins-empty">No aircraft seen.</div>');
 
     // Top flights leaderboards, built from the same 24h record arrays as the links above.
-    $topDistanceRows = [];
-    foreach ($topDistance as $id => $km) {
-        $pos = $posById[$id] ?? [null, null];
-        $url = tracker_hash_url($pos[0], $pos[1], $id);
-        $label = h($names[$id] ?? strtoupper($id));
-        $nameHtml = $url !== ''
-            ? '<a href="' . h($url) . '" title="Show ' . h($id) . ' on the tracker">' . $label . '</a>'
-            : $label;
-        $tt = $typeById[$id] ?? 0;
-        $typeLabel = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown');
-        $topDistanceRows[] = [$nameHtml, h($typeLabel), '<span class="num">' . number_format($km, 1) . ' km</span>'];
-    }
-    $topAltitudeRows = [];
-    foreach ($topAltitude as $id => $alt) {
-        $pos = $posById[$id] ?? [null, null];
-        $url = tracker_hash_url($pos[0], $pos[1], $id);
-        $label = h($names[$id] ?? strtoupper($id));
-        $nameHtml = $url !== ''
-            ? '<a href="' . h($url) . '" title="Show ' . h($id) . ' on the tracker">' . $label . '</a>'
-            : $label;
-        $tt = $typeById[$id] ?? 0;
-        $typeLabel = $OGN_TYPES[$tt] ?? ($tt > 0 ? 'Type ' . $tt : 'Unknown');
-        $topAltitudeRows[] = [$nameHtml, h($typeLabel), '<span class="num">' . n(round($alt)) . ' m</span>'];
-    }
+    $topNote = '<p class="ins-note">Plausibility-filtered track data, not verified flights: corrupted positions or reused IDs can still appear. Open a tracker link to inspect the path before relying on a value.</p>';
     $topHtml = '<div class="ins-split">'
-        . simpleTable(['Aircraft', 'Type', 'Distance'], $topDistanceRows)
-        . simpleTable(['Aircraft', 'Type', 'Max alt'], $topAltitudeRows)
-        . '</div>'
-        . '<p class="ins-note">Plausibility-filtered track data, not verified flights: corrupted positions or reused IDs can still appear. Open a tracker link to inspect the path before relying on a value.</p>';
-    echo sectionCard('Top flights (24h)', 'longest tracks & highest climbs (unverified)', $topHtml);
+        . simpleTable(['Aircraft', 'Type', 'Distance'], top_flight_rows($topDistance, $posById, $names, $typeById, $OGN_TYPES, true, 'distance'))
+        . simpleTable(['Aircraft', 'Type', 'Max alt'], top_flight_rows($topAltitude, $posById, $names, $typeById, $OGN_TYPES, true, 'altitude'))
+        . '</div>' . $topNote;
+    echo sectionCard('Top flights (24h)', 'longest tracks & highest climbs (other types, unverified)', $topHtml);
+
+    foreach ($topFlightsByType as $flightType) {
+        $typeHtml = '<div class="ins-split">'
+            . simpleTable(['Aircraft', 'Distance'], top_flight_rows($flightType['distance'], $posById, $names, $typeById, $OGN_TYPES, false, 'distance'))
+            . simpleTable(['Aircraft', 'Max alt'], top_flight_rows($flightType['altitude'], $posById, $names, $typeById, $OGN_TYPES, false, 'altitude'))
+            . '</div>' . $topNote;
+        echo sectionCard($flightType['title'], 'top 10 longest tracks & highest climbs (unverified)', $typeHtml);
+    }
 
     // Hourly traffic chart.
     $hourData = [];
