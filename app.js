@@ -30,6 +30,10 @@ function bringToFront(el) {
   el.style.zIndex = String(++overlayZSeq);
 }
 
+// Popups join the same last-opened-wins stack, but only their close button (or an
+// explicit app action) dismisses them. Map clicks, Escape, and other popups do not.
+const POPUP_OPTIONS = { autoClose: false, closeOnClick: false, closeOnEscapeKey: false };
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanName = s => {
   const raw = String(s ?? '');
@@ -336,7 +340,7 @@ const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
   maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 });
 
-const map = L.map('map', { zoomControl: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
+const map = L.map('map', { zoomControl: false, closePopupOnClick: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
 
 const FullscreenControl = L.Control.extend({
@@ -497,10 +501,48 @@ map.on('zoomend moveend resize', updateMarkerLabels);
 map.on('zoomend resize', () => keepPopupAboveBottomBar());
 map.on('move zoom zoomanim resize zoomend viewreset', syncRaisedPopupPane);
 window.addEventListener('resize', syncBottomBarOffset);
+
+// MarkerCluster removes child markers on zoom/move, and Leaflet closes their popups on
+// layer removal. Remember open popups across the move and reopen any that were only
+// closed by that internal removal. A real close-button click removes it from the set.
+const openPopups = new Set();
+let mapMoving = false;
+let popupMoveSnapshot = null;
+map.getContainer().addEventListener('click', event => {
+  if (!event.target.closest?.('.leaflet-popup-close-button')) return;
+  const popupEl = event.target.closest('.leaflet-popup');
+  for (const popup of openPopups) {
+    if (popup.getElement() === popupEl) openPopups.delete(popup);
+  }
+}, true);
+map.on('movestart', () => {
+  mapMoving = true;
+  popupMoveSnapshot = new Set(openPopups);
+});
+map.on('zoomstart', () => {
+  if (popupMoveSnapshot) return;
+  mapMoving = true;
+  popupMoveSnapshot = new Set(openPopups);
+});
+map.on('moveend', () => {
+  mapMoving = false;
+  if (popupMoveSnapshot) {
+    for (const popup of popupMoveSnapshot) {
+      if (!popup._map) map.openPopup(popup);
+    }
+    popupMoveSnapshot = null;
+  }
+});
+
 // Tracker markers center themselves via centerPopupInView(); keep all other popups clear of the bottom bar.
 map.on('popupopen', e => {
+  openPopups.add(e.popup);
+  bringToFront(map.getPane('popupPane'));
   if (e.popup?._source?._trackerMarker) return;
   requestAnimationFrame(() => keepPopupAboveBottomBar(e.popup.getElement()));
+});
+map.on('popupclose', e => {
+  if (!mapMoving) openPopups.delete(e.popup);
 });
 
 const thermalLayer = L.heatLayer([], { radius: 18, blur: 14, maxZoom: 14, gradient: {0.2:'#38bdf8', 0.5:'#f5c451', 0.8:'#f97316', 1.0:'#ef4444'} });
@@ -509,7 +551,7 @@ const airspaceLayer = L.geoJSON(null, {
   style: { color: '#f5c451', weight: 2, fillOpacity: 0.12 },
   onEachFeature: (f, l) => {
     if (f.properties && (f.properties.name || f.properties.title)) {
-      l.bindPopup(`<b>${esc(f.properties.name || f.properties.title)}</b>`);
+      l.bindPopup(`<b>${esc(f.properties.name || f.properties.title)}</b>`, { ...POPUP_OPTIONS });
     }
   }
 });
@@ -807,7 +849,7 @@ function showMessagePopup(msg) {
     ? initialCenter
     : map.getCenter();
 
-  hashMessagePopup = L.popup({ maxWidth: 320, autoPan: false, keepInView: false })
+  hashMessagePopup = L.popup({ ...POPUP_OPTIONS, maxWidth: 320, autoPan: false, keepInView: false })
     .setLatLng(latlng)
     .setContent(`<div class="message-popup"><div class="popup-title"><span class="popup-name">${esc(msg)}</span></div></div>`)
     .openOn(map);
@@ -1475,7 +1517,7 @@ function jumpToAlertAddress(address) {
       `Tracker: ${shareUrl}`
     ].join('\n');
     map.setView([item.lat, item.lon], Math.max(map.getZoom(), 12));
-    L.popup({ maxWidth: 360 })
+    L.popup({ ...POPUP_OPTIONS, maxWidth: 360 })
       .setLatLng([item.lat, item.lon])
       .setContent(`
         <div class="popup-title">${esc(item.name)}</div>
@@ -2750,7 +2792,7 @@ function ensureSearchResultMarker(a) {
       }
       requestAnimationFrame(() => centerPopupInView(m));
     });
-    m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: false, keepInView: false });
+    m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
     searchResultGroup.addLayer(m);
     searchResultMarkers.set(a.address, m);
   } else {
@@ -2923,7 +2965,7 @@ function render() {
         }
         requestAnimationFrame(() => centerPopupInView(m));
       });
-      m.bindPopup(() => popup(m._data), { maxWidth: 360, autoPan: false, keepInView: false });
+      m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
       markers.set(key, m);
       if (emerg) emergencyGroup.addLayer(m);
       else clusterGroup.addLayer(m);
@@ -4364,6 +4406,7 @@ window.addEventListener('resize', syncScrollListTopBtn);
 syncScrollListTopBtn();
 
 function openFilterPanel() {
+  closeToolbarMenu(false);
   if (soundingIsOpen()) setSoundingOpen(false);
   mapFilterPanel.hidden = false;
   bringToFront(mapFilterControl);
@@ -4385,11 +4428,44 @@ mapFilterToggle.addEventListener('click', event => {
 });
 mapFilterPanel.addEventListener('click', event => event.stopPropagation());
 
+const toolbarMenuControl = $('toolbarMenuControl');
+const toolbarMenuToggle = $('btnToolbarMenu');
+const toolbarMenuPanel = $('toolbarMenuPanel');
+
+function openToolbarMenu() {
+  if (!toolbarMenuPanel || !toolbarMenuPanel.hidden) return;
+  closeFilterPanel(false);
+  toolbarMenuPanel.hidden = false;
+  bringToFront(toolbarMenuControl);
+  toolbarMenuToggle?.setAttribute('aria-expanded', 'true');
+}
+function closeToolbarMenu(restoreFocus = false) {
+  if (!toolbarMenuPanel || toolbarMenuPanel.hidden) return;
+  toolbarMenuPanel.hidden = true;
+  toolbarMenuToggle?.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) toolbarMenuToggle?.focus();
+}
+function toggleToolbarMenu(restoreFocus = false) {
+  if (!toolbarMenuPanel) return;
+  if (toolbarMenuPanel.hidden) openToolbarMenu();
+  else closeToolbarMenu(restoreFocus);
+}
+toolbarMenuToggle?.addEventListener('click', event => {
+  event.stopPropagation();
+  toggleToolbarMenu(true);
+});
+toolbarMenuPanel?.addEventListener('click', event => {
+  event.stopPropagation();
+  const button = event.target.closest && event.target.closest('button');
+  if (button && !button.closest('#shortcutsControl')) closeToolbarMenu(false);
+});
+
 const shortcutsControl = $('shortcutsControl');
 const shortcutsModal = $('shortcutsModal');
 const btnShortcuts = $('btnShortcuts');
 function openShortcuts(restoreFocus = false) {
   if (!shortcutsModal.hidden) return;
+  openToolbarMenu();
   shortcutsModal.hidden = false;
   btnShortcuts.setAttribute('aria-expanded', 'true');
   if (restoreFocus) {
@@ -4498,6 +4574,7 @@ $('bookmarkSaveConfirm').addEventListener('click', () => {
 
 document.addEventListener('click', e => {
   if (!mapFilterControl.contains(e.target)) closeFilterPanel(false);
+  if (!toolbarMenuControl.contains(e.target)) closeToolbarMenu(false);
   if (!shortcutsControl.contains(e.target)) closeShortcuts(false);
 });
 function aircraftForCopyShortcut() {
@@ -4520,6 +4597,7 @@ document.addEventListener('keydown', event => {
     event.preventDefault();
     if (!shortcutsModal.hidden) { closeShortcuts(true); return; }
     if (editable && target && typeof target.blur === 'function') { target.blur(); return; }
+    if (!toolbarMenuPanel.hidden) { closeToolbarMenu(true); return; }
     if (measureMode) setMeasureMode(false);
     else if (!mapFilterPanel.hidden) closeFilterPanel(true);
     else if (soundingIsOpen()) setSoundingOpen(false);
@@ -4776,7 +4854,7 @@ $('locate').addEventListener('click', () => {
     const pos = [lat, lon];
     map.setView(pos, Math.max(map.getZoom(), zoom));
     if (userLocationMarker) userLocationMarker.setLatLng(pos).setPopupContent(label);
-    else userLocationMarker = L.circleMarker(pos, { radius: 7, color: '#ffffff', weight: 2, fillColor: '#38bdf8', fillOpacity: 1 }).bindPopup(label).addTo(map);
+    else userLocationMarker = L.circleMarker(pos, { radius: 7, color: '#ffffff', weight: 2, fillColor: '#38bdf8', fillOpacity: 1 }).bindPopup(label, { ...POPUP_OPTIONS }).addTo(map);
     needMeta = true; fetchLive(true);
   };
   const fallbackToIp = async () => {

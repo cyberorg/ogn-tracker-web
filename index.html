@@ -9,45 +9,19 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261125zh">
+<link rel="stylesheet" href="style.css?v=20261125zj">
 </head>
 <body>
 <div class="app header-collapsed">
 <header>
   <div class="brand"><div class="logo">✈</div><div><h1>OGN Tracker</h1><div class="sub">Live APRS-IS feed · Open Glider Network</div></div></div>
   <button id="headerToggle" class="header-toggle" type="button" aria-label="Expand header" aria-expanded="false" title="Expand header">▾</button>
-  <div class="toolbar">
-    <button id="locate" title="Locate me">◎ Locate</button>
-    <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
-    <button id="btnMeasure" type="button" title="Measure distance and bearing between points" aria-pressed="false">📏 Measure</button>
-    <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
-    <button id="btnSounding" type="button" title="Live wind aloft & thermal ceiling from aircraft drift" aria-pressed="false">🌬 Wind Aloft</button>
-    <a class="tool-link" href="insights.php" title="24-hour network insights">📊 Insights</a>
-    <div class="shortcuts-control" id="shortcutsControl">
-      <button id="btnShortcuts" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-expanded="false" aria-controls="shortcutsModal">?</button>
-      <div id="shortcutsModal" class="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" aria-modal="false" hidden>
-        <div class="shortcuts-head"><strong>Keyboard shortcuts</strong><button type="button" id="shortcutsClose" class="shortcuts-close icon-close icon-close--corner" title="Close" aria-label="Close keyboard shortcuts">×</button></div>
-        <dl class="shortcuts-list">
-          <div><dt>/</dt><dd>Focus search</dd></div>
-          <div><dt>R</dt><dd>Toggle replay</dd></div>
-          <div><dt>M</dt><dd>Toggle measure tool</dd></div>
-          <div><dt>F</dt><dd>Follow active or focused aircraft</dd></div>
-          <div><dt>C</dt><dd>Copy coordinates (focused or active aircraft)</dd></div>
-          <div><dt>⇧ C</dt><dd>Copy SAR info (focused or active aircraft)</dd></div>
-          <div><dt>↑ ↓</dt><dd>Move between aircraft rows</dd></div>
-          <div><dt>?</dt><dd>Show or hide this list</dd></div>
-          <div><dt>Esc</dt><dd>Close panels, exit measure, or clear tracks</dd></div>
-        </dl>
-      </div>
-    </div>
-    <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
-  </div>
 </header>
 <main>
   <div class="map-wrap" id="mapWrap">
     <div class="map-filter-control" id="mapFilterControl">
-      <button class="map-filter-toggle" id="mapFilterToggle" type="button" aria-label="Aircraft filters" aria-expanded="false" aria-controls="mapFilterPanel" title="Aircraft filters">☷</button>
-      <div class="map-filter-panel" id="mapFilterPanel" role="dialog" aria-label="Aircraft filters" aria-modal="false" hidden>
+      <button class="map-filter-toggle" id="mapFilterToggle" type="button" aria-label="Preferences" aria-expanded="false" aria-controls="mapFilterPanel" title="Preferences">⚙</button>
+      <div class="map-filter-panel" id="mapFilterPanel" role="dialog" aria-label="Preferences" aria-modal="false" hidden>
         <details class="menu-section collapsible-section">
           <summary class="group-label">Filter</summary>
           <div class="type-checklist" id="type" role="group" aria-label="Aircraft filter">
@@ -137,6 +111,35 @@
         </div>
       </div>
     </div>
+    <div class="toolbar-menu-control" id="toolbarMenuControl">
+      <button id="btnToolbarMenu" class="toolbar-menu-toggle" type="button" aria-label="Toolbar menu" aria-expanded="false" aria-controls="toolbarMenuPanel" title="Toolbar menu">☰</button>
+      <div id="toolbarMenuPanel" class="toolbar-menu-panel" role="group" aria-label="Toolbar tools" hidden>
+        <button id="locate" title="Locate me">◎ Locate</button>
+        <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
+        <button id="btnMeasure" type="button" title="Measure distance and bearing between points" aria-pressed="false">📏 Measure</button>
+        <button id="btnAirspace" title="Load GeoJSON or OpenAir (.txt) airspace/hazard file">🗺 Airspace</button>
+        <button id="btnSounding" type="button" title="Live wind aloft & thermal ceiling from aircraft drift" aria-pressed="false">🌬 Wind Aloft</button>
+        <a class="tool-link" href="insights.php" title="24-hour network insights">📊 Insights</a>
+        <div class="shortcuts-control" id="shortcutsControl">
+          <button id="btnShortcuts" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-expanded="false" aria-controls="shortcutsModal">?</button>
+          <div id="shortcutsModal" class="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" aria-modal="false" hidden>
+            <div class="shortcuts-head"><strong>Keyboard shortcuts</strong><button type="button" id="shortcutsClose" class="shortcuts-close icon-close icon-close--corner" title="Close" aria-label="Close keyboard shortcuts">×</button></div>
+            <dl class="shortcuts-list">
+              <div><dt>/</dt><dd>Focus search</dd></div>
+              <div><dt>R</dt><dd>Toggle replay</dd></div>
+              <div><dt>M</dt><dd>Toggle measure tool</dd></div>
+              <div><dt>F</dt><dd>Follow active or focused aircraft</dd></div>
+              <div><dt>C</dt><dd>Copy coordinates (focused or active aircraft)</dd></div>
+              <div><dt>⇧ C</dt><dd>Copy SAR info (focused or active aircraft)</dd></div>
+              <div><dt>↑ ↓</dt><dd>Move between aircraft rows</dd></div>
+              <div><dt>?</dt><dd>Show or hide this list</dd></div>
+              <div><dt>Esc</dt><dd>Close panels, exit measure, or clear tracks</dd></div>
+            </dl>
+          </div>
+        </div>
+        <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
+      </div>
+    </div>
     <div id="soundingPanel" class="sounding-panel" role="region" aria-label="Live wind aloft profile" hidden>
       <div class="sounding-head">
         <strong>🌬 Wind Aloft</strong>
@@ -217,6 +220,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261125zi"></script>
+<script src="app.js?v=20261125zj"></script>
 </body>
 </html>
