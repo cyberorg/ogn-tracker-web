@@ -803,12 +803,15 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
         // the type filter in PHP preserves the packet/DDB fallback logic and
         // stops station or ADS-B traffic from consuming the global row budget.
         $idStmt = $pdo->prepare("
-            SELECT DISTINCT t.id
+            SELECT t.id
             FROM tracks t
             WHERE t.ts >= :cutoff
               AND t.lat BETWEEN :south AND :north
               AND {$lonClause}
               AND t.alt IS NOT NULL
+            GROUP BY t.id
+            ORDER BY MAX(t.ts) DESC
+            LIMIT 1000
         ");
         $idStmt->execute($params);
         $candidateIds = [];
@@ -1058,7 +1061,7 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
         // Surface reference: nearest active weather station to the map centre.
         $centerLat = ($south + $north) / 2.0;
         $midLon = ($e < $w) ? $w + (($e + 360.0 - $w) / 2.0) : ($w + $e) / 2.0;
-        $centerLon = fmod($midLon + 540.0, 360.0) - 180.0;
+        $centerLon = normalize_lon_value($midLon);
         $wxStmt = $pdo->prepare("
             SELECT sw.id, sw.wx_json, sw.updated, s.lat, s.lon,
                    COALESCE(n.name, '') AS station_name,

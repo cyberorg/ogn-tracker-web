@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261125zj">
+<link rel="stylesheet" href="style.css?v=20261125zn">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -142,8 +142,11 @@
     </div>
     <div id="soundingPanel" class="sounding-panel" role="region" aria-label="Live wind aloft profile" hidden>
       <div class="sounding-head">
-        <strong>🌬 Wind Aloft</strong>
-        <button id="soundingClose" type="button" class="sounding-close icon-close icon-close--corner" aria-label="Close wind aloft panel" title="Close">×</button>
+        <div class="sounding-title"><strong>🌬 Wind Aloft</strong><span id="soundingUpdated" class="sounding-updated"></span></div>
+        <div class="sounding-actions">
+          <button id="soundingRefresh" type="button" class="sounding-refresh" aria-label="Refresh wind aloft" title="Refresh now">↻</button>
+          <button id="soundingClose" type="button" class="sounding-close icon-close icon-close--corner" aria-label="Close wind aloft panel" title="Close">×</button>
+        </div>
       </div>
       <div id="soundingBody" class="sounding-body"></div>
     </div>
@@ -184,6 +187,12 @@
 
   </div>
   <aside class="sidebar" id="aircraftSidebar">
+    <div id="feedStatusBanner" class="feed-status-banner" aria-live="off" hidden>
+      <span id="feedStatusIcon" class="feed-status-icon" aria-hidden="true">⏱</span>
+      <span class="feed-status-copy"><b id="feedStatusTitle"></b><span id="feedStatusDetail" class="feed-status-detail"></span></span>
+      <span id="feedStatusAge" class="feed-status-age"></span>
+      <button type="button" id="feedStatusRetry" class="feed-status-retry">Retry</button>
+    </div>
     <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
     <div class="filters">
       <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
@@ -220,6 +229,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261125zj"></script>
+<script src="app.js?v=20261125zn"></script>
 </body>
 </html>

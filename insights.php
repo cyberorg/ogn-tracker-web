@@ -370,8 +370,13 @@ try {
     // Pull a little history before the window so a track that started earlier
     // can be recognised and excluded: only tracks with both ends inside the
     // 24h window count as records.
+    $hasPreWindowStmt = $pdo->prepare('SELECT 1 FROM tracks WHERE ts < :cutoff LIMIT 1');
+    $hasPreWindowStmt->execute([':cutoff' => $cutoff]);
+    $trackLookbackCutoff = $hasPreWindowStmt->fetchColumn() === false
+        ? $cutoff
+        : $cutoff - $trackGapSeconds;
     $trackStmt = $pdo->prepare('SELECT id, ts, lat, lon FROM tracks WHERE ts >= :cutoff ORDER BY id, ts');
-    $trackStmt->execute([':cutoff' => $cutoff - $trackGapSeconds]);
+    $trackStmt->execute([':cutoff' => $trackLookbackCutoff]);
     $distPrev = [];
     $preWindow = [];
     $inWindow = [];
