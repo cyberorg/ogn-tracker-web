@@ -13,8 +13,9 @@ if (PHP_SAPI !== 'cli') {
 
 const RUN_SECONDS          = 55;
 const EXPIRE_SECONDS       = 86400; // 24 hours for last-known aircraft positions, alerts & station stats
-const TRACK_EXPIRE_SECONDS = 86400; // 24 hours for flight tracks
-const TRACK_MIN_INTERVAL   = 15;    // Min seconds between track points for non-paragliders
+const TRACK_EXPIRE_SECONDS    = 86400; // 24 hours for flight tracks
+const TRACK_MIN_INTERVAL       = 15;    // Min seconds between track points for other types
+const TRACK_MIN_INTERVAL_GLIDER = 1;    // Max 1 track point per second for glider/hang glider/paraglider
 const FLUSH_INTERVAL       = 3.0;   // Batch-write to SQLite every 3 seconds
 const DDB_SYNC_INTERVAL    = 21600; // Refresh full DDB (and PureTrack labels) every 6 hours
 const PURETRACK_LABELS_URL = 'https://puretrack.io/api/labels.json';
@@ -1287,20 +1288,18 @@ while (microtime(true) < $deadline && !feof($socket)) {
                         }
                     }
 
-                    // Gliders, hang gliders and paragliders are the aircraft whose
-                    // dense 3D tracks are useful for wind-aloft reconstruction and
-                    // thermal soundings. Keep every fix for them; other types stay
-                    // throttled to limit DB growth.
-                    if ($type === 1 || $type === 6 || $type === 7) {
-                        $logPoint = true;
-                    } else {
-                        $prev = $lastTrackPoint[$id] ?? null;
-                        $moved = ($prev === null)
-                            || (abs($lat - $prev['lat']) > 0.0002)
-                            || (abs($lon - $prev['lon']) > 0.0002);
-                        $elapsed = ($prev === null) || (($now - $prev['ts']) >= TRACK_MIN_INTERVAL);
-                        $logPoint = ($moved && $elapsed);
-                    }
+                    // Gliders, hang gliders and paragliders get dense 3D tracks for
+                    // wind-aloft reconstruction and thermal soundings, capped at 1 Hz.
+                    // Other types stay throttled to limit DB growth.
+                    $prev = $lastTrackPoint[$id] ?? null;
+                    $minInterval = ($type === 1 || $type === 6 || $type === 7)
+                        ? TRACK_MIN_INTERVAL_GLIDER
+                        : TRACK_MIN_INTERVAL;
+                    $moved = ($prev === null)
+                        || (abs($lat - $prev['lat']) > 0.0002)
+                        || (abs($lon - $prev['lon']) > 0.0002);
+                    $elapsed = ($prev === null) || (($now - $prev['ts']) >= $minInterval);
+                    $logPoint = ($moved && $elapsed);
 
                     if ($logPoint) {
                         $trackBatch[] = [
