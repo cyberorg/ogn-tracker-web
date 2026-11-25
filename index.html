@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261125zd">
+<link rel="stylesheet" href="style.css?v=20261125zh">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -26,7 +26,7 @@
     <div class="shortcuts-control" id="shortcutsControl">
       <button id="btnShortcuts" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-expanded="false" aria-controls="shortcutsModal">?</button>
       <div id="shortcutsModal" class="shortcuts-modal" role="dialog" aria-label="Keyboard shortcuts" aria-modal="false" hidden>
-        <div class="shortcuts-head"><strong>Keyboard shortcuts</strong><button type="button" id="shortcutsClose" class="shortcuts-close" title="Close" aria-label="Close keyboard shortcuts">✕</button></div>
+        <div class="shortcuts-head"><strong>Keyboard shortcuts</strong><button type="button" id="shortcutsClose" class="shortcuts-close icon-close icon-close--corner" title="Close" aria-label="Close keyboard shortcuts">×</button></div>
         <dl class="shortcuts-list">
           <div><dt>/</dt><dd>Focus search</dd></div>
           <div><dt>R</dt><dd>Toggle replay</dd></div>
@@ -120,7 +120,7 @@
           <div id="bookmarkSaveRow" class="bookmark-save-row" hidden>
             <input id="bookmarkName" type="text" maxlength="24" placeholder="Site name" aria-label="Bookmark name">
             <button type="button" id="bookmarkSaveConfirm" title="Save bookmark">Save</button>
-            <button type="button" id="bookmarkSaveCancel" title="Cancel" aria-label="Cancel bookmark">✕</button>
+            <button type="button" id="bookmarkSaveCancel" class="icon-close" title="Cancel" aria-label="Cancel bookmark">×</button>
           </div>
           <button type="button" class="menu-compact-btn" id="btnSaveBookmark" title="Save current map view">+ Save current view</button>
         </details>
@@ -140,7 +140,7 @@
     <div id="soundingPanel" class="sounding-panel" role="region" aria-label="Live wind aloft profile" hidden>
       <div class="sounding-head">
         <strong>🌬 Wind Aloft</strong>
-        <button id="soundingClose" type="button" class="sounding-close" aria-label="Close wind aloft panel" title="Close">✕</button>
+        <button id="soundingClose" type="button" class="sounding-close icon-close icon-close--corner" aria-label="Close wind aloft panel" title="Close">×</button>
       </div>
       <div id="soundingBody" class="sounding-body"></div>
     </div>
@@ -156,7 +156,7 @@
     <div id="emergencyBanner" class="emerg-banner" role="status" aria-live="assertive" aria-atomic="true">
       <span id="emergencyBannerText">Emergency Alert</span>
       <button id="emergencyJump" type="button">Jump to Alert</button>
-      <button id="emergencyBannerClose" type="button" aria-label="Dismiss emergency banner" title="Dismiss">✕</button>
+      <button id="emergencyBannerClose" type="button" class="icon-close icon-close--corner" aria-label="Dismiss emergency banner" title="Dismiss">×</button>
     </div>
     <div id="replayBar" class="replay-bar" role="region" aria-label="Replay controls">
       <button id="replayPlay" type="button" aria-label="Play replay">▶</button>
@@ -176,7 +176,7 @@
       </div>
       <span id="replayTime" style="white-space:nowrap;font-weight:600" aria-live="polite">--:--</span>
       <button id="replayClearFollow" type="button" title="Show all aircraft in replay" aria-label="Show all aircraft in replay" hidden>👁 All</button>
-      <button id="replayExit" type="button" aria-label="Exit replay">✕</button>
+      <button id="replayExit" type="button" class="icon-close icon-close--corner" aria-label="Exit replay">×</button>
     </div>
 
   </div>
@@ -217,6 +217,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261125zg"></script>
+<script src="app.js?v=20261125zi"></script>
 </body>
 </html>

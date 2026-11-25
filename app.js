@@ -20,6 +20,16 @@ const TRACK_COLORS = ['#38bdf8','#f97316','#a855f7','#22c55e','#f43f5e','#eab308
 const LIVE_TRACK_MAX_POINTS = 1500; // matches the backend's non-full track thinning target
 
 const $ = id => document.getElementById(id);
+
+// Floating map panels share one stacking order: the last one opened wins.
+// Emergency alerts are deliberately excluded and keep --emergency-z so they always win.
+const OVERLAY_Z_BASE = 1050; // matches CSS --overlay-z; above Leaflet controls (1000)
+let overlayZSeq = OVERLAY_Z_BASE;
+function bringToFront(el) {
+  if (!el) return;
+  el.style.zIndex = String(++overlayZSeq);
+}
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanName = s => {
   const raw = String(s ?? '');
@@ -1532,7 +1542,7 @@ function toggleSelection(address, openOnMap = false) {
 }
 
 const MEASURE_CLEAR_HTML =
-  `<button type="button" class="measure-clear" data-measure-clear title="Clear measurement" aria-label="Clear measurement">✕</button>`;
+  `<button type="button" class="measure-clear icon-close" data-measure-clear title="Clear measurement" aria-label="Clear measurement">×</button>`;
 
 function measureIcon() {
   return L.divIcon({
@@ -1574,12 +1584,14 @@ function selectMeasurePoint(index) {
 function updateMeasureReadout() {
   const readout = $('measureReadout');
   if (!readout) return;
+  const wasHidden = readout.hidden;
   if (!measurePoints.length) {
     readout.hidden = true;
     return;
   }
   if (measurePoints.length === 1) {
     readout.innerHTML = `<span>Point 1 set · tap second point</span>${MEASURE_CLEAR_HTML}`;
+    if (wasHidden) bringToFront(readout);
     readout.hidden = false;
     return;
   }
@@ -1588,6 +1600,7 @@ function updateMeasureReadout() {
   const brg = bearingDeg(p1[0], p1[1], p2[0], p2[1]);
   readout.innerHTML =
     `<span>${esc(fmtDistanceKm(km))} · ${Math.round(brg)}°</span>${MEASURE_CLEAR_HTML}`;
+  if (wasHidden) bringToFront(readout);
   readout.hidden = false;
 }
 
@@ -1678,7 +1691,7 @@ function setMeasureMode(on) {
   }
   map.getContainer().style.cursor = measureMode ? 'crosshair' : '';
   // The measurement stays visible after exiting so it can still be inspected
-  // and edited; the readout's ✕ button is the explicit clear action.
+  // and edited; the readout's × button is the explicit clear action.
 }
 
 map.on('click', e => {
@@ -3320,6 +3333,7 @@ function setSoundingOpen(open) {
   if (!panel) return;
   if (open && mapFilterPanel && !mapFilterPanel.hidden) closeFilterPanel(false);
   panel.hidden = !open;
+  if (open) bringToFront(panel);
   if (!open) hideSoundingTip();
   const btn = $('btnSounding');
   if (btn) {
@@ -4050,6 +4064,7 @@ function setReplayMode(on, opts = {}) {
   $('btnReplay').classList.toggle('active', on);
   $('btnReplay').setAttribute('aria-pressed', String(on));
   $('replayBar').classList.toggle('show', on);
+  if (on) bringToFront($('replayBar'));
   syncBottomBarOffset();
   if (on) {
     map.removeLayer(clusterGroup); map.removeLayer(emergencyGroup);
@@ -4211,6 +4226,7 @@ $('type').addEventListener('change', e => {
 });
 
 applySavedLayers();
+bringToFront($('mapFilterControl'));
 applySavedMenuPrefs();
 syncUnitButtons();
 
@@ -4350,6 +4366,7 @@ syncScrollListTopBtn();
 function openFilterPanel() {
   if (soundingIsOpen()) setSoundingOpen(false);
   mapFilterPanel.hidden = false;
+  bringToFront(mapFilterControl);
   mapFilterToggle.setAttribute('aria-expanded', 'true');
   const first = [...mapFilterPanel.querySelectorAll('summary,input,select,button')]
     .find(el => el.getClientRects().length > 0);
@@ -4419,7 +4436,7 @@ function renderBookmarks() {
   list.innerHTML = bookmarkItems().map(b =>
     `<span class="bookmark-item">` +
     `<button type="button" class="bookmark-pill" data-bookmark="${esc(b.id)}" title="Go to ${esc(b.name)}">${esc(b.name)}</button>` +
-    (b.builtin ? '' : `<button type="button" class="bookmark-delete" data-bookmark-delete="${esc(b.id)}" title="Delete ${esc(b.name)}" aria-label="Delete ${esc(b.name)}">×</button>`) +
+    (b.builtin ? '' : `<button type="button" class="bookmark-delete icon-close" data-bookmark-delete="${esc(b.id)}" title="Delete ${esc(b.name)}" aria-label="Delete ${esc(b.name)}">×</button>`) +
     `</span>`
   ).join('');
 }
