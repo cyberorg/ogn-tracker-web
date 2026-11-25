@@ -953,13 +953,23 @@ function redrawAllTracks() {
     if (entry.layer) entry.layer.addTo(map);
   }
   updateReplayTrackLine();
+  syncVarioLegend();
+}
+
+function isTrackVisible() {
+  if (replayActive && replayTrackGroup.getLayers().length) return true;
+  for (const entry of selectedTracks.values()) {
+    if (entry.layer) return true;
+  }
+  return false;
 }
 
 function syncVarioLegend() {
   const legend = $('varioLegend');
   if (!legend) return;
-  legend.hidden = !varioTrackMode;
-  if (!varioTrackMode) return;
+  const show = varioTrackMode && isTrackVisible();
+  legend.hidden = !show;
+  if (!show) return;
   $('varioLegendLow').textContent = `↓ ${fmtClimb(-2)}`;
   $('varioLegendHigh').textContent = `+${fmtClimb(2.5)} ↑`;
   legend.setAttribute('aria-label', `Vario colour scale from ${fmtClimb(-2)} sink to +${fmtClimb(2.5)} climb`);
@@ -1167,6 +1177,7 @@ function removeTrack(address) {
   }
   updateListHint();
   syncClearTracksButton();
+  syncVarioLegend();
 }
 
 function clearAllTracks() {
@@ -1178,6 +1189,7 @@ function clearAllTracks() {
   updateListHint();
   updateUrlHash();
   syncClearTracksButton();
+  syncVarioLegend();
 }
 
 function trackWindowCutoffSec(nowMs = serverNow()) {
@@ -1203,7 +1215,7 @@ function buildTrackQuery(address) {
 async function loadTrack(address) {
   const entry = selectedTracks.get(address);
   if (!entry) return false;
-  if (entry.layer) { map.removeLayer(entry.layer); entry.layer = null; }
+  if (entry.layer) { map.removeLayer(entry.layer); entry.layer = null; syncVarioLegend(); }
   const reqId = ++trackReqSeq;
   entry.reqId = reqId;
 
@@ -1217,6 +1229,7 @@ async function loadTrack(address) {
     current.points = Array.isArray(data.points) ? data.points : [];
     current.layer = buildTrackLayer(current.points, current.color);
     if (current.layer) current.layer.addTo(map);
+    syncVarioLegend();
     refreshMarkerPopup(address);
     return true;
   } catch (err) {
@@ -2920,6 +2933,7 @@ function render() {
           if (trackEntry.layer) map.removeLayer(trackEntry.layer);
           trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
           if (trackEntry.layer) trackEntry.layer.addTo(map);
+          syncVarioLegend();
         }
       }
       if (!isSpiderfied && m._isEmergency !== emerg) {
@@ -3961,6 +3975,7 @@ function updateReplayTrackLine() {
       replayTrackLayers(valid.slice(0, lo), 3, 0.9).forEach(l => l.addTo(replayTrackGroup));
     }
   }
+  syncVarioLegend();
 }
 
 async function loadReplayTrack() {
@@ -4080,6 +4095,7 @@ function setReplayMode(on, opts = {}) {
     clusterGroup.addTo(map); emergencyGroup.addTo(map);
     fetchLive(true);
   }
+  syncVarioLegend();
 }
 
 function parseOpenAirToGeoJson(text) {
