@@ -9,12 +9,13 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261124c">
+<link rel="stylesheet" href="style.css?v=20261125zd">
 </head>
 <body>
-<div class="app">
+<div class="app header-collapsed">
 <header>
   <div class="brand"><div class="logo">✈</div><div><h1>OGN Tracker</h1><div class="sub">Live APRS-IS feed · Open Glider Network</div></div></div>
+  <button id="headerToggle" class="header-toggle" type="button" aria-label="Expand header" aria-expanded="false" title="Expand header">▾</button>
   <div class="toolbar">
     <button id="locate" title="Locate me">◎ Locate</button>
     <button id="btnReplay" title="24-hour time-lapse replay" aria-pressed="false">▶ Replay</button>
@@ -41,7 +42,6 @@
     </div>
     <input id="airspaceFile" type="file" accept=".geojson,.json,.txt" hidden>
   </div>
-  <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
 </header>
 <main>
   <div class="map-wrap" id="mapWrap">
@@ -53,7 +53,7 @@
           <div class="type-checklist" id="type" role="group" aria-label="Aircraft filter">
             <label class="type-option"><input type="checkbox" value="para" checked><span>Paragliders</span></label>
             <label class="type-option"><input type="checkbox" value="wx" checked><span>Wx Stations</span></label>
-            <label class="type-option"><input type="checkbox" value="glider"><span>Gliders</span></label>
+            <label class="type-option"><input type="checkbox" value="glider"><span>Gliders/SP</span></label>
             <label class="type-option"><input type="checkbox" value="hang"><span>Hang gliders</span></label>
             <label class="type-option"><input type="checkbox" value="fanet"><span>FANET</span></label>
             <label class="type-option"><input type="checkbox" value="other"><span>Other</span></label>
@@ -181,13 +181,14 @@
 
   </div>
   <aside class="sidebar" id="aircraftSidebar">
+    <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
     <div class="filters">
       <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
       <button type="button" id="btnClearSearch" class="clear-search-btn" aria-label="Clear search" hidden>Clear</button>
     </div>
     <div class="section-head section-head-toggle" id="alertsSectionHead" hidden>
       <button type="button" class="section-toggle-btn" id="alertsToggle" aria-expanded="true" aria-controls="alerts24hSummary">
-        <span class="section-title">Emergency/Alerts</span>
+        <span class="section-title alert-title">Emergency/Alerts</span>
         <span class="section-meta"><span class="muted" id="alertsCount">0</span><span class="section-caret" aria-hidden="true">▾</span></span>
       </button>
     </div>
@@ -207,6 +208,7 @@
     </div>
     <div id="listHint" class="list-hint" aria-live="polite"></div>
     <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
+    <button id="scrollListTopBtn" class="scroll-list-top-btn" type="button" aria-label="Scroll aircraft list to top" title="Scroll aircraft list to top" hidden>↑</button>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
   </aside>
 </main>
@@ -215,6 +217,6 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261125zb"></script>
+<script src="app.js?v=20261125ze"></script>
 </body>
 </html>

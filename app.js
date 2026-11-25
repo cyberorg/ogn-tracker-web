@@ -1839,6 +1839,7 @@ const ICONS = {
   heli: "M12 3.5C14.1 3.5 15.3 5.5 15.3 8.5C15.3 11 14 12.6 12.8 13.3L12.7 19.5L15 20.5V21.7L12 21.1L9 21.7V20.5L11.3 19.5L11.2 13.3C10 12.6 8.7 11 8.7 8.5C8.7 5.5 9.9 3.5 12 3.5ZM4.2 3.2L19.8 14.8L19 15.8L3.4 4.2ZM19.8 3.2L4.2 14.8L5 15.8L20.6 4.2Z",
   para: "M12 2C4 2 1 7 1 9C3 7 7 6 12 6C17 6 21 7 23 9C23 7 20 2 12 2ZM2 9L11 18M22 9L13 18M10 20A2 2 0 1 0 14 20A2 2 0 1 0 10 20Z",
   hang: "M12 2L24 16L12 12L0 16ZM12 12L12 20M10 20h4",
+  drone: "M5.5 3.2a2.3 2.3 0 1 0 0 4.6a2.3 2.3 0 1 0 0-4.6zM18.5 3.2a2.3 2.3 0 1 0 0 4.6a2.3 2.3 0 1 0 0-4.6zM5.5 16.2a2.3 2.3 0 1 0 0 4.6a2.3 2.3 0 1 0 0-4.6zM18.5 16.2a2.3 2.3 0 1 0 0 4.6a2.3 2.3 0 1 0 0-4.6zM12 9.3L14.7 12 12 14.7 9.3 12zM10.4 10.4L7.2 7.2M13.6 10.4L16.8 7.2M10.4 13.6L7.2 16.8M13.6 13.6L16.8 16.8",
   balloon: "M12 2C6 2 4 8 4 12C4 16 9 19 10 20L9 22h6L14 20C15 19 20 16 20 12C20 8 18 2 12 2Z",
   tower: "M12 2L12 22M12 2L8 8h8zM6 22h12M8 16h8M9 10h6"
 };
@@ -2378,10 +2379,11 @@ function markerIcon(a) {
   const name = esc(displayName(a));
   let svgPath = ICONS.default;
   switch(type) {
-    case 2: case 5: case 8: case 9: case 13: case 16: svgPath = ICONS.airplane; break;
+    case 2: case 5: case 8: case 9: case 16: svgPath = ICONS.airplane; break;
     case 3: svgPath = ICONS.heli; break;
     case 4: case 7: svgPath = ICONS.para; break;
     case 6: svgPath = ICONS.hang; break;
+    case 13: svgPath = ICONS.drone; break;
     case 11: case 12: svgPath = ICONS.balloon; break;
     case 15: svgPath = ICONS.tower; break;
   }
@@ -4154,13 +4156,35 @@ $('trackWindow').addEventListener('change', () => {
   for (const addr of selectedTracks.keys()) loadTrack(addr);
 });
 
-$('scrollToListBtn')?.addEventListener('click', () => {
+function smoothScrollToTarget(target) {
   Promise.resolve(exitMapFullscreen()).catch(() => {}).finally(() => {
     requestAnimationFrame(() => {
-      $('aircraftSidebar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   });
+}
+
+$('scrollToListBtn')?.addEventListener('click', () => {
+  smoothScrollToTarget($('aircraftSidebar'));
 });
+
+const appRoot = document.querySelector('.app');
+const headerToggle = $('headerToggle');
+function syncHeaderToggleUi() {
+  if (!headerToggle) return;
+  const collapsed = appRoot?.classList.contains('header-collapsed') ?? true;
+  headerToggle.textContent = collapsed ? '▾' : '▴';
+  headerToggle.setAttribute('aria-expanded', String(!collapsed));
+  const label = collapsed ? 'Expand header' : 'Collapse header';
+  headerToggle.setAttribute('aria-label', label);
+  headerToggle.title = label;
+}
+headerToggle?.addEventListener('click', () => {
+  appRoot?.classList.toggle('header-collapsed');
+  syncHeaderToggleUi();
+  requestAnimationFrame(() => map.invalidateSize({ pan: false, animate: false }));
+});
+syncHeaderToggleUi();
 
 const mapFilterControl = $('mapFilterControl');
 const mapFilterToggle = $('mapFilterToggle');
@@ -4178,14 +4202,50 @@ if (typeof compactMenuQuery.addEventListener === 'function') {
   compactMenuQuery.addEventListener('change', event => {
     menuDefaultsApplied = false;
     if (event.matches) applyMenuDefaults();
+    syncScrollListTopBtn();
   });
 } else if (typeof compactMenuQuery.addListener === 'function') {
   compactMenuQuery.addListener(event => {
     menuDefaultsApplied = false;
     if (event.matches) applyMenuDefaults();
+    syncScrollListTopBtn();
   });
 }
 applyMenuDefaults();
+
+const scrollListTopBtn = $('scrollListTopBtn');
+const listForTopBtn = $('aircraftList');
+const LIST_TOP_SHOW_PX = 140;
+
+function aircraftListDocTop() {
+  if (!listForTopBtn) return 0;
+  return listForTopBtn.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0);
+}
+
+function syncScrollListTopBtn() {
+  if (!scrollListTopBtn || !listForTopBtn) return;
+  const listScrolled = listForTopBtn.scrollTop > LIST_TOP_SHOW_PX;
+  const pageScrolled = compactMenuQuery.matches
+    && (window.scrollY || window.pageYOffset || 0) > aircraftListDocTop() + LIST_TOP_SHOW_PX;
+  scrollListTopBtn.hidden = !(listScrolled || pageScrolled);
+}
+
+function scrollAircraftListToTop() {
+  if (!listForTopBtn) return;
+  if (compactMenuQuery.matches) {
+    // Mirror the map's down arrow: same fullscreen exit and smooth scrollIntoView,
+    // landing with the Aircrafts/Stations sidebar at the top of the screen.
+    smoothScrollToTarget($('aircraftSidebar'));
+  } else {
+    listForTopBtn.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+}
+
+scrollListTopBtn?.addEventListener('click', scrollAircraftListToTop);
+listForTopBtn?.addEventListener('scroll', syncScrollListTopBtn, { passive: true });
+window.addEventListener('scroll', syncScrollListTopBtn, { passive: true });
+window.addEventListener('resize', syncScrollListTopBtn);
+syncScrollListTopBtn();
 
 function openFilterPanel() {
   if (soundingIsOpen()) setSoundingOpen(false);
