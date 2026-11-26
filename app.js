@@ -76,6 +76,8 @@ let lastSoundingBoundsKey = '';
 let lastSoundingAttemptAtMs = 0;
 let lastSoundingSuccessAtMs = 0;
 let soundingRefreshFailed = false;
+let soundingPopupFetchSeq = 0;
+let soundingPopupPendingKey = '';
 let savedTypes = ['para', 'wx'];
 let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
@@ -626,6 +628,7 @@ map.on('popupopen', e => {
   }
   openPopups.add(e.popup);
   bringToFront(map.getPane('popupPane'));
+  if (e.popup?._source?._data) maybePrefetchSoundingForPopup(e.popup._source._data);
   if (e.popup?._source?._trackerMarker) return;
   requestAnimationFrame(() => keepPopupAboveBottomBar(e.popup.getElement()));
 });
@@ -773,7 +776,7 @@ let userLocationMarker = null;
 let needMeta = true;
 let lastNameUpdated = 0;
 let lastMetaBounds = null;
-const knownIds = new Set();
+const knownIds = new Map(); // address -> last seen ms
 
 let followedAddress = null;
 let varioTrackMode = savedVarioTrackMode;
@@ -872,8 +875,10 @@ function savePinnedAircraft() {
 }
 
 function togglePin(address) {
-  if (pinnedAircraft.has(address)) pinnedAircraft.delete(address);
-  else pinnedAircraft.add(address);
+  if (pinnedAircraft.has(address)) {
+    pinnedAircraft.delete(address);
+    lastPinnedStatus.delete(address);
+  } else pinnedAircraft.add(address);
   savePinnedAircraft();
   render();
   requestAnimationFrame(() => focusListRow(address));
@@ -1362,11 +1367,33 @@ function barogramChart(address, scrubIdx = null) {
   const spanAlt = Math.max(10, maxAlt - minAlt);
   const t0 = pts[0][3], t1 = pts[pts.length - 1][3], spanT = Math.max(1, t1 - t0);
 
+  const sounding = soundingContextForAircraft(
+    findAircraftByAddress(address) || markers.get(address)?._data || searchResultMarkers.get(address)?._data
+  );
+  const refs = [];
+  if (sounding?.cloud != null) refs.push({ alt: sounding.cloud, label: 'Cloud base', color: THEME.accent, dash: '3 4' });
+  if (sounding?.ceiling != null) refs.push({ alt: sounding.ceiling, label: 'Thermal top', color: THEME.yellow, dash: '6 3' });
+
   const coords = pts.map(p => {
     const x = ((p[3] - t0) / spanT) * 460;
     const y = 65 - (((p[2] - minAlt) / spanAlt) * 58);
     return `${x.toFixed(1)},${y.toFixed(1)}`;
   }).join(' ');
+
+  const refItems = [];
+  for (const ref of refs) {
+    if (!Number.isFinite(ref.alt) || ref.alt < minAlt || ref.alt > maxAlt) continue;
+    refItems.push({ ...ref, y: 65 - (((ref.alt - minAlt) / spanAlt) * 58) });
+  }
+  refItems.sort((a, b) => a.y - b.y);
+  let refSvg = '';
+  let refSuffix = '';
+  refItems.forEach((ref, i) => {
+    const labelY = Math.max(9, Math.min(65, ref.y + (refItems.length > 1 && i === 0 ? -3 : 8)));
+    refSvg += `<line x1="0" y1="${ref.y.toFixed(1)}" x2="460" y2="${ref.y.toFixed(1)}" stroke="${ref.color}" stroke-width="1" stroke-dasharray="${ref.dash}" opacity="0.55" />` +
+      `<text x="456" y="${labelY.toFixed(1)}" fill="${ref.color}" font-size="8" text-anchor="end" stroke="${THEME.bg}" stroke-width="3" paint-order="stroke">${esc(ref.label)} ≈ ${esc(fmtAlt(ref.alt))}</text>`;
+    refSuffix += ` · ${ref.label} ≈ ${fmtAlt(ref.alt)}`;
+  });
 
   let scrubSvg = '';
   let scrubSuffix = '';
@@ -1382,9 +1409,10 @@ function barogramChart(address, scrubIdx = null) {
     scrubSuffix = ` · ${fmtAlt(sp[2])} @ ${timeStr}`;
   }
 
-  const title = `Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${scrubSuffix}`;
+  const title = `Min ${fmtAlt(minAlt)} / Max ${fmtAlt(maxAlt)}${refSuffix}${scrubSuffix}`;
   const svg = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
+    ${refSvg}
     ${scrubSvg}
     <text x="4" y="12" fill="${THEME.muted}" font-size="10">${esc(fmtAlt(maxAlt))}</text>
     <text x="4" y="66" fill="${THEME.muted}" font-size="10">${esc(fmtAlt(minAlt))}</text>
@@ -2394,6 +2422,9 @@ function playBeep() {
 
 function checkPinnedNotifications() {
   if (!alertsEnabled) return;
+  for (const id of lastPinnedStatus.keys()) {
+    if (!pinnedAircraft.has(id)) lastPinnedStatus.delete(id);
+  }
   const notifyStatuses = new Set(['Distress call', 'Distress call automatically', 'Need medical help', 'Need a ride', 'Landed well']);
   for (const a of aircraft) {
     if (!pinnedAircraft.has(a.address)) continue;
@@ -2475,6 +2506,7 @@ function rebuildAircraftArray() {
   aircraft = [];
   const telemetryOnly = [];
   const seenStations = new Map();
+  const activeCacheIds = new Set();
 
   for (const [id, cached] of aprsCache.entries()) {
     if (now - cached.timestamp > maxAgeMs) { aprsCache.delete(id); continue; }
@@ -2486,6 +2518,7 @@ function rebuildAircraftArray() {
     }
     a.aprsPacket = cached.raw;
     a.aprsReceivedAt = cached.received_at;
+    activeCacheIds.add(a.address);
 
     if (a.altitude != null) lastAltCache.set(a.address, { lat: a.lat, lon: a.lon, alt: a.altitude });
     else {
@@ -2523,16 +2556,23 @@ function rebuildAircraftArray() {
   for (const [id, cached] of lastKnownCache.entries()) {
     if (now - cached.timestamp > LAST_KNOWN_TTL_MS) { lastKnownCache.delete(id); continue; }
     // Once live data for this aircraft arrives, the live packet supersedes it.
-    if (aprsCache.has(id) || aircraft.some(a => a.address === id)) continue;
+    if (aprsCache.has(id) || activeCacheIds.has(id)) continue;
     const a = parseAprsLineCached(cached.raw, cached.timestamp);
     if (!a) continue;
     a.id = id;
     a.address = id;
+    activeCacheIds.add(id);
     a.aprsPacket = cached.raw;
     a.aprsReceivedAt = cached.received_at;
     a.__lastKnown = true;
     applyCachedAircraftMeta(a);
     aircraft.push(a);
+  }
+
+  for (const cache of [lastAltCache, lastClimbCache]) {
+    for (const id of cache.keys()) {
+      if (!activeCacheIds.has(id)) cache.delete(id);
+    }
   }
 
   for (const [id, cached] of telemetryCache.entries()) {
@@ -2541,11 +2581,18 @@ function rebuildAircraftArray() {
     if (tel && tel.__telemetryOnly) telemetryOnly.push(tel);
   }
 
+  const stationKeyToAircraft = new Map();
+  for (const a of aircraft) {
+    for (const k of getStationKeys(a)) {
+      if (!stationKeyToAircraft.has(k)) stationKeyToAircraft.set(k, a);
+    }
+  }
+
   for (const tel of telemetryOnly) {
     if (tel.weather) {
       updateWeatherCache([tel.id, tel.address, tel.liveLabel], tel.weather, tel.receivedAtMs);
     }
-    const target = aircraft.find(a => getStationKeys(a).has(tel.address));
+    const target = stationKeyToAircraft.get(tel.address);
     if (target) {
       target.weather = mergeWeather(target.weather, tel.weather);
       updateWeatherCache(getStationKeys(target), target.weather, tel.receivedAtMs);
@@ -2881,6 +2928,24 @@ function refreshMarkerPopup(address, data = null) {
     newDetails.onTogglePopupDetails = newDetails.onTogglePopupDetails || (() => { m._detailsOpen = newDetails.open; keepOpenPopupAboveBar(m); });
     newDetails.removeEventListener('toggle', newDetails.onTogglePopupDetails);
     newDetails.addEventListener('toggle', newDetails.onTogglePopupDetails);
+  }
+}
+
+function refreshOpenPopupForAddress(address) {
+  const m = markers.get(address) || searchResultMarkers.get(address);
+  if (!m || !m.isPopupOpen()) return;
+  const html = popup(m._data);
+  if (m._popupSig === html) return;
+  m._popupSig = html;
+  m.setPopupContent(html);
+  if (m._trackerMarker) keepOpenPopupAboveBar(m);
+  else requestAnimationFrame(() => centerPopupInView(m));
+}
+
+function refreshOpenSoundingPopups() {
+  for (const p of openPopups) {
+    const address = p?._source?._data?.address;
+    if (address && selectedTracks.has(address)) refreshOpenPopupForAddress(address);
   }
 }
 
@@ -3679,6 +3744,53 @@ function soundingIsOpen() {
   return !!panel && !panel.hidden;
 }
 
+function soundingDataIsFresh(data, key = null) {
+  if (!data || data.available === false || data.error) return false;
+  const generatedMs = Number(data.generated_at) * 1000;
+  if (!Number.isFinite(generatedMs) || Date.now() - generatedMs > 15 * 60 * 1000) return false;
+  return key === null || data._key === key;
+}
+
+function soundingContextForAircraft(a) {
+  if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return null;
+  if (!map.getBounds().contains([a.lat, a.lon])) return null;
+  const key = soundingParamsForBounds(map.getBounds()).toString();
+  if (!soundingDataIsFresh(lastSoundingData, key)) return null;
+  const ceiling = Number.isFinite(lastSoundingData.thermal_ceiling_m) ? lastSoundingData.thermal_ceiling_m : null;
+  const surface = lastSoundingData.surface || null;
+  const cloud = surface && Number.isFinite(surface.lcl_msl_m) ? surface.lcl_msl_m : null;
+  if (ceiling === null && cloud === null) return null;
+  return { ceiling, cloud };
+}
+
+async function maybePrefetchSoundingForPopup(a) {
+  if (soundingIsOpen() || !baroEnabled || !selectedTracks.has(a?.address)) return;
+  if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
+  const bounds = map.getBounds();
+  if (!bounds.contains([a.lat, a.lon])) return;
+  const params = soundingParamsForBounds(bounds);
+  const key = params.toString();
+  if (soundingDataIsFresh(lastSoundingData, key) || soundingPopupPendingKey === key) return;
+
+  soundingPopupPendingKey = key;
+  const seq = ++soundingPopupFetchSeq;
+  try {
+    const res = await fetch(`ogn-proxy.php?${params}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (seq !== soundingPopupFetchSeq || key !== soundingParamsForBounds(map.getBounds()).toString()) return;
+    lastSoundingData = { ...data, _key: key };
+    lastSoundingBoundsKey = key;
+    soundingRefreshFailed = false;
+    lastSoundingSuccessAtMs = Date.now();
+    refreshOpenSoundingPopups();
+  } catch (e) {
+    // Sounding is optional context for the barogram; keep any previous payload.
+  } finally {
+    if (seq === soundingPopupFetchSeq) soundingPopupPendingKey = '';
+  }
+}
+
 function updateSoundingUpdated() {
   const el = $('soundingUpdated');
   if (!el) return;
@@ -3777,6 +3889,7 @@ async function fetchSounding(force = false) {
     soundingRefreshFailed = false;
     lastSoundingSuccessAtMs = lastSoundingAttemptAtMs;
     renderSounding();
+    refreshOpenSoundingPopups();
   } catch (e) {
     if (seq !== fetchSounding._seq || !soundingIsOpen()) return;
     lastSoundingData = {
@@ -3999,7 +4112,8 @@ async function fetchLive(force = false) {
       if (!incomingIds.has(existingId)) aprsCache.delete(existingId);
     }
     for (const [id, pkt] of Object.entries(incoming)) {
-      if (!knownIds.has(id)) { knownIds.add(id); sawUnknown = true; }
+      if (!knownIds.has(id)) sawUnknown = true;
+      knownIds.set(id, nowAttemptMs);
       const tsMs = (Number(pkt.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
       const prev = aprsCache.get(id);
       const raw = pkt.raw || '';
@@ -4036,6 +4150,10 @@ async function fetchLive(force = false) {
       if (!prev || prev.timestamp !== tsMs || prev.raw !== raw) {
         telemetryCache.set(id, { raw, timestamp: tsMs });
       }
+    }
+
+    for (const [id, seenMs] of knownIds) {
+      if (nowAttemptMs - seenMs > LAST_KNOWN_TTL_MS) knownIds.delete(id);
     }
 
     // Server names are applied only when this payload did not carry a fresher
