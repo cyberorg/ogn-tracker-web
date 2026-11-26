@@ -3188,10 +3188,13 @@ function render() {
   const byName = (a, b) =>
     displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   const sorted = listVisible.slice().sort((a, b) => {
-    // Emergency and pinned rows keep their existing priority; the chosen sort
-    // orders everything else (and the alert list is handled separately).
+    // Emergency rows stay first. Aircraft with an active track are then kept
+    // at the top regardless of the chosen sort; pinned rows and the selected
+    // sort only order the remaining rows (and rows within each group).
     const ea = isEmergency(a) ? 1 : 0, eb = isEmergency(b) ? 1 : 0;
     if (ea !== eb) return eb - ea;
+    const ta = selectedTracks.has(a.address) ? 1 : 0, tb = selectedTracks.has(b.address) ? 1 : 0;
+    if (ta !== tb) return tb - ta;
     const pa = pinnedAircraft.has(a.address) ? 1 : 0, pb = pinnedAircraft.has(b.address) ? 1 : 0;
     if (pa !== pb) return pb - pa;
     if (listSort === 'type') {
