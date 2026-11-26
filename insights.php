@@ -43,7 +43,7 @@ if (!$doGenerate) {
     http_response_code(503);
     ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css"></head><body>
+<link rel="stylesheet" href="style.css?v=20261126zza"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
@@ -682,18 +682,18 @@ $genDuration = microtime(true) - $generationStarted;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261126zza">
 <style>
+  header{cursor:default}
   main{display:block!important}
-  .ins-page{max-width:800px;margin:0 auto;padding:12px 12px 36px}
   .ins-headline{display:flex;flex-wrap:wrap;align-items:flex-end;gap:10px;justify-content:space-between;margin-bottom:10px}
   .ins-headline h2{font-size:20px;margin:0}
   .ins-headline p{margin:3px 0 0;color:var(--muted);font-size:12px}
-  .ins-refresh{font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--panel2)}
+  .ins-refresh{font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--control-bg)}
   .ins-refresh:hover{border-color:var(--accent);color:var(--text)}
   .ins-gen{display:inline-block;font-size:11px;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:4px 9px;margin-left:6px;white-space:nowrap}
   .ins-nav{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}
-  .ins-nav a{font-size:11px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--panel2)}
+  .ins-nav a{font-size:11px;color:var(--muted);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:5px 11px;background:var(--control-bg)}
   .ins-nav a:hover{color:var(--text);border-color:var(--accent)}
   .ins-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(165px,100%),1fr));gap:10px;margin-bottom:12px}
   .ins-kpis-secondary{grid-template-columns:repeat(auto-fit,minmax(min(150px,100%),1fr));margin-bottom:18px}
@@ -707,9 +707,9 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-kpis-secondary .ins-kpi-sub{font-size:10px}
   .ins-kpi-sub{font-size:11px;color:#b7c7d2;margin-top:3px}
   .ins-delta{display:inline-block;margin-left:5px;padding:1px 5px;border:1px solid currentColor;border-radius:999px;font-size:9px;font-weight:700;white-space:nowrap;vertical-align:1px}
-  .ins-delta-up{color:#57d3b0;background:#10332b}
-  .ins-delta-down{color:#ff8e8e;background:#3d1118}
-  .ins-delta-flat{color:#9aabba;background:#22313e}
+  .ins-delta-up{color:var(--accent);background:var(--up-bg)}
+  .ins-delta-down{color:var(--down-red);background:var(--danger-bg)}
+  .ins-delta-flat{color:var(--muted);background:var(--table-line)}
   .ins-grid{display:grid;grid-template-columns:1fr;gap:12px;align-items:start}
   .ins-section{grid-column:1/-1;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:6px 0 -2px;padding-bottom:6px;border-bottom:1px solid var(--line)}
   .ins-card{background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;min-width:0}
@@ -736,14 +736,15 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-table td.num,.ins-table th.num{text-align:right;font-variant-numeric:tabular-nums}
   .ins-empty{color:var(--muted);font-size:12px;padding:8px 0}
   .ins-note{font-size:11px;color:var(--muted);margin:10px 0 0;line-height:1.5}
-  .ins-scroll-hint{display:inline-block;font-size:11px;color:var(--accent);background:#14202b;border:1px solid var(--line);border-radius:999px;padding:3px 9px;margin-top:8px}
-  .ins-scroll-chart{overflow-x:auto;overflow-y:hidden;margin-top:6px;padding-bottom:3px;scrollbar-color:#2b3d4c #17232f;scrollbar-width:thin}
+  .ins-note--spaced{margin-top:16px}
+  .ins-scroll-hint{display:inline-block;font-size:11px;color:var(--accent);background:var(--card-head);border:1px solid var(--line);border-radius:999px;padding:3px 9px;margin-top:8px}
+  .ins-scroll-chart{overflow-x:auto;overflow-y:hidden;margin-top:6px;padding-bottom:3px;scrollbar-color:var(--line) var(--panel);scrollbar-width:thin}
   .ins-scroll-chart::-webkit-scrollbar{height:8px}
-  .ins-scroll-chart::-webkit-scrollbar-thumb{background:#2b3d4c;border-radius:5px}
+  .ins-scroll-chart::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
   .ins-chart-cols{display:flex;gap:3px;width:max-content;align-items:flex-end}
   .ins-col{flex:0 0 72px;display:flex;flex-direction:column;align-items:center;gap:3px;min-width:0}
   .ins-col-plot{height:140px;width:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;border-bottom:1px solid var(--line);background:repeating-linear-gradient(to top,transparent 0,transparent 69px,#22313e 69px,#22313e 70px)}
-  .ins-col-val{font-size:11px;color:#edf4f8;height:14px;line-height:14px;white-space:nowrap}
+  .ins-col-val{font-size:11px;color:var(--text);height:14px;line-height:14px;white-space:nowrap}
   .ins-col-peak .ins-col-val{color:#fff;font-weight:800}
   .ins-col-peak .ins-col-bar{box-shadow:0 0 12px #57d3b066}
   .ins-col-bar{width:100%;border-radius:3px 3px 0 0;min-height:2px}
@@ -751,7 +752,6 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-col-hour{font-size:10px;color:#b7c7d2;font-weight:600;line-height:1.1;white-space:nowrap}
   .ins-split{display:grid;grid-template-columns:1fr 1fr;gap:18px}
   .ins-split h3{font-size:11px;margin:0 0 6px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-  .ins-error{background:#3d1118;border:1px solid var(--red);color:#ffe5e5;padding:14px;border-radius:10px;margin:20px auto;max-width:700px}
   @media(max-width:800px){
     .ins-split{grid-template-columns:1fr}
     .ins-nav{margin-bottom:12px}
@@ -985,7 +985,7 @@ $genDuration = microtime(true) - $generationStarted;
     ?>
   </div>
 
-  <p class="ins-note" style="margin-top:16px">
+  <p class="ins-note ins-note--spaced">
     Notes: type counts use the packet-derived OGN type with DDB as fallback. Ground stations are separated into the
     station section. Counts are based on the latest packet per aircraft in the <code>aircraft</code> table, so one
     aircraft contributes one row. Track and thermal figures come from the 24-hour history tables.

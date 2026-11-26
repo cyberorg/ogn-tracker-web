@@ -36,6 +36,19 @@ function bringToFront(el) {
 // action does.
 const POPUP_OPTIONS = { autoClose: true, closeOnClick: false, closeOnEscapeKey: false };
 
+const THEME = (() => {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+  return {
+    accent: v('--accent', '#57d3b0'),
+    yellow: v('--yellow', '#f5c451'),
+    red: v('--red', '#f07878'),
+    text: v('--text', '#edf4f8'),
+    bg: v('--bg', '#101923'),
+    muted: v('--muted', '#9aabba')
+  };
+})();
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanName = s => {
   const raw = String(s ?? '');
@@ -353,7 +366,30 @@ const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
 });
 
 const map = L.map('map', { zoomControl: false, closePopupOnClick: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
+
+// Locate lives on the map, stacked above the zoom control at bottom-left.
+const LocateControl = L.Control.extend({
+  options: { position: 'bottomleft' },
+  onAdd: function () {
+    const container = L.DomUtil.create('div', 'leaflet-control-locate');
+    const button = L.DomUtil.create('button', 'leaflet-control-locate-btn', container);
+    button.type = 'button';
+    button.id = 'locate';
+    button.title = 'Locate me';
+    button.setAttribute('aria-label', 'Locate me');
+    button.innerHTML =
+      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
+      '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>' +
+      '<circle cx="12" cy="12" r="3" fill="currentColor"/>' +
+      '</svg>';
+    L.DomEvent.disableClickPropagation(container);
+    return container;
+  }
+});
+// Leaflet inserts bottom-corner controls at the top, so add zoom first and the
+// locate control second to keep locate stacked above the zoom buttons.
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
+new LocateControl().addTo(map);
 
 const FullscreenControl = L.Control.extend({
   options: { position: 'topright' },
@@ -597,10 +633,10 @@ map.on('popupclose', e => {
   if (!mapMoving) openPopups.delete(e.popup);
 });
 
-const thermalLayer = L.heatLayer([], { radius: 18, blur: 14, maxZoom: 14, gradient: {0.2:'#38bdf8', 0.5:'#f5c451', 0.8:'#f97316', 1.0:'#ef4444'} });
+const thermalLayer = L.heatLayer([], { radius: 18, blur: 14, maxZoom: 14, gradient: {0.2:'#38bdf8', 0.5:THEME.yellow, 0.8:'#f97316', 1.0:'#ef4444'} });
 const coverageLayer = L.layerGroup();
 const airspaceLayer = L.geoJSON(null, {
-  style: { color: '#f5c451', weight: 2, fillOpacity: 0.12 },
+  style: { color: THEME.yellow, weight: 2, fillOpacity: 0.12 },
   onEachFeature: (f, l) => {
     if (f.properties && (f.properties.name || f.properties.title)) {
       l.bindPopup(`<b>${esc(f.properties.name || f.properties.title)}</b>`, { ...POPUP_OPTIONS });
@@ -629,6 +665,14 @@ syncClearAirspaceButton();
 const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
 const overlayMaps = { "Thermals(6h)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
 const layersControl = L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
+const layersToggle = layersControl.getContainer()?.querySelector('.leaflet-control-layers-toggle');
+if (layersToggle) {
+  layersToggle.innerHTML =
+    '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
+    '<path d="M12 3 2 8l10 5 10-5-10-5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>' +
+    '<path d="m2 13 10 5 10-5M2 17l10 5 10-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>' +
+    '</svg>';
+}
 
 let scaleControl = null;
 let scaleControlImperial = null;
@@ -959,8 +1003,12 @@ function showToast(msg, durationMs = 1800) {
     t.className = 'app-toast';
     t.setAttribute('role', 'status');
     t.setAttribute('aria-live', 'polite');
-    document.body.appendChild(t);
   }
+  const mapWrap = $('mapWrap');
+  const host = document.fullscreenElement === mapWrap || mapWrap?.classList.contains('map-fullscreen')
+    ? mapWrap
+    : document.body;
+  if (t.parentElement !== host) host.appendChild(t);
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(showToast._timer);
@@ -1102,7 +1150,7 @@ function pickTrackColor() {
 }
 
 function varioColor(climb) {
-  if (climb == null) return '#57d3b0';
+  if (climb == null) return THEME.accent;
   if (climb >= 2.5) return '#ef4444';
   if (climb >= 1.0) return '#f97316';
   if (climb >= 0.2) return '#eab308';
@@ -1328,8 +1376,8 @@ function barogramChart(address, scrubIdx = null) {
     const sy = (65 - (((sp[2] - minAlt) / spanAlt) * 58)).toFixed(1);
     const timeStr = new Date(sp[3] * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     scrubSvg = `
-      <line x1="${sx}" y1="4" x2="${sx}" y2="68" stroke="#edf4f8" stroke-width="1" stroke-dasharray="2 2" opacity="0.75" />
-      <circle cx="${sx}" cy="${sy}" r="3.5" fill="${entry.color}" stroke="#101923" stroke-width="1.5" />
+      <line x1="${sx}" y1="4" x2="${sx}" y2="68" stroke="${THEME.text}" stroke-width="1" stroke-dasharray="2 2" opacity="0.75" />
+      <circle cx="${sx}" cy="${sy}" r="3.5" fill="${entry.color}" stroke="${THEME.bg}" stroke-width="1.5" />
     `;
     scrubSuffix = ` · ${fmtAlt(sp[2])} @ ${timeStr}`;
   }
@@ -1338,8 +1386,8 @@ function barogramChart(address, scrubIdx = null) {
   const svg = `
     <polyline fill="none" stroke="${entry.color}" stroke-width="2" points="${coords}" />
     ${scrubSvg}
-    <text x="4" y="12" fill="#9aabba" font-size="10">${esc(fmtAlt(maxAlt))}</text>
-    <text x="4" y="66" fill="#9aabba" font-size="10">${esc(fmtAlt(minAlt))}</text>
+    <text x="4" y="12" fill="${THEME.muted}" font-size="10">${esc(fmtAlt(maxAlt))}</text>
+    <text x="4" y="66" fill="${THEME.muted}" font-size="10">${esc(fmtAlt(minAlt))}</text>
   `;
   return { title, svg };
 }
@@ -1684,12 +1732,12 @@ function jumpToAlertAddress(address) {
         <div class="popup-actions">
           <button type="button" data-act="alert-sar" data-sar="${esc(sarTxt)}">📋 SAR</button>
         </div>
-        <div class="popup-grid" style="margin-top:6px">
+        <div class="popup-grid">
           <div class="popup-value"><span>Alert</span><br><b style="color:var(--red)">${esc(item.status)}</b></div>
           <div class="popup-value"><span>Last status</span><br><b>${esc(lastStatus)}</b></div>
           <div class="popup-value popup-last-seen"><span>Last seen</span><br><b>${esc(`${lastSeenClock} (${lastSeenAge})`)}</b></div>
-          ${outcome ? `<div class="popup-value" style="grid-column:1/-1"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
-          <div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(posText)}</a></div>
+          ${outcome ? `<div class="popup-value popup-full"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
+          <div class="popup-value popup-full"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:700;text-decoration:underline">${esc(posText)}</a></div>
         </div>
         ${item.raw ? `<div class="popup-raw">${esc(item.raw)}</div>` : ''}
       `)
@@ -2074,6 +2122,27 @@ const OGN_TYPES = {
   7:'Paraglider', 8:'Powered', 9:'Jet', 10:'UFO', 11:'Balloon', 12:'Airship', 13:'Drone', 15:'Ground Station', 16:'Ultralight'
 };
 
+// A distinct stripe colour per resolved OGN type; unknown/unresolved types use
+// the muted slate. Emergency rows keep their red stripe via typeStripeColor().
+const TYPE_COLORS = {
+  0: 'var(--type-unknown)',
+  1: 'var(--type-glider)',
+  2: 'var(--type-tow)',
+  3: 'var(--type-heli)',
+  4: 'var(--type-para)',
+  5: 'var(--type-drop)',
+  6: 'var(--type-hang)',
+  7: 'var(--type-paraglider)',
+  8: 'var(--type-powered)',
+  9: 'var(--type-jet)',
+  10: 'var(--type-ufo)',
+  11: 'var(--type-balloon)',
+  12: 'var(--type-airship)',
+  13: 'var(--type-drone)',
+  15: 'var(--type-station)',
+  16: 'var(--type-ultralight)'
+};
+
 const ICONS = {
   default: "M12 1.5C12.7 1.5 13 3.2 13 7.5L23.2 9.4V10.9L13 10.6L12.7 19.2L15.8 20.6V21.8L12 21L8.2 21.8V20.6L11.3 19.2L11 10.6L0.8 10.9V9.4L11 7.5C11 3.2 11.3 1.5 12 1.5Z",
   airplane: "M12 2l2 6h8v2l-8 3v6l3 2v2l-5-1-5 1v-2l3-2v-6l-8-3V8h8l2-6z",
@@ -2158,6 +2227,10 @@ function statusColor(a, status) {
   if (isEmergency(a)) return 'var(--red)';
   if (status === 'Need technical support') return 'var(--yellow)';
   return 'var(--accent)';
+}
+function typeStripeColor(a) {
+  if (isEmergency(a)) return 'var(--red)';
+  return TYPE_COLORS[getResolvedType(a)] || TYPE_COLORS[0];
 }
 
 function currentBounds() {
@@ -2620,7 +2693,7 @@ function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
   const emergClass = isEmergency(a) ? ' emergency' : '';
-  const trackColor = selectedTracks.get(a.address)?.color || '#57d3b0';
+  const trackColor = selectedTracks.get(a.address)?.color || THEME.accent;
   const name = esc(displayName(a));
   let svgPath = ICONS.default;
   switch(type) {
@@ -2707,11 +2780,11 @@ function popup(a) {
   const latStr = a.lat.toFixed(6), lonStr = a.lon.toFixed(6);
   const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
   const posText = [latStr, lonStr, a.altitude != null ? fmtAltCompact(a.altitude) : ''].filter(Boolean).join(', ');
-  const positionRow = `<div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(posText)}</a></div>`;
+  const positionRow = `<div class="popup-value popup-full"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:700;text-decoration:underline">${esc(posText)}</a></div>`;
   const statusText = getDisplayStatus(a);
   const wxText = formatWeatherHtml(a.weather, false);
   const weatherRow = wxText
-    ? `<div class="popup-value" style="grid-column:1/-1"><span>Weather</span><br><b>${wxText}</b></div>`
+    ? `<div class="popup-value popup-full"><span>Weather</span><br><b>${wxText}</b></div>`
     : '';
   const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
   const lastSeenMs = Number.isFinite(a.receivedAtMs) && a.receivedAtMs > 0
@@ -2752,7 +2825,7 @@ function popup(a) {
   const rawSection = a.aprsPacket
     ? `<div class="popup-raw">${esc(a.aprsPacket)}</div>${a.aprsReceivedAt ? `<div class="muted">Recv: ${esc(a.aprsReceivedAt)}</div>` : ''}` : '';
   const detailsBlock = (detailRows.replace(/\s+/g, '') || rawSection)
-    ? `<details class="popup-details" data-popup-details="1"><summary>Details & raw packet</summary><div class="popup-grid" style="margin-top:6px">${detailRows}</div>${rawSection}</details>`
+    ? `<details class="popup-details" data-popup-details="1"><summary>Details & raw packet</summary><div class="popup-grid">${detailRows}</div>${rawSection}</details>`
     : '';
   const actionButtons = isStation
     ? `<button type="button" data-act="share" data-addr="${esc(a.address)}">🔗 Link</button>`
@@ -2822,7 +2895,7 @@ function updateCoverageLayer() {
   }
   for (const a of aircraft) {
     if (a.snr == null || getResolvedType(a) === 15) continue;
-    const color = a.snr >= 25 ? '#57d3b0' : a.snr >= 12 ? '#f5c451' : '#f07878';
+    const color = a.snr >= 25 ? THEME.accent : a.snr >= 12 ? THEME.yellow : THEME.red;
     const rx = a.receiver ? rxPos.get(a.receiver.toLowerCase()) : null;
     if (rx) {
       const dist = fmtDistanceKm(haversineKm(rx.lat, rx.lon, a.lat, a.lon));
@@ -3030,7 +3103,8 @@ function buildRowHtml(a, now) {
   const emergClass = isEmergency(a) ? ' emergency' : '';
   const rType = getResolvedType(a);
   const statusText = getDisplayStatus(a);
-  const barColor = statusColor(a, statusText);
+  const statusColorValue = statusColor(a, statusText);
+  const stripeColor = typeStripeColor(a);
 
   const wxCompactHtml = a.weather ? formatWeatherHtml(a.weather, true) : '';
   const metrics = rType === 15
@@ -3038,7 +3112,7 @@ function buildRowHtml(a, now) {
     : [a.speed != null ? fmtWindSpeed(a.speed) : '', a.climb != null ? fmtClimb(a.climb) : ''].filter(Boolean);
   const wxListHtml = wxCompactHtml ? `<span class="wx-line">💨 ${wxCompactHtml}</span>` : '';
   const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
-  const statusHtml = statusText ? `<br><span style="color:${barColor};font-weight:600">${esc(statusText)}</span>` : '';
+  const statusHtml = statusText ? `<br><span style="color:${statusColorValue};font-weight:600">${esc(statusText)}</span>` : '';
   const trackDotHtml = trackEntry ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>` : '';
 
   let rightColHtml = `${fmtAlt(a.altitude)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div>`;
@@ -3057,7 +3131,7 @@ function buildRowHtml(a, now) {
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
   return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0" role="option" aria-selected="${trackEntry ? 'true' : 'false'}" aria-label="${esc(label)}">
-    <div class="stripe" style="background:${barColor}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'} ${esc(displayName(a))}" aria-pressed="${isPinned ? 'true' : 'false'}">📌</button></div>
+    <div class="stripe" style="background:${stripeColor}" title="${esc(typeName(a))}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'} ${esc(displayName(a))}" aria-pressed="${isPinned ? 'true' : 'false'}">📌</button></div>
     <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
     <div class="${altClass}">${rightColHtml}</div>
   </div>`;
@@ -4601,7 +4675,7 @@ function startReplayPlayback() {
 function replayTrackLayers(points, weight, opacity, dashed = false) {
   if (points.length < 2) return [];
   if (!varioTrackMode) {
-    const color = selectedTracks.get(replayFollowAddress)?.color || '#57d3b0';
+    const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
     return [L.polyline(points.map(p => [p[0], p[1]]), { color, weight, opacity, dashArray: dashed ? '3 6' : null })];
   }
   const layers = [];
@@ -4629,7 +4703,7 @@ function thinReplayPoints(points, max = 1500) {
 }
 
 function replayTrackLineSignature() {
-  const color = selectedTracks.get(replayFollowAddress)?.color || '#57d3b0';
+  const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
   const pts = replayTrackPoints;
   const first = pts.length ? pts[0][3] : '';
   const last = pts.length ? pts[pts.length - 1][3] : '';
@@ -5330,15 +5404,17 @@ function finishChromeBackSwipe(e) {
 document.addEventListener('touchend', finishChromeBackSwipe, { passive: true, capture: true });
 document.addEventListener('touchcancel', finishChromeBackSwipe, { passive: true, capture: true });
 
-function openFilterPanel() {
+function openFilterPanel(focusFirst = true) {
   closeToolbarMenu(false);
   if (soundingIsOpen()) setSoundingOpen(false);
   mapFilterPanel.hidden = false;
   bringToFront(mapFilterControl);
   mapFilterToggle.setAttribute('aria-expanded', 'true');
-  const first = [...mapFilterPanel.querySelectorAll('summary,input,select,button')]
-    .find(el => el.getClientRects().length > 0);
-  if (first) first.focus();
+  if (focusFirst) {
+    const first = [...mapFilterPanel.querySelectorAll('summary,input,select,button')]
+      .find(el => el.getClientRects().length > 0);
+    if (first) first.focus();
+  }
 }
 function closeFilterPanel(restoreFocus = false) {
   if (mapFilterPanel.hidden) return;
@@ -5384,6 +5460,22 @@ toolbarMenuPanel?.addEventListener('click', event => {
   const button = event.target.closest && event.target.closest('button');
   if (button && !button.closest('#shortcutsControl')) closeToolbarMenu(false);
 });
+
+// On desktop the two floating menus open while hovering the control or its panel.
+// Touch/mobile keeps the original click-only behavior.
+const desktopMenuHover = window.matchMedia('(min-width: 801px) and (hover: hover)');
+function bindDesktopMenuHover(control, open, close) {
+  if (!control) return;
+  control.addEventListener('mouseenter', () => {
+    if (desktopMenuHover.matches) open();
+  });
+  control.addEventListener('mouseleave', () => {
+    if (!desktopMenuHover.matches || control.contains(document.activeElement)) return;
+    close(false);
+  });
+}
+bindDesktopMenuHover(mapFilterControl, () => openFilterPanel(false), closeFilterPanel);
+bindDesktopMenuHover(toolbarMenuControl, openToolbarMenu, closeToolbarMenu);
 
 const shortcutsControl = $('shortcutsControl');
 const shortcutsModal = $('shortcutsModal');
@@ -5799,8 +5891,14 @@ $('btnClearAirspace').addEventListener('click', () => {
 
 $('locate').addEventListener('click', () => {
   const btn = $('locate');
-  btn.disabled = true; btn.textContent = '◎ Locating…';
-  const resetBtn = () => { btn.disabled = false; btn.textContent = '◎ Locate'; };
+  btn.disabled = true;
+  btn.title = 'Locating…';
+  btn.setAttribute('aria-label', 'Locating…');
+  const resetBtn = () => {
+    btn.disabled = false;
+    btn.title = 'Locate me';
+    btn.setAttribute('aria-label', 'Locate me');
+  };
   const showLocation = (lat, lon, zoom, label) => {
     resetBtn();
     const pos = [lat, lon];
