@@ -89,7 +89,7 @@ let selectedMeasureIndex = -1;
 let measureLine = null;
 let measureMarkers = [];
 let replayTimeMode = 'browser'; // 'browser' clock or time at the current trackpoint
-const replayTzCache = new Map();
+const locationTzCache = new Map();
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -1600,7 +1600,8 @@ function jumpToAlertAddress(address) {
     const nowMs = serverNow();
     const lastSeenMs = item.latestTsMs || item.tsMs;
     const lastSeenAge = fmtAge(Math.max(0, Math.floor((nowMs - lastSeenMs) / 1000)));
-    const exactTime = new Date(lastSeenMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const exactTime = formatClockAtZone(lastSeenMs);
+    const lastSeenClock = lastSeenClockText(lastSeenMs, item.lat, item.lon, exactTime);
     const outcome = describeAlertOutcome(item, nowMs);
     const lastStatus = item.lastStatus || item.status;
     const liveA = aircraft.find(x => x.address === key);
@@ -1640,7 +1641,7 @@ function jumpToAlertAddress(address) {
         <div class="popup-grid" style="margin-top:6px">
           <div class="popup-value"><span>Alert</span><br><b style="color:var(--red)">${esc(item.status)}</b></div>
           <div class="popup-value"><span>Last status</span><br><b>${esc(lastStatus)}</b></div>
-          <div class="popup-value" style="grid-column:1/-1"><span>Last seen</span><br><b>${esc(`${exactTime} (${lastSeenAge})`)}</b></div>
+          <div class="popup-value popup-last-seen"><span>Last seen</span><br><b>${esc(`${lastSeenClock} (${lastSeenAge})`)}</b></div>
           ${outcome ? `<div class="popup-value" style="grid-column:1/-1"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
           <div class="popup-value" style="grid-column:1/-1"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:#57d3b0;font-weight:700;text-decoration:underline">${esc(posText)}</a></div>
         </div>
@@ -2667,7 +2668,13 @@ function popup(a) {
     ? `<div class="popup-value" style="grid-column:1/-1"><span>Weather</span><br><b>${wxText}</b></div>`
     : '';
   const ageSec = Math.max(0, Math.floor((serverNow() - a.receivedAtMs) / 1000));
-  const lastSeenText = a.aprsReceivedAt ? `${a.aprsReceivedAt} (${fmtAge(ageSec)})` : fmtAge(ageSec);
+  const lastSeenMs = Number.isFinite(a.receivedAtMs) && a.receivedAtMs > 0
+    ? a.receivedAtMs
+    : (Number.isFinite(Number(a.aprsReceivedAt)) ? Number(a.aprsReceivedAt) * 1000 : 0);
+  const localClock = lastSeenMs ? formatClockAtZone(lastSeenMs)
+    : (typeof a.aprsReceivedAt === 'string' ? a.aprsReceivedAt : '');
+  const lastSeenClock = lastSeenClockText(lastSeenMs, a.lat, a.lon, localClock);
+  const lastSeenText = lastSeenClock ? `${lastSeenClock} (${fmtAge(ageSec)})` : fmtAge(ageSec);
   const course = a.course != null && Number.isFinite(Number(a.course)) ? Number(a.course) : null;
   const courseValue = course != null
     ? `${Math.round(course)}° <span class="popup-course-arrow" style="transform:rotate(${course}deg)" aria-hidden="true">↑</span>`
@@ -2714,7 +2721,7 @@ function popup(a) {
     popupRow('Climb', a.climb != null ? fmtClimb(a.climb) : null),
     popupRow('Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null),
     popupRowHtml('Track Direction', courseValue),
-    popupRow('Last seen', lastSeenText),
+    `<div class="popup-value popup-last-seen"><span>Last seen</span><br><b>${esc(lastSeenText)}</b></div>`,
     popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr)),
     weatherRow,
     popupRow('Receiver', a.receiver),
@@ -4184,6 +4191,14 @@ function syncReplayDirectionButton() {
   btn.setAttribute('aria-label', reversed ? 'Rewind active, click to play forward' : 'Rewind replay');
 }
 
+function syncReplayTimeToggle() {
+  const btn = $('replayTime');
+  if (!btn) return;
+  btn.disabled = !replayFollowAddress;
+  replayTimeReadoutSig = '';
+  if (replayActive) updateReplayTimeReadout();
+}
+
 function syncReplayFollowLabel() {
   const scopeBtn = $('replayClearFollow');
   const hasFocus = !!replayFollowAddress;
@@ -4195,6 +4210,7 @@ function syncReplayFollowLabel() {
     scopeBtn.title = replayOnlyFocus ? 'Show all aircraft while staying centered' : 'Show only this aircraft';
     scopeBtn.setAttribute('aria-label', scopeBtn.title);
   }
+  syncReplayTimeToggle();
   syncReplayTrackUi();
 }
 
@@ -4291,6 +4307,45 @@ function formatReplayClock(sec, compact, tz = null) {
   });
 }
 
+/** IANA timezone at a lat/lon, cached by rounded position. */
+function locationTimeZone(lat, lon) {
+  if (typeof tzlookup !== 'function' || !Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+  if (locationTzCache.has(key)) return locationTzCache.get(key) || null;
+  let tz = null;
+  try { tz = tzlookup(lat, lon) || null; } catch (e) {}
+  if (locationTzCache.size > 200) locationTzCache.clear();
+  locationTzCache.set(key, tz);
+  return tz;
+}
+
+function formatClockAtZone(ms, tz = null) {
+  return new Date(ms).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    ...(tz ? { timeZone: tz } : {})
+  });
+}
+
+/** Canonical IANA zone name so aliases (Asia/Kolkata vs Asia/Calcutta) compare equal. */
+function canonicalTimeZone(tz) {
+  if (!tz) return '';
+  try {
+    const name = Intl.DateTimeFormat([], { timeZone: tz }).resolvedOptions().timeZone || tz;
+    return /^(UTC|Etc\/GMT|Etc\/UTC|GMT)$/i.test(name) ? 'UTC' : name;
+  } catch (e) { return tz; }
+}
+
+/** Append the regional clock only when the aircraft's zone differs from the browser's. */
+function lastSeenClockText(ms, lat, lon, localClock) {
+  if (!localClock || !Number.isFinite(ms) || ms <= 0) return localClock || '';
+  const tz = locationTimeZone(lat, lon);
+  if (!tz) return localClock;
+  let browserTz = '';
+  try { browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+  if (canonicalTimeZone(tz) === canonicalTimeZone(browserTz)) return localClock;
+  return `${localClock} Local · ${formatClockAtZone(ms, tz)} ${tzShortLabel(tz, ms)}`;
+}
+
 /** Position used for the replay clock's regional timezone. */
 function replayTimeZonePosition() {
   const pos = interpolateReplayFocusPosition(replayTsMs) || replayFocusFallbackPosition();
@@ -4302,22 +4357,18 @@ function replayTimeZonePosition() {
 }
 
 function replayTimeZone() {
-  if (replayTimeMode !== 'track' || typeof tzlookup !== 'function') return null;
+  // Without a focused aircraft there is no meaningful "trackpoint" position;
+  // the whole replay bar then stays on browser local time.
+  if (replayTimeMode !== 'track' || !replayFollowAddress) return null;
   const pos = replayTimeZonePosition();
   if (!pos) return null;
-  const key = `${pos.lat.toFixed(3)},${pos.lon.toFixed(3)}`;
-  if (replayTzCache.has(key)) return replayTzCache.get(key) || null;
-  let tz = null;
-  try { tz = tzlookup(pos.lat, pos.lon) || null; } catch (e) {}
-  if (replayTzCache.size > 200) replayTzCache.clear();
-  replayTzCache.set(key, tz);
-  return tz;
+  return locationTimeZone(pos.lat, pos.lon);
 }
 
-function replayTzShortLabel(tz) {
+function tzShortLabel(tz, ms = Date.now()) {
   if (!tz) return 'UTC';
   try {
-    const parts = new Intl.DateTimeFormat([], { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date());
+    const parts = new Intl.DateTimeFormat([], { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date(ms));
     const name = parts.find(p => p.type === 'timeZoneName');
     if (name && name.value && name.value.length <= 8) return name.value;
   } catch (e) {}
@@ -4354,18 +4405,27 @@ function updateReplayTimeReadout(tsMs = replayTsMs) {
   const sec = Math.floor((tsMs || replayTsFromSlider()) / 1000);
   const compact = compactReplayUi();
   const tz = replayTimeZone();
-  const sig = `${sec}:${compact}:${replayTimeMode}:${tz || ''}`;
+  const hasFocus = !!replayFollowAddress;
+  const track = replayTimeMode === 'track' && hasFocus && !!tz;
+  const sig = `${sec}:${compact}:${replayTimeMode}:${hasFocus ? 'focus' : 'nofocus'}:${tz || ''}`;
   if (sig === replayTimeReadoutSig) return;
   replayTimeReadoutSig = sig;
   const label = formatReplayClock(sec, compact, tz);
   $('replayTimeValue').textContent = label;
-  $('replayTimeTag').textContent = replayTimeMode === 'track'
-    ? (compact ? 'T' : replayTzShortLabel(tz))
+  $('replayTimeTag').textContent = track
+    ? (compact ? 'T' : tzShortLabel(tz, sec * 1000))
     : (compact ? 'L' : 'Local');
   const btn = $('replayTime');
-  btn.classList.toggle('track-time', replayTimeMode === 'track');
-  const where = replayTimeMode === 'track' ? `at ${tz || 'the trackpoint'}` : 'browser local';
-  const next = replayTimeMode === 'track' ? 'browser local time' : 'time at the trackpoint location';
+  btn.disabled = !hasFocus;
+  btn.classList.toggle('track-time', track);
+  if (!hasFocus) {
+    const why = 'Trackpoint time needs a focused aircraft';
+    btn.setAttribute('aria-label', `Replay time ${label} (browser local). ${why}.`);
+    btn.title = `Replay time: ${label} (browser local). ${why}.`;
+    return;
+  }
+  const where = track ? `at ${tz}` : 'browser local';
+  const next = track ? 'browser local time' : 'time at the trackpoint location';
   btn.setAttribute('aria-label', `Replay time ${label} (${where}). Click to show ${next}.`);
   btn.title = `Replay time: ${label} (${where}). Click to show ${next}.`;
 }
@@ -5265,6 +5325,7 @@ $('emergencyBannerClose').addEventListener('click', () => {
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
 $('replayTime').addEventListener('click', () => {
+  if ($('replayTime').disabled) return;
   replayTimeMode = replayTimeMode === 'browser' ? 'track' : 'browser';
   saveMenuPrefs();
   replayTimeReadoutSig = '';
