@@ -1210,6 +1210,13 @@ function toggleFollow(address) {
   updateListHint();
   followCenteringPaused = false;
   syncRecenterButton();
+  if (followedAddress) {
+    ensureFollowTrackSelected(followedAddress);
+    focusFollowedOnMap(followedAddress);
+  } else {
+    // Re-sort immediately when follow is removed from the active aircraft.
+    render();
+  }
 }
 
 // --- Shared follow-centering control (live and replay) ---
@@ -1238,6 +1245,38 @@ function pauseFollowCentering() {
   if (!activeFollowAddress() || followCenteringPaused) return;
   followCenteringPaused = true;
   syncRecenterButton();
+}
+
+function unclusterFollowedMarker(address) {
+  const m = markers.get(address);
+  if (!m || !clusterGroup.hasLayer(m)) return;
+  const parent = clusterGroup.getVisibleParent(m);
+  if (parent && parent !== m && typeof parent.spiderfy === 'function') parent.spiderfy();
+}
+
+// Following should give the same visible feedback as clicking the aircraft row:
+// the marker takes the track color and the track is loaded/drawn.
+function ensureFollowTrackSelected(address) {
+  if (!address) return;
+  if (selectedTracks.has(address)) {
+    if (activeTrackAddress !== address) {
+      activeTrackAddress = address;
+      updateUrlHash();
+    }
+    // Re-sort immediately so the followed aircraft moves to the top.
+    render();
+    return;
+  }
+  toggleSelection(address, false);
+}
+
+function focusFollowedOnMap(address) {
+  const a = findAircraftByAddress(address);
+  if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return false;
+  // Zoom without animation so markercluster has settled before unclustering.
+  map.setView([a.lat, a.lon], FOLLOW_CENTER_MIN_ZOOM, { animate: false });
+  unclusterFollowedMarker(address);
+  return true;
 }
 
 function centerOnFollowed(force = false, animate = true, panDuration = 0.2) {
@@ -3195,11 +3234,13 @@ function render() {
   const byName = (a, b) =>
     displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   const sorted = listVisible.slice().sort((a, b) => {
-    // Emergency rows stay first. Aircraft with an active track are then kept
-    // at the top regardless of the chosen sort; pinned rows and the selected
-    // sort only order the remaining rows (and rows within each group).
+    // Emergency rows stay first. The followed aircraft comes next, followed by
+    // aircraft with an active track; pinned rows and the selected sort only order
+    // the remaining rows (and rows within each group).
     const ea = isEmergency(a) ? 1 : 0, eb = isEmergency(b) ? 1 : 0;
     if (ea !== eb) return eb - ea;
+    const fa = followedAddress === a.address ? 1 : 0, fb = followedAddress === b.address ? 1 : 0;
+    if (fa !== fb) return fb - fa;
     const ta = selectedTracks.has(a.address) ? 1 : 0, tb = selectedTracks.has(b.address) ? 1 : 0;
     if (ta !== tb) return tb - ta;
     const pa = pinnedAircraft.has(a.address) ? 1 : 0, pb = pinnedAircraft.has(b.address) ? 1 : 0;
