@@ -31,9 +31,10 @@ function bringToFront(el) {
   el.style.zIndex = String(++overlayZSeq);
 }
 
-// Popups join the same last-opened-wins stack, but only their close button (or an
-// explicit app action) dismisses them. Map clicks, Escape, and other popups do not.
-const POPUP_OPTIONS = { autoClose: false, closeOnClick: false, closeOnEscapeKey: false };
+// Only one popup may be open: opening another closes the previous one. Map clicks
+// and Escape still do not dismiss a popup; its close button or an explicit app
+// action does.
+const POPUP_OPTIONS = { autoClose: true, closeOnClick: false, closeOnEscapeKey: false };
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanName = s => {
@@ -576,6 +577,15 @@ map.on('moveend', () => {
 
 // Tracker markers center themselves via centerPopupInView(); keep all other popups clear of the bottom bar.
 map.on('popupopen', e => {
+  // Leaflet's autoClose removes the visible popup, but a popup that closes
+  // during a map move is otherwise remembered and could be restored later.
+  // Forget every other popup here so only the newest one survives.
+  for (const other of [...openPopups]) {
+    if (other === e.popup) continue;
+    openPopups.delete(other);
+    if (popupMoveSnapshot) popupMoveSnapshot.delete(other);
+    if (other._map) map.closePopup(other);
+  }
   openPopups.add(e.popup);
   bringToFront(map.getPane('popupPane'));
   if (e.popup?._source?._trackerMarker) return;
