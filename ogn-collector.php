@@ -1375,12 +1375,13 @@ while (microtime(true) < $deadline && !feof($socket)) {
             } else {
                 $touchBatch[$id] = $now;
                 if ($alertStatus !== null) {
-                    $pos = $lastKnownPos[$id] ?? ['lat' => null, 'lon' => null];
+                    $pos = $lastKnownPos[$id] ?? ['lat' => null, 'lon' => null, 'alt' => null];
                     $alertBatch[$id . '|' . $alertStatus] = [
                         'id'     => $id,
                         'status' => $alertStatus,
                         'lat'    => $pos['lat'],
                         'lon'    => $pos['lon'],
+                        'alt'    => $pos['alt'] ?? null,
                         'raw'    => $line,
                         'ts'     => $now,
                     ];
