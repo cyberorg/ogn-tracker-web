@@ -297,9 +297,18 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
   .map-filter-panel select{height:28px;font-size:12px}
   .scroll-to-list-btn{display:grid}
   .scroll-list-top-btn{position:fixed;right:16px;bottom:18px;z-index:950}
+  :root{--header-h:44px}
   html,body{height:auto;min-height:100%}
   .app{height:auto;min-height:100%;display:block}
-  header{align-items:center;flex-wrap:wrap;gap:8px;padding:10px}
+  header{position:sticky;top:0;z-index:1000;align-items:center;flex-wrap:wrap;gap:8px;padding:10px}
+  .sidebar-chrome{position:sticky;top:var(--header-h);z-index:900;background:var(--panel);border-bottom:1px solid var(--line)}
+  html.list-mode,html.list-mode body{overflow:hidden;overscroll-behavior:none}
+  html.list-mode .map-wrap{visibility:hidden;pointer-events:none}
+  html.list-mode .sidebar{position:fixed;top:var(--header-h);left:0;right:0;bottom:0;height:auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;z-index:800}
+  html.list-mode .sidebar-chrome{position:static;top:auto;flex:0 0 auto}
+  html.list-mode .aircraft-list{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+  html.list-mode .alerts-list{max-height:30dvh;overflow:auto}
+  html.list-mode .footer{flex:0 0 auto}
   .brand{min-width:0}.status{margin-left:0}.toolbar{order:3;flex-basis:100%}
   main{display:block;height:auto}
   .map-wrap{height:82vh;height:82dvh}

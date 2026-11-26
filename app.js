@@ -5011,6 +5011,13 @@ function syncHeaderUi() {
   siteHeader.setAttribute('aria-label', label);
   siteHeader.title = label;
 }
+function syncStickyTop() {
+  if (!siteHeader) return;
+  document.documentElement.style.setProperty(
+    '--header-h',
+    `${siteHeader.getBoundingClientRect().height}px`
+  );
+}
 function setHeaderCollapsed(collapsed) {
   if (!appRoot) return;
   appRoot.classList.toggle('header-collapsed', collapsed);
@@ -5025,7 +5032,11 @@ function setHeaderCollapsed(collapsed) {
     }, 5000);
   }
   syncHeaderUi();
-  requestAnimationFrame(() => map.invalidateSize({ pan: false, animate: false }));
+  syncStickyTop();
+  requestAnimationFrame(() => {
+    syncStickyTop();
+    map.invalidateSize({ pan: false, animate: false });
+  });
 }
 siteHeader?.addEventListener('click', () => {
   setHeaderCollapsed(!appRoot?.classList.contains('header-collapsed'));
@@ -5036,6 +5047,8 @@ siteHeader?.addEventListener('keydown', (e) => {
   setHeaderCollapsed(!appRoot?.classList.contains('header-collapsed'));
 });
 syncHeaderUi();
+syncStickyTop();
+window.addEventListener('resize', syncStickyTop);
 
 const mapFilterControl = $('mapFilterControl');
 const mapFilterToggle = $('mapFilterToggle');
@@ -5083,11 +5096,12 @@ function syncScrollListTopBtn() {
 
 function scrollAircraftListToTop() {
   if (!listForTopBtn) return;
-  if (compactMenuQuery.matches) {
+  if (compactMenuQuery.matches && !listMode) {
     // Mirror the map's down arrow: same fullscreen exit and smooth scrollIntoView,
     // landing with the Aircrafts/Stations sidebar at the top of the screen.
     smoothScrollToTarget($('aircraftSidebar'));
   } else {
+    // In list mode the sidebar is pinned and only this element scrolls.
     listForTopBtn.scrollTo({ top: 0, behavior: 'smooth' });
   }
 }
@@ -5097,6 +5111,167 @@ listForTopBtn?.addEventListener('scroll', syncScrollListTopBtn, { passive: true 
 window.addEventListener('scroll', syncScrollListTopBtn, { passive: true });
 window.addEventListener('resize', syncScrollListTopBtn);
 syncScrollListTopBtn();
+
+// Once the page reaches the sidebar top on mobile, lock the document and let
+// only #aircraftList scroll. The pinned chrome keeps the status/filters/section
+// head visible; returning to the map is possible only from a downward swipe
+// that starts on the pinned header/chrome.
+const rootEl = document.documentElement;
+let listMode = false;
+let listModeDocTop = 0;
+let listModeExitGuard = false;
+
+function enterListMode() {
+  if (listMode || !compactMenuQuery.matches) return;
+  const sidebar = $('aircraftSidebar');
+  if (!sidebar) return;
+  const scrollTop = window.scrollY || window.pageYOffset || 0;
+  listModeDocTop = sidebar.getBoundingClientRect().top + scrollTop;
+  listMode = true;
+  window.scrollTo(0, listModeDocTop);
+  rootEl.classList.add('list-mode');
+  if (listForTopBtn) listForTopBtn.scrollTop = 0;
+  syncStickyTop();
+  syncScrollListTopBtn();
+}
+
+function exitListMode(returnToMap) {
+  if (!listMode) return;
+  listMode = false;
+  rootEl.classList.remove('list-mode');
+  listModeExitGuard = true;
+  if (returnToMap) {
+    // Scroll all the way up so the map sits below the header, not under it.
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      map.invalidateSize({ pan: false, animate: false });
+    });
+  }
+}
+
+function syncListMode() {
+  if (!compactMenuQuery.matches) {
+    if (listMode) exitListMode(false);
+    listModeExitGuard = false;
+    return;
+  }
+  const scrollTop = window.scrollY || window.pageYOffset || 0;
+  if (listModeExitGuard) {
+    if (scrollTop < listModeDocTop - 40) listModeExitGuard = false;
+    return;
+  }
+  if (listMode) return;
+  const sidebar = $('aircraftSidebar');
+  if (!sidebar) return;
+  const sidebarTop = sidebar.getBoundingClientRect().top + scrollTop;
+  if (scrollTop >= sidebarTop - 8) enterListMode();
+}
+window.addEventListener('scroll', syncListMode, { passive: true });
+window.addEventListener('resize', syncListMode);
+syncListMode();
+
+// Mobile-only: ANY upward swipe starting outside Leaflet's #map triggers the
+// same smooth scroll as the map's down arrow, but only while the map is still
+// on screen. Once it has scrolled away, normal (desktop-like) scrolling resumes.
+let outsideSwipe = null;
+let suppressOutsideClick = false;
+const OUTSIDE_SWIPE_PX = 40;
+
+function triggerOutsideSwipe() {
+  suppressOutsideClick = true;
+  setTimeout(() => { suppressOutsideClick = false; }, 400);
+  smoothScrollToTarget($('aircraftSidebar'));
+}
+
+document.addEventListener('touchstart', (e) => {
+  outsideSwipe = null;
+  if (!compactMenuQuery.matches || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const el = t.target instanceof Element ? t.target : null;
+  if (!el || el.closest('#map')) return;
+  // In list mode the document is locked and only the list scrolls. Before
+  // that, stop arming once the sidebar top is reached (8px tolerance).
+  if (listMode) return;
+  const sidebar = $('aircraftSidebar');
+  if (!sidebar) return;
+  const scrollTop = window.scrollY || window.pageYOffset || 0;
+  const sidebarTop = sidebar.getBoundingClientRect().top + scrollTop;
+  if (scrollTop >= sidebarTop - 8) return;
+  outsideSwipe = { x: t.clientX, y: t.clientY, lastX: t.clientX, lastY: t.clientY, fired: false };
+}, { passive: true, capture: true });
+
+document.addEventListener('touchmove', (e) => {
+  if (!outsideSwipe || outsideSwipe.fired || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  outsideSwipe.lastX = t.clientX;
+  outsideSwipe.lastY = t.clientY;
+  if (t.clientY - outsideSwipe.y > -4) return;
+  // Block the UA from claiming this as a native scroll (which would send
+  // touchcancel instead of touchend) before it has a chance to start.
+  if (e.cancelable) e.preventDefault();
+}, { passive: false, capture: true });
+
+function finishOutsideSwipe(e) {
+  const swipe = outsideSwipe;
+  outsideSwipe = null;
+  if (!swipe || !compactMenuQuery.matches || swipe.fired) return;
+  const changed = e.changedTouches && e.changedTouches[0];
+  const y = changed ? changed.clientY : swipe.lastY;
+  if (y - swipe.y > -OUTSIDE_SWIPE_PX) return;
+  swipe.fired = true;
+  triggerOutsideSwipe();
+}
+document.addEventListener('touchend', finishOutsideSwipe, { passive: true, capture: true });
+document.addEventListener('touchcancel', finishOutsideSwipe, { passive: true, capture: true });
+
+// A swipe must not also activate the element it started on (header tap, button).
+document.addEventListener('click', (e) => {
+  if (!suppressOutsideClick) return;
+  suppressOutsideClick = false;
+  e.preventDefault();
+  e.stopPropagation();
+}, true);
+
+// Returning to the map is deliberately limited to the pinned area. A downward
+// swipe inside the aircraft list only scrolls/bounces that list; it never
+// unlocks the page. Start the same gesture on the header or chrome to go back.
+function inPinnedChrome(el) {
+  return !!el && !!(el.closest('#siteHeader') || el.closest('.sidebar-chrome'));
+}
+
+let chromeBackSwipe = null;
+
+document.addEventListener('touchstart', (e) => {
+  chromeBackSwipe = null;
+  if (!listMode || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const el = t.target instanceof Element ? t.target : null;
+  if (!inPinnedChrome(el)) return;
+  chromeBackSwipe = { y: t.clientY, lastY: t.clientY, fired: false };
+}, { passive: true, capture: true });
+
+document.addEventListener('touchmove', (e) => {
+  if (!chromeBackSwipe || chromeBackSwipe.fired || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  chromeBackSwipe.lastY = t.clientY;
+  if (t.clientY - chromeBackSwipe.y < 4) return;
+  if (e.cancelable) e.preventDefault();
+}, { passive: false, capture: true });
+
+function finishChromeBackSwipe(e) {
+  const swipe = chromeBackSwipe;
+  chromeBackSwipe = null;
+  if (!swipe || !listMode || swipe.fired) return;
+  const changed = e.changedTouches && e.changedTouches[0];
+  const y = changed ? changed.clientY : swipe.lastY;
+  if (y - swipe.y < OUTSIDE_SWIPE_PX) return;
+  swipe.fired = true;
+  suppressOutsideClick = true;
+  setTimeout(() => { suppressOutsideClick = false; }, 400);
+  exitListMode(true);
+}
+document.addEventListener('touchend', finishChromeBackSwipe, { passive: true, capture: true });
+document.addEventListener('touchcancel', finishChromeBackSwipe, { passive: true, capture: true });
 
 function openFilterPanel() {
   closeToolbarMenu(false);

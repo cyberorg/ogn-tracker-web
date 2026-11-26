@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261126g">
+<link rel="stylesheet" href="style.css?v=20261126t">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -186,38 +186,40 @@
 
   </div>
   <aside class="sidebar" id="aircraftSidebar">
-    <div id="feedStatusBanner" class="feed-status-banner" aria-live="off" hidden>
-      <span id="feedStatusIcon" class="feed-status-icon" aria-hidden="true">⏱</span>
-      <span class="feed-status-copy"><b id="feedStatusTitle"></b><span id="feedStatusDetail" class="feed-status-detail"></span></span>
-      <span id="feedStatusAge" class="feed-status-age"></span>
-      <button type="button" id="feedStatusRetry" class="feed-status-retry">Retry</button>
-    </div>
-    <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
-    <div class="filters">
-      <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
-      <button type="button" id="btnClearSearch" class="clear-search-btn" aria-label="Clear search" hidden>Clear</button>
-    </div>
-    <div class="section-head section-head-toggle" id="alertsSectionHead" hidden>
-      <button type="button" class="section-toggle-btn" id="alertsToggle" aria-expanded="true" aria-controls="alerts24hSummary">
-        <span class="section-title alert-title">Emergency/Alerts</span>
-        <span class="section-meta"><span class="muted" id="alertsCount">0</span><span class="section-caret" aria-hidden="true">▾</span></span>
-      </button>
-    </div>
-    <div id="alerts24hSummary" class="alerts-panel" aria-label="Emergency alerts in the last 24 hours" hidden></div>
-    <div class="section-head">
-      <h2>Aircrafts/Stations</h2>
-      <div class="list-head-actions">
-        <label class="sr-only" for="listSort">Sort aircraft list</label>
-        <select id="listSort" aria-label="Sort aircraft list" title="Sort aircraft list">
-          <option value="name" selected>Name</option>
-          <option value="type">Aircraft type</option>
-          <option value="climb">Climb</option>
-          <option value="latest">Latest seen</option>
-        </select>
-        <span class="muted" id="listCount">0</span>
+    <div class="sidebar-chrome">
+      <div id="feedStatusBanner" class="feed-status-banner" aria-live="off" hidden>
+        <span id="feedStatusIcon" class="feed-status-icon" aria-hidden="true">⏱</span>
+        <span class="feed-status-copy"><b id="feedStatusTitle"></b><span id="feedStatusDetail" class="feed-status-detail"></span></span>
+        <span id="feedStatusAge" class="feed-status-age"></span>
+        <button type="button" id="feedStatusRetry" class="feed-status-retry">Retry</button>
       </div>
+      <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
+      <div class="filters">
+        <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
+        <button type="button" id="btnClearSearch" class="clear-search-btn" aria-label="Clear search" hidden>Clear</button>
+      </div>
+      <div class="section-head section-head-toggle" id="alertsSectionHead" hidden>
+        <button type="button" class="section-toggle-btn" id="alertsToggle" aria-expanded="true" aria-controls="alerts24hSummary">
+          <span class="section-title alert-title">Emergency/Alerts</span>
+          <span class="section-meta"><span class="muted" id="alertsCount">0</span><span class="section-caret" aria-hidden="true">▾</span></span>
+        </button>
+      </div>
+      <div id="alerts24hSummary" class="alerts-panel" aria-label="Emergency alerts in the last 24 hours" hidden></div>
+      <div class="section-head">
+        <h2>Aircrafts/Stations</h2>
+        <div class="list-head-actions">
+          <label class="sr-only" for="listSort">Sort aircraft list</label>
+          <select id="listSort" aria-label="Sort aircraft list" title="Sort aircraft list">
+            <option value="name" selected>Name</option>
+            <option value="type">Aircraft type</option>
+            <option value="climb">Climb</option>
+            <option value="latest">Latest seen</option>
+          </select>
+          <span class="muted" id="listCount">0</span>
+        </div>
+      </div>
+      <div id="listHint" class="list-hint" aria-live="polite"></div>
     </div>
-    <div id="listHint" class="list-hint" aria-live="polite"></div>
     <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
     <button id="scrollListTopBtn" class="scroll-list-top-btn" type="button" aria-label="Scroll aircraft list to top" title="Scroll aircraft list to top" hidden>↑</button>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">GitHub</a></div>
@@ -228,7 +230,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="tz-lookup.js?v=20261126g"></script>
-<script src="app.js?v=20261126g"></script>
+<script src="tz-lookup.js?v=20261126t"></script>
+<script src="app.js?v=20261126t"></script>
 </body>
 </html>
