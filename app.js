@@ -1685,7 +1685,7 @@ function toggleSelection(address, openOnMap = false) {
     syncClearTracksButton();
     loadTrack(address);
     if (openOnMap) {
-      if (window.innerWidth <= 800) $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (window.innerWidth <= 800) revealMapForListAction();
       const m = markers.get(address);
       if (m) {
         if (m._isEmergency) {
@@ -3350,6 +3350,7 @@ $('aircraftList').addEventListener('click', e => {
   if (followBtn) {
     e.stopPropagation();
     toggleFollow(followBtn.dataset.follow);
+    revealMapForListAction();
     return;
   }
   const row = e.target.closest('.aircraft');
@@ -3373,6 +3374,7 @@ $('aircraftList').addEventListener('keydown', e => {
     if (followBtn) {
       e.preventDefault();
       toggleFollow(followBtn.dataset.follow);
+      revealMapForListAction();
       return;
     }
     e.preventDefault();
@@ -3389,6 +3391,7 @@ $('aircraftList').addEventListener('keydown', e => {
     e.preventDefault();
     e.stopPropagation();
     toggleFollow(row.dataset.key);
+    revealMapForListAction();
   } else if (row.contains(e.target) && (e.key === 'c' || e.key === 'C')) {
     e.preventDefault();
     e.stopPropagation();
@@ -5149,6 +5152,16 @@ function exitListMode(returnToMap) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       map.invalidateSize({ pan: false, animate: false });
     });
+  }
+}
+
+/** Return to the visible map after a list action that targets an aircraft. */
+function revealMapForListAction() {
+  if (!compactMenuQuery.matches) return;
+  if (listMode) {
+    exitListMode(true);
+  } else {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 }
 
