@@ -1735,7 +1735,7 @@ function jumpToAlertAddress(address) {
         <div class="popup-grid">
           <div class="popup-value"><span>Alert</span><br><b style="color:var(--red)">${esc(item.status)}</b></div>
           <div class="popup-value"><span>Last status</span><br><b>${esc(lastStatus)}</b></div>
-          <div class="popup-value popup-last-seen"><span>Last seen</span><br><b>${esc(`${lastSeenClock} (${lastSeenAge})`)}</b></div>
+          <div class="popup-value popup-full popup-last-seen"><span>Last seen</span><b>${esc(`${lastSeenClock} (${lastSeenAge})`)}</b></div>
           ${outcome ? `<div class="popup-value popup-full"><span>State</span><br><b style="color:var(--yellow)">${esc(outcome)}</b></div>` : ''}
           <div class="popup-value popup-full"><span>Position</span><br><a href="${mapsUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:700;text-decoration:underline">${esc(posText)}</a></div>
         </div>
@@ -2840,7 +2840,7 @@ function popup(a) {
     popupRow('Climb', a.climb != null ? fmtClimb(a.climb) : null),
     popupRow('Ground speed', a.speed != null ? fmtWindSpeed(a.speed) : null),
     popupRowHtml('Track Direction', courseValue),
-    `<div class="popup-value popup-last-seen"><span>Last seen</span><br><b>${esc(lastSeenText)}</b></div>`,
+    `<div class="popup-value popup-full popup-last-seen"><span>Last seen</span><b>${esc(lastSeenText)}</b></div>`,
     popupRowHtml('Signal (SNR)', formatSnrHtml(a.snr)),
     weatherRow,
     popupRow('Receiver', a.receiver),
