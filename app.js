@@ -88,6 +88,8 @@ let measurePoints = [];
 let selectedMeasureIndex = -1;
 let measureLine = null;
 let measureMarkers = [];
+let replayTimeMode = 'browser'; // 'browser' clock or time at the current trackpoint
+const replayTzCache = new Map();
 
 try {
   const prefs = JSON.parse(localStorage.getItem(MENU_PREFS_STORAGE_KEY) || '{}');
@@ -108,6 +110,7 @@ try {
   if (typeof prefs.baseLayer === 'string' && prefs.baseLayer) savedBaseLayer = prefs.baseLayer;
   if (Array.isArray(prefs.overlays)) savedOverlays = prefs.overlays.filter(v => typeof v === 'string');
   if (['name', 'type', 'climb', 'latest'].includes(prefs.listSort)) listSort = prefs.listSort;
+  if (prefs.replayTimeMode === 'track') replayTimeMode = 'track';
 } catch (e) {}
 
 try {
@@ -174,7 +177,8 @@ function saveMenuPrefs() {
       baroEnabled,
       baseLayer: savedBaseLayer,
       overlays: savedOverlays,
-      listSort
+      listSort,
+      replayTimeMode
     }));
   } catch (e) {}
   updateFilterBadge();
@@ -4279,6 +4283,47 @@ function replayFocusLabel() {
   return a ? displayName(a) : String(replayFollowAddress || '').toUpperCase();
 }
 
+function formatReplayClock(sec, compact, tz = null) {
+  return new Date(sec * 1000).toLocaleTimeString([], {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: !compact,
+    ...(tz ? { timeZone: tz } : {})
+  });
+}
+
+/** Position used for the replay clock's regional timezone. */
+function replayTimeZonePosition() {
+  const pos = interpolateReplayFocusPosition(replayTsMs) || replayFocusFallbackPosition();
+  if (pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lon)) return pos;
+  const slice = replayPoints.find(p => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  if (slice) return slice;
+  const c = map.getCenter();
+  return Number.isFinite(c.lat) && Number.isFinite(c.lng) ? { lat: c.lat, lon: c.lng } : null;
+}
+
+function replayTimeZone() {
+  if (replayTimeMode !== 'track' || typeof tzlookup !== 'function') return null;
+  const pos = replayTimeZonePosition();
+  if (!pos) return null;
+  const key = `${pos.lat.toFixed(3)},${pos.lon.toFixed(3)}`;
+  if (replayTzCache.has(key)) return replayTzCache.get(key) || null;
+  let tz = null;
+  try { tz = tzlookup(pos.lat, pos.lon) || null; } catch (e) {}
+  if (replayTzCache.size > 200) replayTzCache.clear();
+  replayTzCache.set(key, tz);
+  return tz;
+}
+
+function replayTzShortLabel(tz) {
+  if (!tz) return 'UTC';
+  try {
+    const parts = new Intl.DateTimeFormat([], { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date());
+    const name = parts.find(p => p.type === 'timeZoneName');
+    if (name && name.value && name.value.length <= 8) return name.value;
+  } catch (e) {}
+  return String(tz).split('/').pop().replace(/_/g, ' ');
+}
+
 function replayFocusMetrics(pos) {
   const speed = (pos && pos.speed != null && Number.isFinite(pos.speed))
     ? fmtWindSpeed(pos.speed * 3.6) : '';
@@ -4287,9 +4332,7 @@ function replayFocusMetrics(pos) {
   const alt = (pos && pos.alt != null && Number.isFinite(pos.alt))
     ? fmtAltCompact(pos.alt) : '';
   const ts = pos && Number.isFinite(pos.ts) ? Math.floor(pos.ts) : 0;
-  const time = ts ? new Date(ts * 1000).toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: !compactReplayUi()
-  }) : '';
+  const time = ts ? formatReplayClock(ts, compactReplayUi(), replayTimeZone()) : '';
   return { speed, climb, alt, time };
 }
 
@@ -4309,12 +4352,22 @@ function applyReplayHud(marker, text) {
 
 function updateReplayTimeReadout(tsMs = replayTsMs) {
   const sec = Math.floor((tsMs || replayTsFromSlider()) / 1000);
-  const sig = `${sec}:${compactReplayUi()}`;
+  const compact = compactReplayUi();
+  const tz = replayTimeZone();
+  const sig = `${sec}:${compact}:${replayTimeMode}:${tz || ''}`;
   if (sig === replayTimeReadoutSig) return;
   replayTimeReadoutSig = sig;
-  $('replayTime').textContent = new Date(sec * 1000).toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: !compactReplayUi()
-  });
+  const label = formatReplayClock(sec, compact, tz);
+  $('replayTimeValue').textContent = label;
+  $('replayTimeTag').textContent = replayTimeMode === 'track'
+    ? (compact ? 'T' : replayTzShortLabel(tz))
+    : (compact ? 'L' : 'Local');
+  const btn = $('replayTime');
+  btn.classList.toggle('track-time', replayTimeMode === 'track');
+  const where = replayTimeMode === 'track' ? `at ${tz || 'the trackpoint'}` : 'browser local';
+  const next = replayTimeMode === 'track' ? 'browser local time' : 'time at the trackpoint location';
+  btn.setAttribute('aria-label', `Replay time ${label} (${where}). Click to show ${next}.`);
+  btn.title = `Replay time: ${label} (${where}). Click to show ${next}.`;
 }
 
 // The replay slice query returns the newest fix in a ±60 s window, which can
@@ -5211,6 +5264,16 @@ $('emergencyBannerClose').addEventListener('click', () => {
 
 $('btnReplay').addEventListener('click', () => setReplayMode(!replayActive));
 $('replayExit').addEventListener('click', () => setReplayMode(false));
+$('replayTime').addEventListener('click', () => {
+  replayTimeMode = replayTimeMode === 'browser' ? 'track' : 'browser';
+  saveMenuPrefs();
+  replayTimeReadoutSig = '';
+  updateReplayTimeReadout();
+  if (replayFocusMarker) {
+    replayFocusMarker._tooltipSig = '';
+    updateReplayFocusMarker();
+  }
+});
 $('btnMeasure').addEventListener('click', () => setMeasureMode(!measureMode));
 $('measureReadout').addEventListener('click', e => {
   if (!e.target.closest('[data-measure-clear]')) return;

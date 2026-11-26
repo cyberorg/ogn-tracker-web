@@ -79,6 +79,10 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 #replayRange{min-width:48px;text-align:center;font-weight:700}
 #replayPrevTrack,#replayNextTrack{padding:5px 5px;font-size:11px;min-width:44px;text-align:center;font-weight:700}
 #replayReverse.active{background:#5c3a23;border-color:#f59e0b;color:#fff}
+.replay-bar .replay-time-toggle{display:flex;align-items:center;gap:5px;padding:4px 7px;min-width:0;border-color:transparent;background:transparent;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums}
+.replay-bar .replay-time-toggle:hover{background:#263b4b;border-color:var(--accent);color:#fff}
+.replay-bar .replay-tz-tag{font-size:9px;font-weight:700;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 5px;letter-spacing:.3px}
+.replay-bar .replay-time-toggle.track-time .replay-tz-tag{color:var(--accent);border-color:var(--accent)}
 .sidebar{position:relative;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 .filters{display:grid;grid-template-columns:1fr auto;gap:7px;padding:10px 12px;border-bottom:1px solid var(--line);align-items:center}
 .filters .search{width:100%}

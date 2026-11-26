@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261125zo">
+<link rel="stylesheet" href="style.css?v=20261126a">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -180,7 +180,7 @@
         </div>
         <button id="replaySpeedUp" class="replay-speed-arrow" type="button" aria-label="Increase replay speed" title="Increase replay speed">▶</button>
       </div>
-      <span id="replayTime" style="white-space:nowrap;font-weight:600" aria-live="polite">--:--</span>
+      <button id="replayTime" class="replay-time-toggle" type="button" aria-label="Replay time in browser local time. Click to show time at the trackpoint location." title="Replay time: browser local. Click to show time at the trackpoint location."><span id="replayTimeValue" aria-live="polite">--:--</span><span id="replayTimeTag" class="replay-tz-tag">Local</span></button>
       <button id="replayClearFollow" type="button" title="Show all aircraft in replay" aria-label="Show all aircraft in replay" hidden>👁 All</button>
       <button id="replayExit" type="button" class="icon-close icon-close--corner" aria-label="Exit replay">×</button>
     </div>
@@ -229,6 +229,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="app.js?v=20261125zo"></script>
+<script src="tz-lookup.js?v=20261126a"></script>
+<script src="app.js?v=20261126a"></script>
 </body>
 </html>
