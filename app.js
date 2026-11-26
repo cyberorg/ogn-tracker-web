@@ -102,7 +102,9 @@ try {
   if (typeof prefs.alertsEnabled === 'boolean') alertsEnabled = prefs.alertsEnabled;
   if (Array.isArray(prefs.types) && prefs.types.length > 0) savedTypes = prefs.types;
   if (typeof prefs.markerWindow === 'string' && prefs.markerWindow) savedMarkerWindow = prefs.markerWindow;
-  if (typeof prefs.trackWindow === 'string' && prefs.trackWindow) savedTrackWindow = prefs.trackWindow;
+  if (typeof prefs.trackWindow === 'string' && prefs.trackWindow) {
+    savedTrackWindow = prefs.trackWindow === 'today' ? '86400' : prefs.trackWindow;
+  }
   if (typeof prefs.varioTrackMode === 'boolean') savedVarioTrackMode = prefs.varioTrackMode;
   if (typeof prefs.baroEnabled === 'boolean') {
     savedBaroEnabled = prefs.baroEnabled;
@@ -625,7 +627,7 @@ if (restoredAirspace) {
 syncClearAirspaceButton();
 
 const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
-const overlayMaps = { "Thermals (Today)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
+const overlayMaps = { "Thermals(6h)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
 const layersControl = L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
 
 let scaleControl = null;
@@ -753,10 +755,15 @@ let replayOnlyFocus = false;
 let replayDirection = 1;
 let replaySpeedValue = 1;
 const REPLAY_SPEED_STEPS = [1, 10, 20, 30, 50];
-const REPLAY_RANGE_LABELS = ['15m', '1h', '6h', 'Today'];
-const REPLAY_RANGE_TITLES = ['15 minutes from slider', '1 hour from slider', '6 hours from slider', 'Today from slider'];
-const REPLAY_RANGE_MINUTES = [15, 60, 360];
-let replayRangeIndex = REPLAY_RANGE_LABELS.length - 1;
+const REPLAY_RANGE_LABELS = ['15m', '1h', '6h', '12h', '24h'];
+const REPLAY_RANGE_TITLES = ['15 minutes from slider', '1 hour from slider', '6 hours from slider', '12 hours from slider', '24 hours from slider'];
+const REPLAY_RANGE_MINUTES = [15, 60, 360, 720, 1440];
+function replayRangeIndexForActiveWindow(value) {
+  const minutes = Number(value) / 60;
+  const idx = REPLAY_RANGE_MINUTES.indexOf(minutes);
+  return idx >= 0 ? idx : REPLAY_RANGE_MINUTES.length - 1;
+}
+let replayRangeIndex = replayRangeIndexForActiveWindow(savedMarkerWindow);
 let replayWindowStartMs = null;
 let replayTsMs = 0;
 let replayLastTickMs = 0;
@@ -1368,22 +1375,12 @@ function clearAllTracks() {
 }
 
 function trackWindowCutoffSec(nowMs = serverNow()) {
-  const val = $('trackWindow')?.value || '900';
-  if (val === 'today') {
-    const d = new Date(nowMs);
-    d.setHours(0, 0, 0, 0);
-    return Math.floor(d.getTime() / 1000);
-  }
-  const seconds = Number(val);
+  const seconds = Number($('trackWindow')?.value || 900);
   return Math.floor(nowMs / 1000) - (Number.isFinite(seconds) && seconds > 0 ? seconds : 900);
 }
 
 function buildTrackQuery(address) {
   const val = $('trackWindow').value;
-  if (val === 'today') {
-    const d = new Date(); d.setHours(0, 0, 0, 0);
-    return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&since=${Math.floor(d.getTime() / 1000)}`;
-  }
   return `ogn-proxy.php?track=1&id=${encodeURIComponent(address)}&window=${encodeURIComponent(val)}`;
 }
 
@@ -4033,17 +4030,7 @@ function syncReplaySpeedUi() {
   }
 }
 
-function replaySpanMs(anchorMs = null) {
-  const nowMs = serverNow();
-  if (replayRangeIndex >= REPLAY_RANGE_MINUTES.length) {
-    const d = new Date(Number.isFinite(anchorMs) ? anchorMs : nowMs);
-    const midnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-    if (Number.isFinite(anchorMs)) {
-      const nextMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
-      return Math.max(60000, nextMidnight - anchorMs);
-    }
-    return Math.max(60000, nowMs - midnight);
-  }
+function replaySpanMs() {
   return REPLAY_RANGE_MINUTES[replayRangeIndex] * 60000;
 }
 
@@ -4103,7 +4090,7 @@ function computeReplayTrackSegments(points, trimStationaryStart = false) {
 
 /** Effective replay bounds: a fixed duration starting at the replay slider's anchor time. */
 function replayWindow() {
-  const span = replaySpanMs(replayWindowStartMs);
+  const span = replaySpanMs();
   const start = Number.isFinite(replayWindowStartMs) ? replayWindowStartMs : serverNow() - span;
   return { start, end: start + span };
 }
@@ -4788,6 +4775,9 @@ function setReplayMode(on, opts = {}) {
   if (on) bringToFront($('replayBar'));
   syncBottomBarOffset();
   if (on) {
+    // Start each replay session at the currently selected Active window.
+    replayRangeIndex = replayRangeIndexForActiveWindow($('markerWindow').value);
+    syncReplayRangeButton();
     map.removeLayer(clusterGroup); map.removeLayer(emergencyGroup);
     replayTrackGroup.addLayer(replayTrackBaseGroup).addLayer(replayProgressGroup);
     replayTrackGroup.addTo(map);

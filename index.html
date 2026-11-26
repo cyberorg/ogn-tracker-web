@@ -9,7 +9,7 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261126v">
+<link rel="stylesheet" href="style.css?v=20261126za">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -70,19 +70,21 @@
           <div>
             <label class="group-label" for="markerWindow">Active</label>
             <select id="markerWindow" aria-label="Show aircraft active within">
-              <option value="900" selected>15 min</option>
-              <option value="3600">1 hour</option>
-              <option value="21600">6 hours</option>
-              <option value="86400">24 hours</option>
+              <option value="900" selected>15m</option>
+              <option value="3600">1h</option>
+              <option value="21600">6h</option>
+              <option value="43200">12h</option>
+              <option value="86400">24h</option>
             </select>
           </div>
           <div>
             <label class="group-label" for="trackWindow">Track</label>
             <select id="trackWindow" aria-label="Track duration">
-              <option value="900" selected>15 min</option>
-              <option value="3600">1 hour</option>
-              <option value="21600">6 hours</option>
-              <option value="today">Today</option>
+              <option value="900" selected>15m</option>
+              <option value="3600">1h</option>
+              <option value="21600">6h</option>
+              <option value="43200">12h</option>
+              <option value="86400">24h</option>
             </select>
           </div>
         </div>
@@ -166,7 +168,7 @@
     <div id="replayBar" class="replay-bar" role="region" aria-label="Replay controls">
       <button id="replayPlay" type="button" aria-label="Play replay">▶</button>
       <button id="replayReverse" type="button" aria-label="Rewind replay" aria-pressed="false" title="Rewind replay">⏪</button>
-      <button id="replayRange" type="button" aria-label="Replay window: Today" title="Replay window: Today (from midnight) (click to cycle)">Today</button>
+      <button id="replayRange" type="button" aria-label="Replay window: 15m" title="Replay window: 15 minutes from slider (click to cycle)">15m</button>
       <button id="replaySpeedValue" class="replay-speed-readout" type="button" aria-label="Replay speed: 1×, tap to cycle speeds" title="Replay speed: 1× — tap to cycle 1× / 10× / 20× / 30× / 50×">1×</button>
       <button id="replayPrevTrack" type="button" title="Previous track" aria-label="Previous track" hidden>⏮ 1/1</button>
       <button id="replayNextTrack" type="button" title="Next track" aria-label="Next track" hidden>⏭ 1/1</button>
@@ -230,7 +232,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="tz-lookup.js?v=20261126v"></script>
-<script src="app.js?v=20261126v"></script>
+<script src="tz-lookup.js?v=20261126za"></script>
+<script src="app.js?v=20261126za"></script>
 </body>
 </html>
