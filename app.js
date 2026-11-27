@@ -424,13 +424,22 @@ const ResetCameraControl = L.Control.extend({
 });
 new ResetCameraControl().addTo(map);
 
+const FULLSCREEN_ICON =
+  '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
+  '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const RESTORE_FULLSCREEN_ICON =
+  '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
+  '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" fill="none" stroke="currentColor" ' +
+  'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
 const FullscreenControl = L.Control.extend({
   options: { position: 'topright' },
   onAdd: function () {
     const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control-fullscreen');
     const button = L.DomUtil.create('button', 'leaflet-control-fullscreen-btn', container);
     button.type = 'button';
-    button.textContent = '⤢';
+    button.innerHTML = FULLSCREEN_ICON;
     button.setAttribute('aria-label', 'Maximize map');
     button.title = 'Maximize map';
 
@@ -492,7 +501,7 @@ function syncMapFullscreenUi() {
   const button = mapFullscreenControl?._button;
   if (!button) return;
   const active = mapIsFullscreen();
-  button.textContent = active ? '⤡' : '⤢';
+  button.innerHTML = active ? RESTORE_FULLSCREEN_ICON : FULLSCREEN_ICON;
   button.setAttribute('aria-label', active ? 'Restore map' : 'Maximize map');
   button.title = active ? 'Restore map' : 'Maximize map';
   button.setAttribute('aria-pressed', String(active));
@@ -691,7 +700,7 @@ function s3dWrapLon(lon) {
   return ((lon + 180) % 360 + 360) % 360 - 180;
 }
 
-// The arrowhead is a fixed screen-space size, so its ground footprint grows as
+// The aircraft model is a fixed screen-space size, so its ground footprint grows as
 // the map zooms out. Cap the sample radius to keep low-zoom markers reasonable.
 function s3dTerrainSampleRadiusM(lat) {
   const zoom = Number.isFinite(map3d?.getZoom?.()) ? map3d.getZoom() : 14;
@@ -763,79 +772,317 @@ function s3dSimplifyPoints(points, maxPoints) {
   return out;
 }
 
-// --- Native 3D arrowheads and smooth track lines --------------------------
+// --- Native 3D aircraft models and smooth track lines ---------------------
 // MapLibre symbol/fill-extrusion layers cannot place a real 3D model at an
 // arbitrary MSL altitude. A custom WebGL layer puts a small procedural
-// arrowhead, and its track, directly in Mercator 3D space. three.js is MIT
+// aircraft model, and its track, directly in Mercator 3D space. three.js is MIT
 // licensed and needs no API key.
-const S3D_ARROW_LEN = 12;       // model units; rescaled every frame to fixed pixels
+const S3D_ARROW_LEN = 12;       // dart length in model units; also size fallback
 const S3D_ARROW_WIDTH = 9;
 const S3D_ARROW_HEIGHT = 3.5;
-const S3D_ARROW_PX = 20;        // on-screen arrowhead size at every zoom
-const S3D_TRACK_PX = S3D_ARROW_PX / 10;      // slim continuous track line (2 px)
+const S3D_ARROW_PX = 30;        // on-screen aircraft marker size at every zoom
+const S3D_STATION_PX = 20;      // ground-station marker stays smaller
+const S3D_TRACK_PX = 2;                      // slim continuous track line (2 px)
 const S3D_PROGRESS_PX = S3D_TRACK_PX * 1.25; // replay progress is only slightly heavier
 
 function s3dThree() {
   return window.THREE || null;
 }
 
-function s3dBuildArrowheadModel(colorHex) {
+// --- S3D marker models start ---
+// A procedural dart is shared by every 3D aircraft marker, tinted with the
+// resolved stripe colour. Ground stations use a tower model instead. Templates
+// are cached per model/colour and each marker holds two lightweight objects
+// referencing that template.
+const S3D_STATION_TYPE = 15;
+const s3dMarkerTemplates = new Map();
+
+function s3dTemplateKey(type, colorHex) {
+  const color = s3dResolveColor(colorHex, THEME.accent);
+  return `${type === S3D_STATION_TYPE ? 'station' : 'dart'}|${color}`;
+}
+
+function s3dModelPalette(colorHex) {
   const THREE = s3dThree();
   if (!THREE) return null;
   const base = new THREE.Color(s3dResolveColor(colorHex, THEME.accent));
-  const ridgeColor = base.clone().offsetHSL(0, 0, 0.16);
-  const tip = [0, S3D_ARROW_LEN / 2, 0];
-  const backLeft = [-S3D_ARROW_WIDTH / 2, -S3D_ARROW_LEN / 2, 0];
-  const backRight = [S3D_ARROW_WIDTH / 2, -S3D_ARROW_LEN / 2, 0];
-  const ridge = [0, 0, S3D_ARROW_HEIGHT];
-  // A four-vertex tetrahedron reads as a 3D arrowhead from any camera angle:
-  // two lit top faces, one flat underside, and a raised centre ridge.
-  const verts = [tip, backLeft, ridge, tip, ridge, backRight, tip, backRight, backLeft];
-  const faceColors = [
-    base, base, ridgeColor,
-    base, ridgeColor, base,
-    base, base, base
-  ];
-  const positions = [];
-  const colors = [];
-  for (let i = 0; i < verts.length; i++) {
-    positions.push(...verts[i]);
-    colors.push(faceColors[i].r, faceColors[i].g, faceColors[i].b);
+  const white = new THREE.Color('#ffffff');
+  return {
+    accent: base.clone(),
+    tip: base.clone().lerp(white, 0.35),
+    tail: base.clone().multiplyScalar(0.62),
+    pale: base.clone().lerp(white, 0.55),
+    pink: base.clone(),
+    dark: new THREE.Color('#0b121a'),
+    white: white.clone()
+  };
+}
+
+function s3dMeshFromFaces(faces) {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  const positions = [], colors = [];
+  for (const face of faces) {
+    for (let i = 0; i < face.points.length; i++) {
+      const point = face.points[i];
+      const color = Array.isArray(face.color) ? face.color[i] : face.color;
+      positions.push(...point);
+      colors.push(color.r, color.g, color.b);
+    }
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   geom.computeVertexNormals();
-  const arrow = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
-    vertexColors: true, side: THREE.DoubleSide,
-    transparent: true, opacity: 1, depthTest: true, depthWrite: true
+  const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.DoubleSide, depthTest: true, depthWrite: true
   }));
-  arrow.frustumCulled = false;
-  // Track tubes never write depth and render first; aircraft render after them.
-  arrow.renderOrder = 1;
+  mesh.frustumCulled = false;
+  return mesh;
+}
 
-  const edgePositions = [];
-  for (const [a, b] of [
-    [tip, backLeft], [backLeft, backRight], [backRight, tip],
-    [tip, ridge], [backLeft, ridge], [backRight, ridge]
-  ]) edgePositions.push(...a, ...b);
-  const edgeGeom = new THREE.BufferGeometry();
-  edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
-  const edges = new THREE.LineSegments(edgeGeom, new THREE.LineBasicMaterial({
-    color: 0x0b121a, transparent: true, opacity: 0.7,
-    depthTest: true, depthWrite: false
+function s3dLinesFromSegments(segments, color, opacity) {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  const base = new THREE.Color(color);
+  const alpha = opacity == null ? 0.7 : opacity;
+  const positions = [], colors = [];
+  for (const [a, b] of segments) {
+    for (const point of [a, b]) {
+      positions.push(...point);
+      colors.push(base.r, base.g, base.b, alpha);
+    }
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 4));
+  const line = new THREE.LineSegments(geom, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, depthTest: true, depthWrite: false
   }));
-  edges.frustumCulled = false;
-  edges.renderOrder = 2;
+  line.frustumCulled = false;
+  return line;
+}
 
+function s3dDartModel(colorHex) {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  // Same proportions as the original arrowhead, so the shared dart keeps the
+  // familiar on-screen shape while picking up each aircraft's stripe colour.
+  const halfLen = S3D_ARROW_LEN / 2, halfWidth = S3D_ARROW_WIDTH / 2;
+  const tip = [0, halfLen, 0];
+  const bl = [-halfWidth, -halfLen, 0];
+  const br = [halfWidth, -halfLen, 0];
+  const ridge = [0, 0, S3D_ARROW_HEIGHT];
+  const backColor = new THREE.Color(0x000000);
+  const tipColor = new THREE.Color(s3dResolveColor(colorHex, THEME.accent));
+  const gradient = points => points.map(point => {
+    const t = Math.max(0, Math.min(1, (point[1] + halfLen) / S3D_ARROW_LEN));
+    const falloffStart = 0.90;
+    const shade = t >= falloffStart
+      ? 0.85 + 0.15 * ((t - falloffStart) / (1 - falloffStart))
+      : 0.85 * Math.pow(t / falloffStart, 3.0);
+    return backColor.clone().lerp(tipColor, shade);
+  });
+  const face = points => ({ points, color: gradient(points) });
   const group = new THREE.Group();
-  group.add(arrow, edges);
-  group.userData.color = colorHex;
+  group.rotation.order = 'ZYX';
+  group.add(s3dMeshFromFaces([
+    face([tip, bl, ridge]),
+    face([tip, ridge, br]),
+    face([tip, br, bl]),
+    { points: [bl, br, ridge], color: backColor }
+  ]));
+  group.add(s3dLinesFromSegments([
+    [tip, bl], [bl, br], [br, tip], [tip, ridge], [bl, ridge], [br, ridge]
+  ], 0x0b121a, 0.78));
+  group.add(s3dLinesFromSegments([
+    [tip, [0, -halfLen, 0.2]]
+  ], 0xffffff, 0.55));
   return group;
 }
 
+function s3dGroundStation(palette) {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  const group = new THREE.Group();
+  group.rotation.order = 'ZYX';
+  const faces = [], pale = [], dark = [];
+
+  const quad = (a, b, c, d, color) => {
+    faces.push({ points: [a, b, c], color: color });
+    faces.push({ points: [a, c, d], color: color });
+    dark.push([a, b], [b, c], [c, d], [d, a]);
+  };
+  const b = 3.2;
+  quad([-b, -b, 0], [b, -b, 0], [b, b, 0], [-b, b, 0], palette.tail);
+
+  const legPoint = (sx, sy, t) => {
+    const half = 1.6 + (0.45 - 1.6) * t;
+    return [sx * half, sy * half, 0.15 + 11.35 * t];
+  };
+  for (const sx of [1, -1]) for (const sy of [1, -1]) {
+    pale.push([legPoint(sx, sy, 0), legPoint(sx, sy, 1)]);
+  }
+  const corners = [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([sx, sy]) => legPoint(sx, sy, 1));
+  faces.push({ points: [corners[0], corners[1], corners[2]], color: palette.accent });
+  faces.push({ points: [corners[0], corners[2], corners[3]], color: palette.accent });
+  dark.push([corners[0], corners[1]], [corners[1], corners[2]], [corners[2], corners[3]], [corners[3], corners[0]]);
+
+  for (const t of [0.25, 0.5, 0.75]) {
+    const ring = [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([sx, sy]) => legPoint(sx, sy, t));
+    for (let i = 0; i < 4; i++) pale.push([ring[i], ring[(i + 1) % 4]]);
+    pale.push([ring[0], ring[2]], [ring[1], ring[3]]);
+  }
+
+  pale.push([[0, 0, 11.5], [0, 0, 17]]);
+  const top = [0, 0, 16.8];
+  for (const sx of [1, -1]) pale.push([top, [sx * 5.5, sx * 5.5, 0]]);
+
+  const cz = 15.5, rimZ = 14.4, R = 2.5, N = 12;
+  for (let i = 0; i < N; i++) {
+    const a1 = i * Math.PI * 2 / N, a2 = (i + 1) * Math.PI * 2 / N;
+    const p1 = [Math.cos(a1) * R, Math.sin(a1) * R, rimZ];
+    const p2 = [Math.cos(a2) * R, Math.sin(a2) * R, rimZ];
+    faces.push({ points: [[0, 0, cz], p1, p2], color: i % 2 ? palette.tip : palette.pale });
+    dark.push([p1, p2]);
+  }
+  faces.push({ points: [[-0.25, 0, 17.2], [0.25, 0, 17.2], [0, 0.35, 17.2]], color: palette.pink });
+
+  group.add(s3dMeshFromFaces(faces));
+  group.add(s3dLinesFromSegments(pale, palette.pale.getHex(), 0.85));
+  group.add(s3dLinesFromSegments(dark, 0x0b121a, 0.78));
+  return group;
+}
+
+function s3dFlattenModel(group) {
+  const THREE = s3dThree();
+  if (!THREE || !group) return null;
+  group.updateMatrixWorld(true);
+  const meshPositions = [], meshColors = [];
+  const linePositions = [], lineColors = [];
+  const v = new THREE.Vector3();
+  group.traverse(child => {
+    const pos = child.geometry?.attributes?.position;
+    if (!pos) return;
+    const matrix = child.matrixWorld;
+    if (child.isMesh) {
+      const col = child.geometry.attributes.color;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(matrix);
+        meshPositions.push(v.x, v.y, v.z);
+        if (col) meshColors.push(col.getX(i), col.getY(i), col.getZ(i));
+        else meshColors.push(1, 1, 1);
+      }
+    } else if (child.isLineSegments) {
+      const col = child.geometry.attributes.color;
+      const materialColor = child.material?.color || new THREE.Color(0xffffff);
+      const opacity = child.material?.opacity ?? 1;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(matrix);
+        linePositions.push(v.x, v.y, v.z);
+        if (col && col.itemSize === 4) {
+          lineColors.push(col.getX(i), col.getY(i), col.getZ(i), col.getW(i));
+        } else if (col) {
+          lineColors.push(col.getX(i), col.getY(i), col.getZ(i), opacity);
+        } else {
+          lineColors.push(materialColor.r, materialColor.g, materialColor.b, opacity);
+        }
+      }
+    }
+  });
+
+  const meshGeom = new THREE.BufferGeometry();
+  meshGeom.setAttribute('position', new THREE.Float32BufferAttribute(meshPositions, 3));
+  meshGeom.setAttribute('color', new THREE.Float32BufferAttribute(meshColors, 3));
+  const mesh = new THREE.Mesh(meshGeom, new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.DoubleSide, depthTest: true, depthWrite: true
+  }));
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 1;
+
+  const lineGeom = new THREE.BufferGeometry();
+  lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3));
+  lineGeom.setAttribute('color', new THREE.Float32BufferAttribute(lineColors, 4));
+  const lines = new THREE.LineSegments(lineGeom, new THREE.LineBasicMaterial({
+    vertexColors: true, transparent: true, depthTest: true, depthWrite: false
+  }));
+  lines.frustumCulled = false;
+  lines.renderOrder = 2;
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const positions of [meshPositions, linePositions]) {
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+  }
+  const out = new THREE.Group();
+  out.add(mesh, lines);
+  out.userData.mesh = mesh;
+  out.userData.lines = lines;
+  out.userData.modelSize = Math.max(maxX - minX, maxY - minY, maxZ - minZ) || S3D_ARROW_LEN;
+  return out;
+}
+
+function s3dBuildMarkerTemplate(type, colorHex) {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  const key = s3dTemplateKey(type, colorHex);
+  const cached = s3dMarkerTemplates.get(key);
+  if (cached) return cached;
+  const isStation = key.startsWith('station|');
+  let built;
+  if (isStation) {
+    const palette = s3dModelPalette(key.slice(8));
+    if (!palette) return null;
+    built = s3dGroundStation(palette);
+  } else {
+    built = s3dDartModel(key.slice(5));
+  }
+  if (!built) return null;
+  const template = s3dFlattenModel(built);
+  s3dDisposeObject(built);
+  if (!template) return null;
+  template.userData.key = key;
+  template.userData.modelId = isStation ? 'station' : 'dart';
+  template.userData.markerPx = isStation ? S3D_STATION_PX : S3D_ARROW_PX;
+  s3dMarkerTemplates.set(key, template);
+  return template;
+}
+
+function s3dCreateMarkerInstance(type, colorHex) {
+  const THREE = s3dThree();
+  const template = s3dBuildMarkerTemplate(type, colorHex);
+  if (!THREE || !template) return null;
+  const group = new THREE.Group();
+  group.rotation.order = 'ZYX';
+  for (const child of template.children) {
+    const copy = child.isMesh
+      ? new THREE.Mesh(child.geometry, child.material)
+      : new THREE.LineSegments(child.geometry, child.material);
+    copy.frustumCulled = false;
+    copy.renderOrder = child.renderOrder;
+    // Geometry/material belong to the shared template; do not dispose them
+    // when an individual marker leaves the scene.
+    copy.userData.shared = true;
+    group.add(copy);
+  }
+  group.userData.templateKey = template.userData.key;
+  group.userData.modelSize = template.userData.modelSize;
+  group.userData.markerPx = template.userData.markerPx;
+  return group;
+}
+// --- S3D marker models end ---
+
 function s3dDisposeObject(obj) {
   obj.traverse?.(child => {
+    if (child.userData?.shared) return;
     child.geometry?.dispose?.();
     if (Array.isArray(child.material)) child.material.forEach(m => m.dispose?.());
     else child.material?.dispose?.();
@@ -933,24 +1180,27 @@ function s3dCreateArrowLayer() {
       for (const [key, item] of map3dDomMarkers.entries()) {
         if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
         seen.add(key);
+        const type = getResolvedType(item.popupData || {});
         const color = s3dResolveColor(s3dMarkerColor(item), THEME.accent);
+        const templateKey = s3dTemplateKey(type, color);
         let model = this.models.get(key);
-        if (!model || model.userData.color !== color) {
+        if (!model || model.userData.templateKey !== templateKey) {
           if (model) { this.scene.remove(model); s3dDisposeObject(model); }
-          model = s3dBuildArrowheadModel(color);
+          model = s3dCreateMarkerInstance(type, color);
           if (!model) continue;
           this.models.set(key, model);
           this.scene.add(model);
         }
         const elevation = s3dRenderAltitude(item.lon, item.lat, item.alt);
         const mc = maplibregl.MercatorCoordinate.fromLngLat([item.lon, item.lat], elevation);
-        // Convert the model to a fixed on-screen size at every zoom. The world
-        // size shrinks as the map zooms in, so the arrowhead stays the same
-        // pixel size while its origin remains exactly at lat/lon/altitude.
+        // Convert the model to a fixed on-screen size at every zoom. The
+        // template's bounding size and per-model pixel size keep each marker
+        // consistent while its origin stays at lat/lon/alt.
         const metersPerPixel = 40075016.686 * Math.cos(item.lat * Math.PI / 180) /
           (512 * Math.pow(2, this.map.getZoom()));
         const unit = mc.meterInMercatorCoordinateUnits();
-        const scaleFactor = metersPerPixel * S3D_ARROW_PX / S3D_ARROW_LEN;
+        const markerPx = model.userData.markerPx ?? S3D_ARROW_PX;
+        const scaleFactor = metersPerPixel * markerPx / model.userData.modelSize;
         const course = Number(item.popupData?.course);
         const rot = Number.isFinite(course) ? -course * Math.PI / 180 : 0;
         const m = new THREE.Matrix4()
@@ -1294,14 +1544,18 @@ function s3dProject3DPoint(lng, lat, altMSL) {
   const Mc = window.maplibregl?.MercatorCoordinate;
   const transform = map3d.transform;
   if (Mc && transform && typeof transform.coordinatePoint === 'function' && transform._pixelMatrix3D) {
-    // Keep the DOM marker/label above the DEM surface as well as the WebGL arrow.
+    // Keep the DOM marker, name and HUD above the DEM surface at the same
+    // screen position as the WebGL model. coordinatePoint() expects the
+    // elevation in metres and the 3D pixel matrix when the camera is pitched;
+    // the default pixel matrix puts labels far from elevated 3D markers.
     const elevation = s3dRenderAltitude(lng, lat, altMSL);
     try {
-      return transform.coordinatePoint(
+      const pt = transform.coordinatePoint(
         Mc.fromLngLat([lng, lat]),
         elevation,
         transform._pixelMatrix3D
       );
+      if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) return pt;
     } catch (err) {
       // Fall through to the 2D projection if the internal matrix is unavailable.
     }
@@ -1336,7 +1590,7 @@ function s3dMarkerColor(item) {
 function s3dMarkerGeometry() {
   const features = [];
   if (!map3d || !map3dActive) return s3dFeatureCollection(features);
-  // Only a small ground shadow is native MapLibre geometry. The arrowhead
+  // Only a small ground shadow is native MapLibre geometry. The aircraft model
   // itself is drawn in the three.js custom layer at its true 3D altitude.
   for (const [key, item] of map3dDomMarkers.entries()) {
     if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
@@ -1545,7 +1799,7 @@ function setup3DLayers() {
       'circle-stroke-opacity': 0.8
     }
   });
-  // Real 3D arrowheads and elevated track lines are drawn by a custom
+  // Real 3D aircraft models and elevated track lines are drawn by a custom
   // WebGL layer; the plain circle above only marks the ground position.
   if (s3dThree()) {
     s3dArrowLayer = s3dCreateArrowLayer();
@@ -1764,7 +2018,7 @@ function sync3DReplayFocus(pos) {
   }
   const label = esc(replayFocusLabel());
   const metricsText = replayFocusHudText(pos);
-  const iconHtml = `<div class="glider-wrap focused" style="--marker-color:#ec4899"><div class="replay-dot focused"></div><div class="glider-label" title="${label}">${label}</div></div>${focusHudHtml(metricsText)}`;
+  const iconHtml = `<div class="glider-wrap focused" style="--marker-color:#ec4899"><div class="replay-dot focused"></div><div class="glider-label" title="${label}">${label}</div>${focusHudHtml(metricsText)}</div>`;
   const baseAc = findAircraftByAddress(replayFollowAddress);
   const popupObj = {
     ...(baseAc || {}),
