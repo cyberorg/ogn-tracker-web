@@ -784,6 +784,7 @@ const S3D_ARROW_PX = 30;        // on-screen aircraft marker size at every zoom
 const S3D_STATION_PX = 20;      // ground-station marker stays smaller
 const S3D_TRACK_PX = 2;                      // slim continuous track line (2 px)
 const S3D_PROGRESS_PX = S3D_TRACK_PX * 1.25; // replay progress is only slightly heavier
+const S3D_MARKER_CULL_MARGIN_PX = 80;        // hide DOM/WebGL markers once fully outside the map
 
 function s3dThree() {
   return window.THREE || null;
@@ -1180,6 +1181,11 @@ function s3dCreateArrowLayer() {
       for (const [key, item] of map3dDomMarkers.entries()) {
         if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
         seen.add(key);
+        if (item.onScreen === false) {
+          const hiddenModel = this.models.get(key);
+          if (hiddenModel) hiddenModel.visible = false;
+          continue;
+        }
         const type = getResolvedType(item.popupData || {});
         const color = s3dResolveColor(s3dMarkerColor(item), THEME.accent);
         const templateKey = s3dTemplateKey(type, color);
@@ -1191,6 +1197,7 @@ function s3dCreateArrowLayer() {
           this.models.set(key, model);
           this.scene.add(model);
         }
+        model.visible = true;
         const elevation = s3dRenderAltitude(item.lon, item.lat, item.alt);
         const mc = maplibregl.MercatorCoordinate.fromLngLat([item.lon, item.lat], elevation);
         // Convert the model to a fixed on-screen size at every zoom. The
@@ -1566,7 +1573,21 @@ function s3dProject3DPoint(lng, lat, altMSL) {
 function s3dUpdateDomMarkerPosition(item) {
   if (!item || !item.el || !map3d) return;
   const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
-  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+    item.onScreen = false;
+    item.el.style.display = 'none';
+    return;
+  }
+  // Leaflet culls outside markers in 2D. The 3D custom layer positions DOM and
+  // WebGL markers itself, so cull them by projected screen position here too.
+  // The margin covers the marker plus its name/HUD before hiding it.
+  const canvas = map3d.getCanvas?.();
+  const width = map3d.transform?.width || canvas?.clientWidth || 0;
+  const height = map3d.transform?.height || canvas?.clientHeight || 0;
+  const margin = S3D_MARKER_CULL_MARGIN_PX;
+  item.onScreen = !width || !height ||
+    (pt.x >= -margin && pt.x <= width + margin && pt.y >= -margin && pt.y <= height + margin);
+  item.el.style.display = item.onScreen ? '' : 'none';
   // The arrowhead itself is rotated in WebGL. Keep the DOM hit target and its
   // name screen-aligned so the label always reads below the marker, whatever
   // the map bearing or pitch.
@@ -1594,6 +1615,7 @@ function s3dMarkerGeometry() {
   // itself is drawn in the three.js custom layer at its true 3D altitude.
   for (const [key, item] of map3dDomMarkers.entries()) {
     if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
+    if (item.onScreen === false) continue;
     const ground = s3dQueryTerrainElevation(item.lon, item.lat) ?? 0;
     features.push({
       type: 'Feature',
@@ -1708,11 +1730,24 @@ function s3dUpdateDomLabelsCollision() {
   }
 }
 
+function s3dCloseOffscreenPopups() {
+  if (!map3dActive) return;
+  for (const [key, st] of map3dDomPopupState.entries()) {
+    if (!st.popup?.isOpen()) continue;
+    const item = map3dDomMarkers.get(key);
+    // 3D popups are centred in the map instead of pinned to the marker, so an
+    // open popup would otherwise keep showing an aircraft that has left (or
+    // never entered) the visible viewport.
+    if (!item || item.onScreen === false) st.popup.remove();
+  }
+}
+
 function s3dScheduleLabelUpdate() {
   if (s3dDomMarkerSyncRaf !== null) return;
   s3dDomMarkerSyncRaf = requestAnimationFrame(() => {
     s3dDomMarkerSyncRaf = null;
     s3dUpdateDomMarkerPositions();
+    s3dCloseOffscreenPopups();
     s3dSyncMarkerGeometry();
     s3dUpdateDomLabelsCollision();
   });
