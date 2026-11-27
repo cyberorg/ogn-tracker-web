@@ -273,6 +273,14 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 @media (hover:none){
   .map-wrap .leaflet-control-view3d-btn:hover{background:var(--control-bg)!important;color:var(--text)!important;border-color:var(--line)!important}
 }
+.leaflet-control-compass3d{margin-top:6px}
+.leaflet-control-compass3d[hidden]{display:none!important}
+.leaflet-control-compass3d:has(button.maplibregl-ctrl-compass:focus-visible){outline:2px solid var(--focus);outline-offset:2px}
+.leaflet-control-compass3d .maplibregl-ctrl-group{background:transparent;border:0;box-shadow:none;border-radius:7px;overflow:hidden}
+.leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass{width:30px;height:30px;padding:0;background:var(--control-bg);border:1px solid var(--line);border-radius:7px;box-shadow:0 1px 5px #0009;color:var(--text);cursor:pointer}
+.leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass:hover,
+.leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass:active{background:var(--hover);border-color:var(--accent);color:var(--accent)}
+.leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass .maplibregl-ctrl-icon{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='29' height='29' viewBox='0 0 29 29'%3E%3Cpath fill='%23edf4f8' d='m10.5 14 4-8 4 8z'/%3E%3Cpath fill='%239aabba' d='m10.5 16 4 8 4-8z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:center}
 .map-wrap:fullscreen,.map-wrap.map-fullscreen{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;z-index:2000;background:var(--bg)}
 .map-wrap:fullscreen #map,.map-wrap.map-fullscreen #map{width:100%;height:100%}
 .map-wrap:fullscreen #map3d,.map-wrap.map-fullscreen #map3d{width:100%;height:100%}
@@ -341,7 +349,7 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .sounding-refresh{width:24px;height:24px;padding:0;border:0;border-radius:5px;background:var(--control-bg);color:var(--muted);font-size:16px;line-height:24px}
 .sounding-refresh:hover,.sounding-refresh:focus-visible{background:var(--hover);color:var(--accent)}
 .sounding-refresh:disabled{cursor:default;opacity:.7}
-.sounding-refresh.loading{color:var(--yellow);animation:sounding-spin 1s linear infinite}
+.sounding-refresh.loading{background:transparent;color:var(--yellow);animation:sounding-spin 1s linear infinite}
 @keyframes sounding-spin{to{transform:rotate(360deg)}}
 .sounding-body{display:grid;gap:6px}
 .sounding-pills{display:flex;flex-wrap:wrap;gap:4px}

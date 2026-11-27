@@ -1870,7 +1870,10 @@ function ensure3DMap() {
     showToast('3D map could not start.');
     return false;
   }
-  map3d.addControl(new maplibregl.NavigationControl({ visualizePitch: true, showCompass: true, showZoom: false }), 'bottom-left');
+  // Keep MapLibre's native compass, but host it in the Leaflet control stack so
+  // it sits directly under the 2D/3D toggle instead of at the map's bottom-left.
+  const compassControl = new maplibregl.NavigationControl({ visualizePitch: true, showCompass: true, showZoom: false });
+  compass3DControl.getContainer().appendChild(compassControl.onAdd(map3d));
   map3d.on('load', () => {
     setup3DLayers();
     map3dReady = true;
@@ -2201,6 +2204,20 @@ const ViewModeControl = L.Control.extend({
 });
 const view3DModeControl = new ViewModeControl().addTo(map);
 
+// The native MapLibre compass is appended here when the 3D map is created, so
+// it stacks immediately below the 2D/3D toggle and is hidden in 2D mode.
+const Compass3DControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd: function () {
+    const container = L.DomUtil.create('div', 'leaflet-control-compass3d');
+    container.hidden = !map3dActive;
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.disableScrollPropagation(container);
+    return container;
+  }
+});
+const compass3DControl = new Compass3DControl().addTo(map);
+
 function syncViewModeControl() {
   const button = view3DModeControl?._button;
   if (!button) return;
@@ -2210,6 +2227,8 @@ function syncViewModeControl() {
   button.setAttribute('aria-label', title);
   button.setAttribute('aria-pressed', String(map3dActive));
   button.classList.toggle('active', map3dActive);
+  const compass = compass3DControl.getContainer();
+  if (compass) compass.hidden = !map3dActive;
 }
 
 function toggle3DView() {
