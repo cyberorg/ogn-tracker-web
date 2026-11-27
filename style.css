@@ -1,4 +1,4 @@
-:root{color-scheme:dark;--bg:#101923;--control-bg:#101923;--panel:#17232f;--panel2:#1d2c39;--header:#111d28;--line:#2b3d4c;--muted:#9aabba;--muted-dim:#7f93a3;--muted-light:#c7d4dc;--muted-soft:#b7c7d2;--text:#edf4f8;--accent:#57d3b0;--yellow:#f5c451;--red:#f07878;--down-red:#ff8e8e;--focus:#38bdf8;--hover:#263b4b;--disabled:#6b7d8c;--close:#757575;--close-hover:#585858;--alert-line:#3a2027;--danger-bg:#3d1118;--danger-text:#ffe5e5;--table-line:#22313e;--track-bg:#223442;--card-head:#14202b;--hero-border:#2a4354;--up-bg:#10332b;--bar-label:#d8e4eb;--tip-text:#dbe6ec;--measure-dot:#eaf6ff;--type-unknown:#9aabba;--type-glider:#ffb84d;--type-tow:#5aa9ff;--type-heli:#b79cff;--type-para:#f5a15e;--type-paraglider:#57d3b0;--type-drop:#6fc3ff;--type-hang:#f5c451;--type-powered:#4d8dff;--type-jet:#3f6fd8;--type-ufo:#a3e635;--type-balloon:#e879f9;--type-airship:#c084fc;--type-drone:#f08ec3;--type-station:#7f93a3;--type-ultralight:#38bdf8;--overlay-z:1050;--emergency-z:999999}
+:root{color-scheme:dark;--edge-gutter:8px;--bg:#101923;--control-bg:#101923;--panel:#17232f;--panel2:#1d2c39;--header:#111d28;--line:#2b3d4c;--muted:#9aabba;--muted-dim:#7f93a3;--muted-light:#c7d4dc;--muted-soft:#b7c7d2;--text:#edf4f8;--accent:#57d3b0;--yellow:#f5c451;--red:#f07878;--down-red:#ff8e8e;--focus:#38bdf8;--hover:#263b4b;--disabled:#6b7d8c;--close:#757575;--close-hover:#585858;--alert-line:#3a2027;--danger-bg:#3d1118;--danger-text:#ffe5e5;--table-line:#22313e;--track-bg:#223442;--card-head:#14202b;--hero-border:#2a4354;--up-bg:#10332b;--bar-label:#d8e4eb;--tip-text:#dbe6ec;--measure-dot:#eaf6ff;--type-unknown:#9aabba;--type-glider:#ffb84d;--type-tow:#5aa9ff;--type-heli:#b79cff;--type-para:#f5a15e;--type-paraglider:#57d3b0;--type-drop:#6fc3ff;--type-hang:#f5c451;--type-powered:#4d8dff;--type-jet:#3f6fd8;--type-ufo:#a3e635;--type-balloon:#e879f9;--type-airship:#c084fc;--type-drone:#f08ec3;--type-station:#7f93a3;--type-ultralight:#38bdf8;--overlay-z:1050;--emergency-z:999999}
 *{box-sizing:border-box}html,body{height:100%;margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
 .sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
@@ -18,7 +18,7 @@ button{cursor:pointer;font-size:13px}button:hover{border-color:var(--accent)}but
 .icon-close--corner{position:absolute;top:0;right:0}
 .tool-link{font:inherit;color:var(--text);background:var(--control-bg);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:13px;text-decoration:none;white-space:nowrap}
 .tool-link:hover{border-color:var(--accent)}
-.toolbar-menu-control{position:absolute;top:10px;left:40px;z-index:var(--overlay-z);display:inline-flex;color:var(--text)}
+.toolbar-menu-control{position:absolute;top:var(--edge-gutter);left:38px;z-index:var(--overlay-z);display:inline-flex;color:var(--text)}
 .toolbar-menu-toggle{position:relative;width:30px;height:30px;padding:0;display:grid;place-items:center;background:var(--control-bg);border:1px solid var(--line);border-left:0;border-radius:0 7px 7px 0;color:var(--text);font-size:18px;line-height:1;cursor:pointer}
 .toolbar-menu-toggle:hover,.toolbar-menu-toggle[aria-expanded="true"]{background:var(--hover);color:var(--accent)}
 .toolbar-menu-panel,.map-filter-panel{position:absolute;top:calc(100% + 6px);left:0;right:auto;z-index:var(--overlay-z);padding:8px;background:#17232ff7;border:1px solid var(--focus);border-radius:9px;box-shadow:0 6px 20px #000b;color:var(--text)}
@@ -56,14 +56,20 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .map-wrap{position:relative;height:100%;width:100%;min-height:0}
 #map{height:100%;width:100%;background:#dce5e8}
 .map-wrap.has-bottom-bar #map{height:calc(100% - var(--bottom-bar-space,0px))}
-.emerg-banner{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:var(--emergency-z);background:#3d1118f2;border:1px solid var(--red);color:var(--danger-text);padding:7px 24px 7px 12px;border-radius:9px;display:none;align-items:center;gap:10px;box-shadow:0 4px 16px #000a;font-size:12px;max-width:calc(100% - 24px)}
+#map3d{position:absolute;inset:0;width:100%;height:100%;z-index:400;background:var(--bg)}
+#map3d[hidden]{display:none!important}
+.map-wrap.has-bottom-bar #map3d{height:calc(100% - var(--bottom-bar-space,0px))}
+.map-wrap.view3d #map .leaflet-map-pane{visibility:hidden}
+.map-wrap .leaflet-control-attribution{display:none!important}
+.emerg-banner{position:absolute;top:var(--edge-gutter);left:50%;transform:translateX(-50%);z-index:var(--emergency-z);background:#3d1118f2;border:1px solid var(--red);color:var(--danger-text);padding:7px 24px 7px 12px;border-radius:9px;display:none;align-items:center;gap:10px;box-shadow:0 4px 16px #000a;font-size:12px;max-width:calc(100% - 16px)}
 .emerg-banner.show{display:flex}
 .emerg-banner button{background:var(--red);color:#1a070a;border:0;font-weight:700;padding:4px 9px;font-size:11px;border-radius:6px}
 .baro-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px;margin-bottom:4px}
 .baro-head strong{min-width:0}
 .baro-svg{width:100%;height:70px;display:block;cursor:crosshair;touch-action:none;border-radius:4px}
-.replay-bar{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:var(--overlay-z);background:#17232ff5;border:1px solid var(--focus);border-radius:10px;padding:9px 24px 9px 12px;width:min(720px,calc(100% - 110px));box-shadow:0 4px 16px #000a;display:none;align-items:center;gap:6px;font-size:12px;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.replay-bar{position:absolute;bottom:var(--edge-gutter);left:50%;transform:translateX(-50%);z-index:var(--overlay-z);background:#17232ff5;border:1px solid var(--focus);border-radius:10px;padding:9px 24px 9px 12px;width:min(720px,calc(100% - 110px));box-shadow:0 4px 16px #000a;display:none;align-items:center;gap:6px;font-size:12px;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
 .replay-bar.show{display:flex}
+.replay-bar .icon-close--corner{right:-1px}
 .replay-bar input[type=range]{flex:1;padding:0;background:transparent;border:0}
 .replay-timeline{display:flex;align-items:center;gap:3px;flex:1;min-width:0}
 .replay-slider-wrap{position:relative;flex:1;display:flex;align-items:center;min-width:60px}
@@ -117,6 +123,9 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .aircraft:focus-visible{outline:2px solid var(--focus);outline-offset:-2px;background:#213341}
 .aircraft.pinned{background:#1b2c38}.aircraft.pinned:hover,.aircraft.pinned.selected{background:#233948}
 .aircraft.emergency{background:#2b151a}.aircraft.emergency:hover,.aircraft.emergency.selected{background:#3a1c23}
+.aircraft.focused{box-shadow:inset 2px 0 #ec4899}
+.aircraft.focused:not(.emergency){background:#2a1530}
+.aircraft.focused.selected:not(.emergency),.aircraft.focused:hover:not(.emergency){background:#351a30}
 .stripe{border-radius:8px;background:var(--accent)}
 .callsign{font-weight:700;font-size:13px;display:flex;align-items:center;gap:6px}.track-dot{width:9px;height:9px;border-radius:50%;flex:none;box-shadow:0 0 0 2px var(--bg)}
 .pin-btn{background:transparent;border:1px solid transparent;padding:2px 6px;border-radius:5px;font-size:12px;line-height:1;color:var(--muted);opacity:.7;cursor:pointer;flex:none;min-width:24px;min-height:24px;filter:grayscale(1)}
@@ -142,10 +151,10 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .footer{border-top:1px solid var(--line);padding:10px 13px;color:var(--muted);font-size:10px}
 .footer-link{color:var(--accent);text-decoration:none}
 .footer-link:hover{text-decoration:underline}
-.scroll-list-top-btn{position:absolute;right:16px;bottom:54px;z-index:950;display:grid;place-items:center;width:38px;height:38px;padding:0;border-radius:50%;background:var(--control-bg);border:1px solid var(--accent);color:var(--accent);font-size:20px;line-height:1;box-shadow:0 3px 12px #000a}
+.scroll-list-top-btn{position:absolute;right:var(--edge-gutter);bottom:54px;z-index:950;display:grid;place-items:center;width:38px;height:38px;padding:0;border-radius:50%;background:var(--control-bg);border:1px solid var(--accent);color:var(--accent);font-size:20px;line-height:1;box-shadow:0 3px 12px #000a}
 .scroll-list-top-btn[hidden]{display:none}
 .scroll-list-top-btn:hover{background:#1d3f3a;color:#fff}
-.app-toast{position:fixed;right:12px;bottom:12px;z-index:2200;background:#17232ff2;border:1px solid var(--focus);color:var(--text);padding:8px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 14px #0009;opacity:0;transform:translateY(6px);transition:opacity .16s ease,transform .16s ease;pointer-events:none}
+.app-toast{position:fixed;right:var(--edge-gutter);bottom:var(--edge-gutter);z-index:2200;background:#17232ff2;border:1px solid var(--focus);color:var(--text);padding:8px 12px;border-radius:8px;font-size:12px;box-shadow:0 4px 14px #0009;opacity:0;transform:translateY(6px);transition:opacity .16s ease,transform .16s ease;pointer-events:none}
 .app-toast.show{opacity:1;transform:translateY(0)}
 .ins-page{max-width:800px;margin:0 auto;padding:12px 12px 36px}
 .ins-error{background:var(--danger-bg);border:1px solid var(--red);color:var(--danger-text);padding:14px;border-radius:10px;margin:20px auto;max-width:700px}
@@ -155,7 +164,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .map-wrap.has-bottom-bar .leaflet-popup-content{max-height:var(--popup-max-h,min(70dvh,560px))}
 .popup-pane-raised{position:absolute;left:0;top:0;z-index:var(--overlay-z)}
 .leaflet-fade-anim .popup-pane-raised .leaflet-popup{opacity:1!important}
-.popup-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.popup-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-bottom:10px;border-bottom:1px solid var(--line)}
 .popup-baro{margin-top:10px;padding:7px 8px;background:var(--bg);border:1px solid var(--line);border-radius:7px}
 .popup-baro .baro-head{margin-bottom:3px;font-size:10px;color:var(--muted)}
 .popup-baro .baro-head strong{font-weight:700;white-space:normal}
@@ -172,15 +181,51 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .glider-icon.show-name .glider-label{opacity:1;visibility:visible}
 .replay-icon{background:transparent;border:0;overflow:visible;width:16px;height:16px}
 .replay-dot{width:12px;height:12px;margin:2px;border-radius:50%;background:var(--accent);border:2px solid var(--focus);box-shadow:0 1px 5px #0009}
-.replay-dot.focused{width:16px;height:16px;margin:0;background:#ec4899;border-color:#f472b6}
+.replay-dot.focused{width:16px;height:16px;margin:0;background:#ec4899;border-color:#f472b6;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa,0 1px 5px #0009}
 .replay-icon .glider-label{top:calc(100% + 3px)}
 .replay-hud{left:50%;top:calc(100% + 24px);transform:translateX(-50%);z-index:2}
+/* Focused/followed aircraft: pink halo + always-on name and metric HUD. */
+.glider-wrap.focused{--marker-color:#f472b6;border-color:#f472b6;background:#2a1530e8;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa,0 2px 8px #0008}
+.glider-wrap.focused svg{fill:#f472b6}
+.leaflet-marker-icon.glider-icon.focused,.leaflet-marker-icon.replay-icon.focused{z-index:9999!important}
+.glider-icon.focused .glider-label,.ogn-3d-dom-marker.focused .glider-label{opacity:1;visibility:visible}
+.ogn-3d-dom-marker.focused .glider-wrap{border:1px solid #f472b6!important;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa!important}
+.focus-hud .hud-line{font-variant-numeric:tabular-nums}
 .glider-wrap.emergency{background:#3d1118ee;border:2px solid var(--red);animation:emergency-pulse 1.4s ease-out infinite}
 .glider-wrap.emergency svg{fill:#ff6b6b;stroke:#ffe0e0}
 @keyframes emergency-pulse{0%{box-shadow:0 0 0 0 rgba(240,120,120,.85)}70%{box-shadow:0 0 0 14px rgba(240,120,120,0)}100%{box-shadow:0 0 0 0 rgba(240,120,120,0)}}
 .ogn-cluster{background:transparent;border:0}.ogn-cluster div{width:34px;height:34px;border-radius:50%;background:#10212dee;border:2px solid var(--yellow);color:var(--text);font:700 13px/30px system-ui,sans-serif;text-align:center;box-shadow:0 2px 10px #000a}
 .leaflet-control-attribution{font-size:10px!important;background:var(--control-bg)!important;color:var(--muted)!important;padding:2px 6px!important;border-radius:6px 0 0 0}
 .leaflet-control-attribution a{color:var(--accent)!important}
+/* One 8px gutter for every Leaflet map control, in both 2D and 3D. */
+.map-wrap .leaflet-top .leaflet-control{margin-top:var(--edge-gutter)}
+.map-wrap .leaflet-bottom .leaflet-control{margin-bottom:var(--edge-gutter)}
+.map-wrap .leaflet-left .leaflet-control{margin-left:var(--edge-gutter)}
+.map-wrap .leaflet-right .leaflet-control{margin-right:var(--edge-gutter)}
+.map-wrap .maplibregl-ctrl-top-left .maplibregl-ctrl{margin:var(--edge-gutter) 0 0 var(--edge-gutter)}
+.map-wrap .maplibregl-ctrl-top-right .maplibregl-ctrl{margin:var(--edge-gutter) var(--edge-gutter) 0 0}
+.map-wrap .maplibregl-ctrl-bottom-left .maplibregl-ctrl{margin:0 0 var(--edge-gutter) var(--edge-gutter)}
+.map-wrap .maplibregl-ctrl-bottom-right .maplibregl-ctrl{margin:0 var(--edge-gutter) var(--edge-gutter) 0}
+/* One attribution button serves 2D and 3D. It lives in .map-wrap so its open
+   panel stacks with the Leaflet controls instead of below the 3D canvas. */
+.map-wrap .map-attribution{position:absolute;right:var(--edge-gutter);bottom:var(--edge-gutter);margin:0;z-index:1000;background:var(--control-bg)!important;color:var(--muted)!important;font-size:10px;border-radius:12px;box-shadow:0 1px 5px #0009}
+.map-wrap .map-attribution.maplibregl-compact{margin:0;max-width:calc(100% - 16px)}
+.map-wrap .map-attribution a{color:var(--accent)!important}
+.map-wrap .map-attribution .maplibregl-ctrl-attrib-button{filter:invert(1)}
+.map-wrap .map-attribution .maplibregl-ctrl-attrib-inner{line-height:1.35}
+.map-wrap .map-attribution .ogn-attrib-line+ .ogn-attrib-line{margin-top:3px}
+.map-wrap .map-attribution .ogn-attrib-line strong{color:var(--text);font-weight:600}
+.map-wrap .map-attribution.maplibregl-compact-show .maplibregl-ctrl-attrib-inner{max-height:min(38vh,260px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.map-wrap .map-attribution[open]{touch-action:none}
+.map-wrap.has-bottom-bar .map-attribution{bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px))}
+.ogn-3d-dom-marker{position:absolute;left:0;top:0;z-index:5;cursor:pointer;overflow:visible;user-select:none;will-change:transform}
+.ogn-3d-dom-marker.focused{z-index:20!important}
+.ogn-3d-dom-marker .glider-wrap{background:transparent!important;border:0!important;box-shadow:none!important}
+.ogn-3d-dom-marker .glider-wrap>svg{display:none!important}
+.ogn-3d-dom-marker .glider-label{top:calc(100% + 4px);transform:translateX(-50%);opacity:0;visibility:hidden}
+.ogn-3d-dom-marker.show-name .glider-label{opacity:1;visibility:visible}
+.ogn-3d-popup-pane{position:absolute;inset:0;z-index:var(--overlay-z);overflow:visible;background:transparent!important;pointer-events:none}
+.ogn-3d-leaflet-popup{opacity:1!important;transform:translate(-50%,-50%);margin-bottom:0!important;pointer-events:auto}
 .leaflet-tooltip{background:var(--control-bg);color:var(--text);border:1px solid var(--line);border-radius:7px;box-shadow:0 1px 5px #0009;padding:5px 8px;font:12px/1.35 system-ui,sans-serif}
 .leaflet-tooltip-top:before{border-top-color:var(--line)}
 .leaflet-tooltip-bottom:before{border-bottom-color:var(--line)}
@@ -218,14 +263,24 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .leaflet-control-locate-btn:hover{background:var(--hover);color:var(--accent)}
 .leaflet-control-locate-btn:disabled{background:var(--control-bg);color:var(--disabled);cursor:default}
 .leaflet-control-locate-btn svg{display:block}
+.leaflet-control-view3d{margin-top:6px}
+.leaflet-control-view3d-btn{width:30px;height:30px;padding:0;display:grid;place-items:center;background:var(--control-bg);border:1px solid var(--line);border-radius:7px;box-shadow:0 1px 5px #0009;color:var(--text);font:700 18px/1 system-ui,sans-serif;cursor:pointer}
+/* The label itself (3D/2D) is the mode indicator; no separate selected styling. */
+.leaflet-control-view3d-btn.active{background:var(--control-bg);color:var(--text);border-color:var(--line)}
+@media (hover:hover){.leaflet-control-view3d-btn:hover{background:var(--hover);color:var(--accent)}}
+/* Touch taps leave :hover stuck, so never keep the highlight on a touch screen. */
+@media (hover:none){
+  .map-wrap .leaflet-control-view3d-btn:hover{background:var(--control-bg)!important;color:var(--text)!important;border-color:var(--line)!important}
+}
 .map-wrap:fullscreen,.map-wrap.map-fullscreen{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;z-index:2000;background:var(--bg)}
 .map-wrap:fullscreen #map,.map-wrap.map-fullscreen #map{width:100%;height:100%}
-.map-filter-control{position:absolute;top:10px;left:10px;z-index:var(--overlay-z);color:var(--text)}
+.map-wrap:fullscreen #map3d,.map-wrap.map-fullscreen #map3d{width:100%;height:100%}
+.map-filter-control{position:absolute;top:var(--edge-gutter);left:var(--edge-gutter);z-index:var(--overlay-z);color:var(--text)}
 .map-filter-toggle{position:relative;width:30px;height:30px;padding:0;display:grid;place-items:center;background:var(--control-bg);border:1px solid var(--line);border-radius:7px 0 0 7px;color:var(--text);font-size:18px;line-height:1;cursor:pointer}
 .map-filter-toggle:hover,.map-filter-toggle[aria-expanded="true"]{background:var(--hover);color:var(--accent)}
 .map-filter-toggle svg{display:block;width:16px;height:16px;fill:currentColor}
 .map-filter-toggle.has-badge::after{content:"";position:absolute;top:4px;right:4px;width:7px;height:7px;border-radius:50%;background:var(--yellow);box-shadow:0 0 6px #f5c451aa}
-.vario-legend{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:500;display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;background:var(--control-bg);border:1px solid var(--line);box-shadow:0 2px 10px #0009;pointer-events:none}
+.vario-legend{position:absolute;top:var(--edge-gutter);left:50%;transform:translateX(-50%);z-index:500;display:flex;align-items:center;gap:6px;padding:4px 9px;border-radius:999px;background:var(--control-bg);border:1px solid var(--line);box-shadow:0 2px 10px #0009;pointer-events:none}
 .vario-legend[hidden]{display:none}
 .vario-legend:not([hidden]) ~ .emerg-banner.show{top:44px}
 .vario-legend:not([hidden]) ~ .recenter-btn:not([hidden]){top:82px}
@@ -234,7 +289,7 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .recenter-btn{position:absolute;top:52px;left:50%;transform:translateX(-50%);z-index:900;padding:6px 12px;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--yellow);font-size:12px;font-weight:700;box-shadow:0 1px 5px #0009}
 .recenter-btn:hover{background:var(--hover);border-color:var(--line);color:var(--accent)}
 .recenter-btn[hidden]{display:none}
-.scroll-to-list-btn{display:none;position:absolute;bottom:calc(18px + var(--bottom-bar-space,0px));left:50%;transform:translateX(-50%);z-index:900;width:44px;height:32px;padding:0;place-items:center;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--accent);font-size:22px;line-height:1;box-shadow:0 1px 5px #0009}
+.scroll-to-list-btn{display:none;position:absolute;bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px));left:50%;transform:translateX(-50%);z-index:900;width:44px;height:32px;padding:0;place-items:center;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--accent);font-size:22px;line-height:1;box-shadow:0 1px 5px #0009}
 .scroll-to-list-btn:hover{background:var(--hover);border-color:var(--line)}
 .map-filter-panel{width:254px;max-height:calc(100dvh - 110px);overflow-y:auto}
 .map-filter-panel[hidden]{display:none}
@@ -275,9 +330,9 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .bookmark-save-row[hidden]{display:none}
 .bookmark-save-row input{flex:1;min-width:0;padding:4px 6px;font-size:12px}
 .bookmark-save-row button{padding:4px 7px;font-size:11px}
-.sounding-panel{position:absolute;top:52px;right:10px;z-index:var(--overlay-z);width:min(295px,calc(100vw - 20px));max-height:calc(100% - 150px);overflow-y:auto;padding:9px 24px 9px 10px;background:var(--panel);border:1px solid var(--focus);border-radius:9px;box-shadow:0 4px 16px #000a;font-size:11px}
+.sounding-panel{position:absolute;top:52px;right:var(--edge-gutter);z-index:var(--overlay-z);width:min(295px,calc(100vw - 16px));max-height:calc(100% - 150px);overflow-y:auto;padding:9px 24px 9px 10px;background:var(--panel);border:1px solid var(--focus);border-radius:9px;box-shadow:0 4px 16px #000a;font-size:11px}
 .sounding-panel[hidden]{display:none}
-.sounding-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.sounding-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
 .sounding-title{display:flex;flex-direction:column;gap:1px;min-width:0}
 .sounding-head strong{font-size:12px}
 .sounding-updated{font-size:9px;color:var(--muted)}
@@ -314,13 +369,13 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .measure-dot.dragging>span{cursor:grabbing}
 .map-wrap:has(.emerg-banner.show) .measure-readout{top:88px}
 @media(max-width:800px){
-  .shortcuts-modal{position:fixed;top:54px;right:8px;width:min(258px,calc(100vw - 16px))}
+  .shortcuts-modal{position:fixed;top:54px;right:var(--edge-gutter);width:min(258px,calc(100vw - 16px))}
   .toolbar-menu-panel,.map-filter-panel{padding:7px}
   .toolbar-menu-panel{position:fixed;top:44px;left:38px;right:auto;width:min(220px,calc(100vw - 46px));max-height:calc(100dvh - 56px);overflow:auto}
-  .map-filter-control{top:8px;left:8px}
-  .toolbar-menu-control{top:8px;left:38px}
+  .map-filter-control{top:var(--edge-gutter);left:var(--edge-gutter)}
+  .toolbar-menu-control{top:var(--edge-gutter);left:38px}
   .map-filter-panel{left:0;width:min(248px,calc(100vw - 16px));max-height:calc(82dvh - 56px)}
-  .sounding-panel{top:52px;right:8px;max-height:calc(82dvh - 190px)}
+  .sounding-panel{top:52px;right:var(--edge-gutter);max-height:calc(82dvh - 190px)}
   .map-wrap:has(.emerg-banner.show) .sounding-panel{top:96px;max-height:calc(82dvh - 230px)}
   .measure-readout{top:52px;max-width:calc(100% - 20px);font-size:10px}
   .map-wrap:has(.emerg-banner.show) .measure-readout{top:88px}
@@ -349,14 +404,15 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
   html.list-mode .footer{flex:0 0 auto}
   .brand{min-width:0}.status{margin-left:0}.toolbar{order:3;flex-basis:100%}
   main{display:block;height:auto}
-  .map-wrap{height:82vh;height:82dvh}
+  /* Leave only the status line of the sidebar peeking below the map. */
+  .map-wrap{height:calc(100vh - var(--header-h) - 26px);height:calc(100dvh - var(--header-h) - 26px)}
   .sidebar{border-left:0;border-top:1px solid var(--line);height:auto}
   .filters{grid-template-columns:1fr auto}
   .filters input,.filters select{font-size:16px}
   .aircraft-list{display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow:visible}
   .aircraft{padding:9px}.pin-btn{opacity:.85}
   /* Floating card: compact controls on row 1, time slider on row 2. */
-  .replay-bar{left:8px;right:8px;width:auto;max-width:none;transform:none;bottom:54px;flex-wrap:wrap;justify-content:center;padding:6px 24px 4px 8px;gap:5px}
+  .replay-bar{left:8px;right:8px;width:auto;max-width:none;transform:none;bottom:44px;flex-wrap:wrap;justify-content:center;padding:6px 24px 4px 8px;gap:5px}
   .replay-bar button{padding:5px 7px;font-size:11px;min-width:0;min-height:28px}
   #replayPrevTrack,#replayNextTrack,#replayRange{min-width:0}
   .replay-timeline{flex:1 1 100%;order:10;min-width:0}
@@ -372,3 +428,16 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .map-wrap button:not(.icon-close):not(:disabled):hover,
 .map-wrap a.tool-link:hover{color:var(--accent)}
 .map-wrap .emerg-banner button:not(.icon-close):hover{color:#1a070a}
+
+.leaflet-control-reset-camera{margin-top:6px}
+.leaflet-control-reset-camera-btn{width:30px;height:30px;padding:0;display:flex;align-items:center;justify-content:center;background:var(--control-bg);border:1px solid var(--line);border-radius:7px;color:var(--text);box-shadow:0 1px 5px #0009;cursor:pointer}
+.leaflet-control-reset-camera-btn:hover{background:var(--hover);color:var(--accent)}
+.map-wrap:not(.view3d) .leaflet-control-reset-camera{display:none}
+.ogn-3d-popup .maplibregl-popup-content{min-width:170px}
+.ogn-3d-popup-actions{display:flex;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
+.ogn-3d-popup-actions button{padding:3px 7px;font-size:11px;border-radius:5px}
+/* Keep equal 8 px gaps between layers, scale and the shared attribution button. */
+.leaflet-bottom.leaflet-right .leaflet-control-scale{margin-bottom:var(--edge-gutter)}
+/* Leaflet attribution is hidden, so lift the corner further to leave room for
+   the shared (i) button below the scale in both 2D and 3D. */
+.map-wrap .leaflet-bottom.leaflet-right{transform:translateY(-34px)}

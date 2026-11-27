@@ -9,7 +9,8 @@
 <title>OGN Tracker</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="style.css?v=20261126zzd">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="style.css?v=20261126zz3d48">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -151,6 +152,7 @@
       <div id="soundingBody" class="sounding-body"></div>
     </div>
     <div id="map" aria-label="Map showing live OGN aircraft"></div>
+    <div id="map3d" aria-label="3D map showing live OGN aircraft" hidden></div>
     <div id="measureReadout" class="measure-readout" role="status" aria-live="polite" hidden></div>
     <div id="varioLegend" class="vario-legend" role="img" aria-label="Vario colour scale from sink to climb" hidden>
       <span id="varioLegendLow" class="vario-legend-label"></span>
@@ -231,7 +233,9 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script src="tz-lookup.js?v=20261126zzd"></script>
-<script src="app.js?v=20261126zzd"></script>
+<script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="tz-lookup.js?v=20261126zz3d48"></script>
+<script src="app.js?v=20261126zz3d48"></script>
 </body>
 </html>

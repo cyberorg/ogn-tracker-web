@@ -83,6 +83,7 @@ let savedMarkerWindow = '900';
 let savedTrackWindow = '900';
 let savedVarioTrackMode = false;
 let savedBaroEnabled = false;
+let savedView3d = false;
 let savedBaseLayer = 'terrain';
 let savedOverlays = [];
 let listSort = 'name';
@@ -126,6 +127,7 @@ try {
     baroEnabled = prefs.baroEnabled;
   }
   if (typeof prefs.baseLayer === 'string' && prefs.baseLayer) savedBaseLayer = prefs.baseLayer;
+  if (typeof prefs.view3d === 'boolean') savedView3d = prefs.view3d;
   if (Array.isArray(prefs.overlays)) savedOverlays = prefs.overlays.filter(v => typeof v === 'string');
   if (['name', 'type', 'climb', 'latest'].includes(prefs.listSort)) listSort = prefs.listSort;
   if (prefs.replayTimeMode === 'track') replayTimeMode = 'track';
@@ -193,6 +195,7 @@ function saveMenuPrefs() {
       trackWindow: $('trackWindow').value,
       varioTrackMode,
       baroEnabled,
+      view3d: map3dActive,
       baseLayer: savedBaseLayer,
       overlays: savedOverlays,
       listSort,
@@ -231,6 +234,9 @@ function applySavedMenuPrefs() {
   syncBaroButton();
   updateSearchUi();
   updateFilterBadge();
+  // Restore the view mode on load and on reconnect (feed recovery, tab focus,
+  // online event) so a 3D selection survives disconnects and reloads.
+  if (savedView3d !== map3dActive) toggle3DView();
 }
 
 function resetFilters() {
@@ -348,7 +354,7 @@ if (location.hash.length > 1) {
   const lat = parseFloat(parts[0]), lon = parseFloat(parts[1]), z = parseInt(parts[2], 10);
   if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(z)) {
     initialCenter = [lat, lon];
-    initialZoom = Math.max(2, Math.min(18, z));
+    initialZoom = Math.max(1, Math.min(16, z));
     if (parts[3]) {
       pendingHashSelect = decodeURIComponent(parts[3]).toLowerCase();
       hashSelectAddress = pendingHashSelect;
@@ -357,17 +363,17 @@ if (location.hash.length > 1) {
 }
 
 const terrainLayer = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-  maxNativeZoom: 17, maxZoom: 19,
+  maxNativeZoom: 16, maxZoom: 16,
   attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
 });
 const satelliteLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-  maxZoom: 19, attribution: 'Tiles &copy; Esri'
+  maxZoom: 16, attribution: 'Tiles &copy; Esri'
 });
 const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  maxZoom: 16, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
 });
 
-const map = L.map('map', { zoomControl: false, closePopupOnClick: false, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
+const map = L.map('map', { zoomControl: false, closePopupOnClick: false, minZoom: 1, maxZoom: 16, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
 
 // Locate lives on the map, stacked above the zoom control at bottom-left.
 const LocateControl = L.Control.extend({
@@ -392,6 +398,31 @@ const LocateControl = L.Control.extend({
 // locate control second to keep locate stacked above the zoom buttons.
 L.control.zoom({ position: 'bottomleft' }).addTo(map);
 new LocateControl().addTo(map);
+
+// Reset camera sits directly above Locate; it is only useful in the 3D view.
+const ResetCameraControl = L.Control.extend({
+  options: { position: 'bottomleft' },
+  onAdd: function () {
+    const container = L.DomUtil.create('div', 'leaflet-control-reset-camera');
+    const button = L.DomUtil.create('button', 'leaflet-control-reset-camera-btn', container);
+    button.type = 'button';
+    button.id = 'resetCamera';
+    button.title = 'Reset camera tilt & north';
+    button.setAttribute('aria-label', button.title);
+    button.innerHTML =
+      '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
+      '<circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/>' +
+      '<path d="M12 5.5 14.4 12 12 10.2 9.6 12Z" fill="currentColor"/>' +
+      '</svg>';
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.on(button, 'click', event => {
+      L.DomEvent.preventDefault(event);
+      if (map3dReady) map3d.easeTo({ pitch: 58, bearing: 0, duration: 350 });
+    });
+    return container;
+  }
+});
+new ResetCameraControl().addTo(map);
 
 const FullscreenControl = L.Control.extend({
   options: { position: 'topright' },
@@ -465,7 +496,7 @@ function syncMapFullscreenUi() {
   button.setAttribute('aria-label', active ? 'Restore map' : 'Maximize map');
   button.title = active ? 'Restore map' : 'Maximize map';
   button.setAttribute('aria-pressed', String(active));
-  requestAnimationFrame(() => map.invalidateSize());
+  requestAnimationFrame(() => { map.invalidateSize(); resize3D(); });
 }
 
 function syncClearTracksButton() {
@@ -480,7 +511,1450 @@ syncMapFullscreenUi();
 
 raisePopupPane();
 
+/* Additive MapLibre 3D view. Leaflet remains the source of truth for aircraft,
+   tracks, replay state, and UI; the MapLibre canvas mirrors it when enabled. */
+const MAP3D_DEM_URL = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+// One shared base-layer choice drives both maps: the Leaflet layer in 2D and
+// the MapLibre style in 3D.
+const BASE_TO_3D = { osm: 'liberty', terrain: 'topo', satellite: 'satellite' };
+const VIEW3D_TO_BASE = { liberty: 'osm', topo: 'terrain', satellite: 'satellite' };
+const MAP3D_BASE_STYLES = {
+  liberty: 'https://tiles.openfreemap.org/styles/liberty',
+  satellite: {
+    version: 8,
+    sources: {
+      esri: {
+        type: 'raster',
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+        tileSize: 256,
+        maxzoom: 19,
+        attribution: 'Tiles &copy; Esri'
+      }
+    },
+    layers: [{ id: 'esri-sat', type: 'raster', source: 'esri' }]
+  },
+  topo: {
+    version: 8,
+    sources: {
+      opentopo: {
+        type: 'raster',
+        tiles: ['https://a.tile.opentopomap.org/{z}/{x}/{y}.png', 'https://b.tile.opentopomap.org/{z}/{x}/{y}.png', 'https://c.tile.opentopomap.org/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        maxzoom: 17,
+        attribution: 'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> | Map style: &copy; <a href="https://opentopomap.org">OpenTopoMap</a>'
+      }
+    },
+    layers: [{ id: 'opentopo-base', type: 'raster', source: 'opentopo' }]
+  }
+};
+// A clear daytime sky: blue overhead fading to a pale haze at the horizon.
+// MapLibre resets sky with the style, so it is reapplied after each style load.
+const S3D_SKY = Object.freeze({
+  'sky-color': '#5aa9e6',
+  'sky-horizon-blend': 0.35,
+  'horizon-color': '#eef5f8',
+  'horizon-fog-blend': 0.25,
+  'fog-color': '#dce9f0',
+  'fog-ground-blend': 0.15,
+  'atmosphere-blend': 0
+});
+const S3D_DEM = 'ogn-3d-dem';
+const S3D_TRACKS = 'ogn-3d-tracks';
+const S3D_CURTAINS = 'ogn-3d-curtains';
+const S3D_AIRSPACE = 'ogn-3d-airspace';
+const S3D_THERMALS = 'ogn-3d-thermals';
+const S3D_REPLAY_TRACK = 'ogn-3d-replay-track';
+const S3D_REPLAY_PROGRESS = 'ogn-3d-replay-progress';
+const S3D_MARKERS = 'ogn-3d-markers';
+const S3D_ARROWHEADS = 'ogn-3d-arrowheads';
+// Aircraft are drawn at true MSL altitude, but never below the DEM surface.
+const S3D_MARKER_CLEARANCE_M = 12;
+const S3D_TERRAIN_SAMPLE_MIN_M = 20;
+const S3D_TERRAIN_SAMPLE_MAX_M = 120;
+const S3D_EMPTY_FC = Object.freeze({ type: 'FeatureCollection', features: [] });
+const s3dFeatureCollection = features => ({ type: 'FeatureCollection', features });
+
+let map3d = null;
+let map3dReady = false;
+let map3dActive = false;
+let map3dBaseKey = BASE_TO_3D[savedBaseLayer] || 'liberty';
+
+// One attribution button serves both 2D and 3D. Its open panel always shows
+// every credit, using each provider's requested wording, regardless of the
+// selected base layer or view.
+const MAP_ATTRIBUTION_HTML = `
+<div class="ogn-attrib-line"><strong>Libraries:</strong>
+  <a href="https://leafletjs.com/" target="_blank" rel="noopener">Leaflet</a> © 2010-2023 Vladimir Agafonkin, © 2010-2011 CloudMade (<a href="https://github.com/Leaflet/Leaflet/blob/v1.9.4/LICENSE" target="_blank" rel="noopener">BSD-2-Clause license</a>) |
+  <a href="https://maplibre.org/" target="_blank" rel="noopener">MapLibre GL JS</a> © 2023 MapLibre contributors (<a href="https://github.com/maplibre/maplibre-gl-js/blob/v5.6.1/LICENSE.txt" target="_blank" rel="noopener">BSD-3-Clause license</a>; includes <a href="https://github.com/mapbox/mapbox-gl-js/blob/v1.13.3/LICENSE.txt" target="_blank" rel="noopener">Mapbox GL JS</a> © 2020 Mapbox and <a href="https://github.com/evanw/glfx.js/blob/master/LICENSE" target="_blank" rel="noopener">glfx.js</a> © 2011 Evan Wallace) |
+  <a href="https://threejs.org/" target="_blank" rel="noopener">three.js</a> © 2010-2023 Three.js Authors (<a href="https://github.com/mrdoob/three.js/blob/r160/LICENSE" target="_blank" rel="noopener">MIT license</a>)
+</div>
+<div class="ogn-attrib-line"><strong>Map data:</strong>
+  © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> (<a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">ODbL</a>) |
+  <a href="https://openfreemap.org/#attribution" target="_blank" rel="noopener">OpenFreeMap</a> (<a href="https://github.com/hyperknot/openfreemap/blob/main/LICENSE.md" target="_blank" rel="noopener">MIT license</a>) © <a href="https://www.openmaptiles.org/" target="_blank" rel="noopener">OpenMapTiles</a> (<a href="https://github.com/openmaptiles/openmaptiles/blob/master/LICENSE.md" target="_blank" rel="noopener">BSD + CC-BY license</a>) Data from <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> |
+  Map data: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a>, <a href="https://www.viewfinderpanoramas.org/" target="_blank" rel="noopener">SRTM</a> | Map style: © <a href="https://opentopomap.org/credits" target="_blank" rel="noopener">OpenTopoMap</a> (<a href="https://creativecommons.org/licenses/by-sa/3.0/" target="_blank" rel="noopener">CC-BY-SA</a>) |
+  Tiles © <a href="https://www.esri.com/en-us/legal/copyright-trademarks" target="_blank" rel="noopener">Esri</a> — <a href="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer" target="_blank" rel="noopener">Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community</a> (<a href="https://www.esri.com/en-us/legal/terms/full-master-agreement" target="_blank" rel="noopener">terms</a>)
+</div>
+<div class="ogn-attrib-line"><strong>Terrain:</strong>
+  <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener">Terrain Tiles</a> © <a href="https://mapzen.com/rights" target="_blank" rel="noopener">Mapzen</a> / <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener">Tilezen</a> / <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener">AWS Open Data</a> — <a href="https://github.com/tilezen/joerd/blob/master/docs/attribution.md" target="_blank" rel="noopener">required source attributions</a>:
+  <a href="https://nga.maps.arcgis.com/apps/MapSeries/index.html?appid=cf2fba21df7540fb981f8836f2a97e25" target="_blank" rel="noopener">ArcticDEM terrain data</a> DEM(s) were created from DigitalGlobe, Inc., imagery and funded under National Science Foundation awards 1043681, 1559691, and 1542736;
+  <a href="https://ecat.ga.gov.au/geonetwork/srv/eng/search#!22be4b55-2465-4320-e053-10a3070a5236" target="_blank" rel="noopener">Australia terrain data</a> © <a href="https://www.ga.gov.au/" target="_blank" rel="noopener">Commonwealth of Australia (Geoscience Australia)</a> 2017 (<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>);
+  <a href="https://www.data.gv.at/katalog/dataset/b5de6975-417b-4320-afdb-eb2a9e2a1dbf" target="_blank" rel="noopener">Austria terrain data</a> © offene Daten Österreichs – <a href="https://www.data.gv.at/katalog/dataset/b5de6975-417b-4320-afdb-eb2a9e2a1dbf" target="_blank" rel="noopener">Digitales Geländemodell (DGM) Österreich</a> (<a href="https://creativecommons.org/licenses/by/3.0/at/deed.de" target="_blank" rel="noopener">CC BY 3.0 AT</a>);
+  <a href="https://ftp.maps.canada.ca/pub/nrcan_rncan/elevation/cdem_mnec/doc/CDEM_product_specs.pdf" target="_blank" rel="noopener">Canada terrain data</a> contains information licensed under the <a href="https://open.canada.ca/en/open-government-licence-canada" target="_blank" rel="noopener">Open Government Licence – Canada</a>;
+  <a href="https://www.eea.europa.eu/en/datahub/datahubitem-view/d08852bc-7b5f-4835-a776-08362e2fbf4b" target="_blank" rel="noopener">Europe terrain data</a> produced using Copernicus data and information funded by the European Union - <a href="https://www.eea.europa.eu/en/datahub/datahubitem-view/d08852bc-7b5f-4835-a776-08362e2fbf4b" target="_blank" rel="noopener">EU-DEM layers</a>;
+  <a href="https://www.ncei.noaa.gov/products/etopo-global-relief-model" target="_blank" rel="noopener">Global ETOPO1 terrain data</a> <a href="https://www.ncei.noaa.gov/products/etopo-global-relief-model" target="_blank" rel="noopener">U.S. National Oceanic and Atmospheric Administration</a>;
+  <a href="https://en.www.inegi.org.mx/temas/relieve/continental" target="_blank" rel="noopener">Mexico terrain data</a> source: <a href="https://en.www.inegi.org.mx/temas/relieve/continental" target="_blank" rel="noopener">INEGI, Continental relief, 2016</a> (<a href="https://en.www.inegi.org.mx/inegi/terminos.html" target="_blank" rel="noopener">free use terms</a>);
+  <a href="https://data.linz.govt.nz/layer/1768-nz-8m-digital-elevation-model-2012/" target="_blank" rel="noopener">New Zealand terrain data</a> Copyright 2011 Crown copyright (c) <a href="https://data.linz.govt.nz/" target="_blank" rel="noopener">Land Information New Zealand and the New Zealand Government</a> (All rights reserved) (<a href="https://data.linz.govt.nz/license/attribution-3-0-new-zealand/" target="_blank" rel="noopener">CC BY 3.0 NZ</a>);
+  <a href="https://data.norge.no/nb/datasets/2ab68d79-bc7a-35cc-8c1d-752e512e0f3a/dtm-10-terrengmodell-utm33-historisk" target="_blank" rel="noopener">Norway terrain data</a> © <a href="https://www.kartverket.no/api-og-data" target="_blank" rel="noopener">Kartverket</a> (<a href="https://creativecommons.org/licenses/by/4.0/deed.no" target="_blank" rel="noopener">CC BY 4.0</a>);
+  <a href="https://www.data.gov.uk/dataset/e529ca2f-b4ce-403e-8cef-ab821061c4f3/lidar-composite-digital-terrain-model-dtm-2m" target="_blank" rel="noopener">United Kingdom terrain data</a> © <a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/" target="_blank" rel="noopener">Environment Agency copyright and/or database right 2015. All rights reserved.</a> (<a href="https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/" target="_blank" rel="noopener">OGL v3</a>);
+  <a href="https://www.usgs.gov/faqs/where-can-i-find-3d-elevation-program-3dep-product-updates-and-status-maps" target="_blank" rel="noopener">United States 3DEP (formerly NED)</a> and global <a href="https://www.usgs.gov/centers/eros/science/usgs-eros-archive-digital-elevation-global-multi-resolution-terrain-elevation" target="_blank" rel="noopener">GMTED2010</a> and <a href="https://www.usgs.gov/centers/eros/science/usgs-eros-archive-digital-elevation-shuttle-radar-topography-mission-srtm" target="_blank" rel="noopener">SRTM</a> terrain data courtesy of the <a href="https://www.usgs.gov/information-policies-and-instructions/acknowledging-or-crediting-usgs" target="_blank" rel="noopener">U.S. Geological Survey</a>.
+  Terrain Tiles was accessed on 2026-11-27 from <a href="https://registry.opendata.aws/terrain-tiles/" target="_blank" rel="noopener">https://registry.opendata.aws/terrain-tiles/</a>.
+</div>`;
+const mapAttributionEl = document.createElement('details');
+mapAttributionEl.id = 'mapAttribution';
+mapAttributionEl.className = 'maplibregl-ctrl maplibregl-ctrl-attrib maplibregl-compact ogn-3d-attrib map-attribution';
+mapAttributionEl.innerHTML =
+  '<summary class="maplibregl-ctrl-attrib-button" title="Toggle attribution" aria-label="Toggle attribution"></summary>' +
+  '<div class="maplibregl-ctrl-attrib-inner">' + MAP_ATTRIBUTION_HTML + '</div>';
+$('mapWrap').appendChild(mapAttributionEl);
+const mapAttributionInner = mapAttributionEl.querySelector('.maplibregl-ctrl-attrib-inner');
+function updateMapAttribution() {
+  // Kept as the single refresh hook for callers; the full list is static.
+  mapAttributionInner.innerHTML = MAP_ATTRIBUTION_HTML;
+}
+mapAttributionEl.addEventListener('toggle', () => {
+  mapAttributionEl.classList.toggle('maplibregl-compact-show', mapAttributionEl.open);
+});
+// The whole attribution control owns scroll gestures while open — including
+// the (i) button and padding, not just the text — so neither the map nor the
+// aircraft list can steal them.
+mapAttributionEl.addEventListener('wheel', event => {
+  if (!mapAttributionEl.open) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (mapAttributionInner.scrollHeight <= mapAttributionInner.clientHeight + 1) return;
+  const step = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? mapAttributionInner.clientHeight : 1;
+  mapAttributionInner.scrollTop += event.deltaY * step;
+}, { passive: false });
+let attribTouchY = 0;
+mapAttributionEl.addEventListener('touchstart', event => {
+  attribTouchY = event.touches[0]?.clientY ?? 0;
+}, { passive: true });
+mapAttributionEl.addEventListener('touchmove', event => {
+  if (!mapAttributionEl.open) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (mapAttributionInner.scrollHeight <= mapAttributionInner.clientHeight + 1) return;
+  const y = event.touches[0]?.clientY ?? attribTouchY;
+  mapAttributionInner.scrollTop += attribTouchY - y;
+  attribTouchY = y;
+}, { passive: false });
+
+let s3dStyleSwapSeq = 0;
+let ignoreLeaflet3DSyncUntil = 0;
+let ignoreMap3DSyncUntil = 0;
+let s3dDomMarkerSyncRaf = null;
+let s3dTerrainRefreshRaf = null;
+let s3dMarkerGeoJsonSig = '';
+let s3dArrowLayer = null;
+const s3dTerrainElevationCache = new Map();
+const map3dDomMarkers = new Map();       // key -> { el, lat, lon, alt, html, isFocus, isReplay }
+const map3dDomPopupState = new Map();    // key -> { popup, detailsOpen }
+
+function s3dResolveColor(value, fallback) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return fallback;
+  const varMatch = raw.match(/^var\(\s*(--[\w-]+)\s*\)$/);
+  if (varMatch) {
+    return getComputedStyle(document.documentElement).getPropertyValue(varMatch[1]).trim() || fallback;
+  }
+  return raw;
+}
+
+// Terrain DEM queries are cached per coordinate; the cache is cleared when DEM
+// tiles arrive or the style changes, because queryTerrainElevation() is null
+// until the relevant tile is loaded.
+function s3dQueryTerrainElevation(lng, lat) {
+  if (!map3d || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
+  if (s3dTerrainElevationCache.has(key)) return s3dTerrainElevationCache.get(key);
+  let value = null;
+  try {
+    const queried = map3d.queryTerrainElevation?.([lng, lat]);
+    if (typeof queried === 'number' && Number.isFinite(queried)) value = queried;
+  } catch (err) {}
+  if (s3dTerrainElevationCache.size > 4000) s3dTerrainElevationCache.clear();
+  s3dTerrainElevationCache.set(key, value);
+  return value;
+}
+
+function s3dWrapLon(lon) {
+  return ((lon + 180) % 360 + 360) % 360 - 180;
+}
+
+// The arrowhead is a fixed screen-space size, so its ground footprint grows as
+// the map zooms out. Cap the sample radius to keep low-zoom markers reasonable.
+function s3dTerrainSampleRadiusM(lat) {
+  const zoom = Number.isFinite(map3d?.getZoom?.()) ? map3d.getZoom() : 14;
+  const metersPerPixel = 40075016.686 * Math.cos(lat * Math.PI / 180) /
+    (512 * Math.pow(2, zoom));
+  return Math.min(S3D_TERRAIN_SAMPLE_MAX_M,
+    Math.max(S3D_TERRAIN_SAMPLE_MIN_M, metersPerPixel * S3D_ARROW_PX * 0.5));
+}
+
+// Highest DEM sample under the marker footprint, including nearby slope.
+function s3dTerrainMaxM(lng, lat) {
+  const radius = s3dTerrainSampleRadiusM(lat);
+  const dLat = radius / 111320;
+  const dLon = radius / (111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
+  const clampLat = x => Math.max(-89.9, Math.min(89.9, x));
+  const samples = [
+    [lng, lat],
+    [lng, clampLat(lat + dLat)],
+    [lng, clampLat(lat - dLat)],
+    [s3dWrapLon(lng + dLon), lat],
+    [s3dWrapLon(lng - dLon), lat]
+  ];
+  let max = null;
+  for (const [x, y] of samples) {
+    const value = s3dQueryTerrainElevation(x, y);
+    if (value == null || !Number.isFinite(value)) continue;
+    max = max == null ? value : Math.max(max, value);
+  }
+  return max;
+}
+
+// Visual altitude only. The real aircraft altitude in the popup/list is never
+// changed, so a below-terrain fix is still reported honestly.
+function s3dRenderAltitude(lng, lat, altMSL) {
+  const ground = s3dTerrainMaxM(lng, lat);
+  const alt = Number.isFinite(altMSL) ? Number(altMSL) : null;
+  if (alt == null) return ground ?? 0;
+  if (ground == null) return alt;
+  return Math.max(alt, ground + S3D_MARKER_CLEARANCE_M);
+}
+
+function s3dScheduleTerrainRefresh() {
+  if (s3dTerrainRefreshRaf !== null) return;
+  s3dTerrainRefreshRaf = requestAnimationFrame(() => {
+    s3dTerrainRefreshRaf = null;
+    s3dTerrainElevationCache.clear();
+    s3dScheduleLabelUpdate();
+    if (map3dActive) sync3DTracks();
+  });
+}
+
+function s3dLineFeature(coords, color) {
+  return {
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: coords },
+    properties: { color: s3dResolveColor(color, THEME.accent) }
+  };
+}
+
+// Long tracks otherwise produce hundreds of overlapping 3D curtain segments,
+// which look like a wall of lines. Keep the endpoints and sample evenly.
+function s3dSimplifyPoints(points, maxPoints) {
+  const valid = (points || []).filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (valid.length <= maxPoints) return valid;
+  const out = [];
+  for (let i = 0; i < maxPoints; i++) {
+    out.push(valid[Math.round(i * (valid.length - 1) / (maxPoints - 1))]);
+  }
+  return out;
+}
+
+// --- Native 3D arrowheads and smooth track lines --------------------------
+// MapLibre symbol/fill-extrusion layers cannot place a real 3D model at an
+// arbitrary MSL altitude. A custom WebGL layer puts a small procedural
+// arrowhead, and its track, directly in Mercator 3D space. three.js is MIT
+// licensed and needs no API key.
+const S3D_ARROW_LEN = 12;       // model units; rescaled every frame to fixed pixels
+const S3D_ARROW_WIDTH = 9;
+const S3D_ARROW_HEIGHT = 3.5;
+const S3D_ARROW_PX = 20;        // on-screen arrowhead size at every zoom
+const S3D_TRACK_PX = S3D_ARROW_PX / 10;      // slim continuous track line (2 px)
+const S3D_PROGRESS_PX = S3D_TRACK_PX * 1.25; // replay progress is only slightly heavier
+
+function s3dThree() {
+  return window.THREE || null;
+}
+
+function s3dBuildArrowheadModel(colorHex) {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  const base = new THREE.Color(s3dResolveColor(colorHex, THEME.accent));
+  const ridgeColor = base.clone().offsetHSL(0, 0, 0.16);
+  const tip = [0, S3D_ARROW_LEN / 2, 0];
+  const backLeft = [-S3D_ARROW_WIDTH / 2, -S3D_ARROW_LEN / 2, 0];
+  const backRight = [S3D_ARROW_WIDTH / 2, -S3D_ARROW_LEN / 2, 0];
+  const ridge = [0, 0, S3D_ARROW_HEIGHT];
+  // A four-vertex tetrahedron reads as a 3D arrowhead from any camera angle:
+  // two lit top faces, one flat underside, and a raised centre ridge.
+  const verts = [tip, backLeft, ridge, tip, ridge, backRight, tip, backRight, backLeft];
+  const faceColors = [
+    base, base, ridgeColor,
+    base, ridgeColor, base,
+    base, base, base
+  ];
+  const positions = [];
+  const colors = [];
+  for (let i = 0; i < verts.length; i++) {
+    positions.push(...verts[i]);
+    colors.push(faceColors[i].r, faceColors[i].g, faceColors[i].b);
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geom.computeVertexNormals();
+  const arrow = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.DoubleSide,
+    transparent: true, opacity: 1, depthTest: true, depthWrite: true
+  }));
+  arrow.frustumCulled = false;
+  // Track tubes never write depth and render first; aircraft render after them.
+  arrow.renderOrder = 1;
+
+  const edgePositions = [];
+  for (const [a, b] of [
+    [tip, backLeft], [backLeft, backRight], [backRight, tip],
+    [tip, ridge], [backLeft, ridge], [backRight, ridge]
+  ]) edgePositions.push(...a, ...b);
+  const edgeGeom = new THREE.BufferGeometry();
+  edgeGeom.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
+  const edges = new THREE.LineSegments(edgeGeom, new THREE.LineBasicMaterial({
+    color: 0x0b121a, transparent: true, opacity: 0.7,
+    depthTest: true, depthWrite: false
+  }));
+  edges.frustumCulled = false;
+  edges.renderOrder = 2;
+
+  const group = new THREE.Group();
+  group.add(arrow, edges);
+  group.userData.color = colorHex;
+  return group;
+}
+
+function s3dDisposeObject(obj) {
+  obj.traverse?.(child => {
+    child.geometry?.dispose?.();
+    if (Array.isArray(child.material)) child.material.forEach(m => m.dispose?.());
+    else child.material?.dispose?.();
+  });
+}
+
+function s3dCurveFromPoints(points) {
+  const THREE = s3dThree();
+  if (!THREE || !window.maplibregl?.MercatorCoordinate) return null;
+  const valid = s3dSimplifyPoints(points, 160);
+  if (valid.length < 2) return null;
+  const vecs = valid.map(p => {
+    const elevation = s3dRenderAltitude(p[1], p[0], p[2]);
+    const mc = maplibregl.MercatorCoordinate.fromLngLat([p[1], p[0]], elevation);
+    return new THREE.Vector3(mc.x, mc.y, mc.z);
+  });
+  // Centripetal Catmull-Rom keeps the line continuous and smooth without the
+  // overshoot that a uniform spline can introduce on uneven GPS sampling.
+  return new THREE.CatmullRomCurve3(vecs, false, 'centripetal', 0.5);
+}
+
+function s3dCurvePoints(points) {
+  const curve = s3dCurveFromPoints(points);
+  if (!curve) return null;
+  return curve.getPoints(Math.min(420, Math.max(2, curve.points.length * 2)));
+}
+
+function s3dLineRadius(points, widthPx) {
+  const valid = (points || []).find(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (!valid || !window.maplibregl?.MercatorCoordinate || !map3d) return 0;
+  const mc = maplibregl.MercatorCoordinate.fromLngLat([valid[1], valid[0]]);
+  const metersPerPixel = 40075016.686 * Math.cos(valid[0] * Math.PI / 180) /
+    (512 * Math.pow(2, map3d.getZoom()));
+  return mc.meterInMercatorCoordinateUnits() * metersPerPixel * (widthPx || S3D_TRACK_PX) / 2;
+}
+
+// TubeGeometry bakes its radius into world-space vertices, which would make a
+// line look thicker as the map zooms in. Keep the path fixed and rescale only
+// the offset of each ring vertex from its centre point as the zoom changes.
+function s3dResizeThreeLines(zoom) {
+  if (!s3dArrowLayer?.lines || !Number.isFinite(zoom)) return;
+  for (const group of Object.values(s3dArrowLayer.lines)) {
+    for (const tube of group.children || []) {
+      const info = tube.userData.lineGeom;
+      if (!info) continue;
+      const radius = info.baseRadius * Math.pow(2, info.baseZoom - zoom);
+      if (!(radius > 0) || Math.abs(radius - info.currentRadius) / info.currentRadius < 1e-4) continue;
+      const ratio = radius / info.baseRadius;
+      const pos = tube.geometry.attributes.position.array;
+      const base = info.basePositions;
+      const centers = info.centers;
+      const stride = info.ringStride;
+      for (let ring = 0; ring < centers.length / 3; ring++) {
+        const cx = centers[ring * 3], cy = centers[ring * 3 + 1], cz = centers[ring * 3 + 2];
+        for (let k = 0; k < stride; k += 3) {
+          const idx = ring * stride + k;
+          pos[idx] = cx + (base[idx] - cx) * ratio;
+          pos[idx + 1] = cy + (base[idx + 1] - cy) * ratio;
+          pos[idx + 2] = cz + (base[idx + 2] - cz) * ratio;
+        }
+      }
+      tube.geometry.attributes.position.needsUpdate = true;
+      info.currentRadius = radius;
+    }
+  }
+}
+
+function s3dCreateArrowLayer() {
+  const THREE = s3dThree();
+  if (!THREE) return null;
+  const lines = {
+    tracks: new THREE.Group(),
+    replay: new THREE.Group(),
+    progress: new THREE.Group()
+  };
+  return {
+    id: S3D_ARROWHEADS,
+    type: 'custom',
+    renderingMode: '3d',
+    models: new Map(),
+    lines,
+    onAdd(map, gl) {
+      this.map = map;
+      this.camera = new THREE.Camera();
+      this.scene = new THREE.Scene();
+      this.scene.add(lines.tracks, lines.replay, lines.progress);
+      this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
+      this.renderer.autoClear = false;
+    },
+    render(gl, args) {
+      const matrix = args?.defaultProjectionData?.mainMatrix;
+      if (!matrix || !this.renderer || !this.scene || !map3dDomMarkers) return;
+      s3dResizeThreeLines(this.map.getZoom());
+      const seen = new Set();
+      for (const [key, item] of map3dDomMarkers.entries()) {
+        if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
+        seen.add(key);
+        const color = s3dResolveColor(s3dMarkerColor(item), THEME.accent);
+        let model = this.models.get(key);
+        if (!model || model.userData.color !== color) {
+          if (model) { this.scene.remove(model); s3dDisposeObject(model); }
+          model = s3dBuildArrowheadModel(color);
+          if (!model) continue;
+          this.models.set(key, model);
+          this.scene.add(model);
+        }
+        const elevation = s3dRenderAltitude(item.lon, item.lat, item.alt);
+        const mc = maplibregl.MercatorCoordinate.fromLngLat([item.lon, item.lat], elevation);
+        // Convert the model to a fixed on-screen size at every zoom. The world
+        // size shrinks as the map zooms in, so the arrowhead stays the same
+        // pixel size while its origin remains exactly at lat/lon/altitude.
+        const metersPerPixel = 40075016.686 * Math.cos(item.lat * Math.PI / 180) /
+          (512 * Math.pow(2, this.map.getZoom()));
+        const unit = mc.meterInMercatorCoordinateUnits();
+        const scaleFactor = metersPerPixel * S3D_ARROW_PX / S3D_ARROW_LEN;
+        const course = Number(item.popupData?.course);
+        const rot = Number.isFinite(course) ? -course * Math.PI / 180 : 0;
+        const m = new THREE.Matrix4()
+          .makeTranslation(mc.x, mc.y, mc.z)
+          .scale(new THREE.Vector3(unit * scaleFactor, -unit * scaleFactor, unit * scaleFactor))
+          .multiply(new THREE.Matrix4().makeRotationZ(rot));
+        model.matrixAutoUpdate = false;
+        model.matrix.copy(m);
+      }
+      for (const [key, model] of [...this.models.entries()]) {
+        if (seen.has(key)) continue;
+        this.scene.remove(model);
+        s3dDisposeObject(model);
+        this.models.delete(key);
+      }
+      this.camera.projectionMatrix.fromArray(matrix);
+      this.camera.projectionMatrixInverse.copy(this.camera.projectionMatrix).invert();
+      this.renderer.resetState();
+      this.renderer.render(this.scene, this.camera);
+    },
+    onRemove() {
+      for (const model of this.models.values()) s3dDisposeObject(model);
+      this.models.clear();
+      this.renderer?.dispose();
+    }
+  };
+}
+
+// One colour per fix, using the same climb buckets as the flat 2D track.
+function s3dVarioTrackColors(points, fallbackColor) {
+  const n = points?.length || 0;
+  const colors = new Array(n).fill(fallbackColor);
+  if (!varioTrackMode || n < 2) return colors;
+  for (let i = 1; i < n; i++) {
+    const p0 = points[i - 1], p1 = points[i];
+    const t0 = Number(p0[3]), t1 = Number(p1[3]);
+    const dt = t1 - t0;
+    const climb = (Number.isFinite(p0[2]) && Number.isFinite(p1[2]) &&
+      Number.isFinite(t0) && Number.isFinite(t1) && dt > 0 && dt < 300)
+      ? (p1[2] - p0[2]) / dt : null;
+    colors[i] = varioColor(climb);
+  }
+  colors[0] = colors[1];
+  return colors;
+}
+
+function s3dApplyVarioVertexColors(geom, curve, steps, colors, fallbackColor, THREE) {
+  if (!varioTrackMode || !colors || colors.length < 2) return false;
+  const radial = geom.parameters?.radialSegments ?? 5;
+  const count = geom.attributes.position.count;
+  const expected = (steps + 1) * (radial + 1);
+  if (count !== expected) return false;
+  const palette = colors.map(c => new THREE.Color(s3dResolveColor(c, fallbackColor)));
+  const attr = new Float32Array(count * 3);
+  for (let i = 0; i <= steps; i++) {
+    const f = (i / steps) * (colors.length - 1);
+    const a = Math.min(colors.length - 1, Math.floor(f));
+    const b = Math.min(colors.length - 1, a + 1);
+    const c = palette[a].clone().lerp(palette[b], f - a);
+    for (let j = 0; j <= radial; j++) {
+      const k = (i * (radial + 1) + j) * 3;
+      attr[k] = c.r;
+      attr[k + 1] = c.g;
+      attr[k + 2] = c.b;
+    }
+  }
+  geom.setAttribute('color', new THREE.BufferAttribute(attr, 3));
+  return true;
+}
+
+function s3dReplaceThreeLines(group, segments) {
+  const THREE = s3dThree();
+  if (!group || !THREE) return;
+  const lineOrder = s3dArrowLayer?.lines?.tracks === group ? -3
+    : s3dArrowLayer?.lines?.replay === group ? -2 : -1;
+  for (const child of [...group.children]) {
+    group.remove(child);
+    s3dDisposeObject(child);
+  }
+  for (const seg of segments || []) {
+    const curve = s3dCurveFromPoints(seg.points);
+    if (!curve) continue;
+    const radius = s3dLineRadius(seg.points, seg.widthPx ?? S3D_TRACK_PX);
+    if (!(radius > 0)) continue;
+    const valid = s3dSimplifyPoints(seg.points, 160);
+    const fallback = s3dResolveColor(seg.color, THEME.accent);
+    const pointColors = s3dVarioTrackColors(valid, fallback);
+    const steps = Math.min(420, Math.max(2, curve.points.length * 2));
+    const geom = new THREE.TubeGeometry(curve, steps, radius, 5, false);
+    const hasVario = s3dApplyVarioVertexColors(geom, curve, steps, pointColors, fallback, THREE);
+    const mat = new THREE.MeshBasicMaterial({
+      color: hasVario ? 0xffffff : new THREE.Color(fallback),
+      vertexColors: hasVario,
+      transparent: true,
+      opacity: seg.opacity ?? 0.95,
+      depthTest: true,
+      depthWrite: false
+    });
+    const tube = new THREE.Mesh(geom, mat);
+    // Lines render before every marker and cannot occlude one via the depth buffer.
+    tube.renderOrder = lineOrder;
+    const centers = new Float32Array((steps + 1) * 3);
+    for (let i = 0; i <= steps; i++) {
+      const c = curve.getPointAt(i / steps);
+      centers[i * 3] = c.x;
+      centers[i * 3 + 1] = c.y;
+      centers[i * 3 + 2] = c.z;
+    }
+    tube.userData.lineGeom = {
+      centers,
+      basePositions: Float32Array.from(geom.attributes.position.array),
+      baseRadius: radius,
+      currentRadius: radius,
+      baseZoom: map3d?.getZoom() ?? 14,
+      ringStride: (geom.parameters.radialSegments + 1) * 3
+    };
+    tube.frustumCulled = false;
+    group.add(tube);
+  }
+}
+
+function s3dSyncThreeLines() {
+  if (!s3dArrowLayer?.lines) return;
+  if (!replayActive) {
+    s3dReplaceThreeLines(s3dArrowLayer.lines.tracks,
+      [...selectedTracks.values()].map(entry => ({
+        points: entry.points, color: entry.color, opacity: 0.95, widthPx: S3D_TRACK_PX
+      })));
+    s3dReplaceThreeLines(s3dArrowLayer.lines.replay, []);
+    s3dReplaceThreeLines(s3dArrowLayer.lines.progress, []);
+  } else {
+    s3dReplaceThreeLines(s3dArrowLayer.lines.tracks, []);
+    const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
+    s3dReplaceThreeLines(s3dArrowLayer.lines.replay,
+      (replayRenderSegments || []).map(seg => ({
+        points: seg.points, color, opacity: 0.55, widthPx: S3D_TRACK_PX
+      })));
+  }
+}
+
+function s3dSyncThreeProgress(perSegment) {
+  if (!s3dArrowLayer?.lines) return;
+  const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
+  s3dReplaceThreeLines(s3dArrowLayer.lines.progress,
+    (perSegment || []).map(pts => ({ points: pts, color, opacity: 1, widthPx: S3D_PROGRESS_PX })));
+}
+
+function s3dTrackPointCoords(p) {
+  return [p[1], p[0], s3dRenderAltitude(p[1], p[0], p[2])];
+}
+
+function s3dTrackLineFeature(points, color) {
+  const valid = s3dSimplifyPoints(points, 220);
+  if (valid.length < 2) return null;
+  return s3dLineFeature(valid.map(s3dTrackPointCoords), color);
+}
+
+// Fallback for browsers without the three.js custom layer. In vario mode each
+// fix pair gets the same climb bucket colour used by the flat 2D track.
+function s3dTrackLineFeatures(points, color) {
+  const valid = s3dSimplifyPoints(points, 220);
+  if (valid.length < 2) return [];
+  if (!varioTrackMode) {
+    const f = s3dTrackLineFeature(valid, color);
+    return f ? [f] : [];
+  }
+  const colors = s3dVarioTrackColors(valid, color);
+  const features = [];
+  for (let i = 1; i < valid.length; i++) {
+    const p0 = valid[i - 1], p1 = valid[i];
+    const f = s3dLineFeature([
+      s3dTrackPointCoords(p0),
+      s3dTrackPointCoords(p1)
+    ], colors[i]);
+    if (f) features.push(f);
+  }
+  return features;
+}
+
+function s3dSetData(sourceId, data) {
+  if (!map3dReady || !map3d.getSource(sourceId)) return;
+  map3d.getSource(sourceId).setData(data);
+}
+
+function s3dBind2DPopupHandlers(popupEl, key, address) {
+  if (!popupEl) return;
+  const state = map3dDomPopupState.get(key) || { popup: null, detailsOpen: false };
+  const detailsEl = popupEl.querySelector('[data-popup-details]');
+  if (detailsEl) {
+    detailsEl.open = !!state.detailsOpen;
+    detailsEl.onchange = () => {
+      state.detailsOpen = detailsEl.open;
+      map3dDomPopupState.set(key, state);
+    };
+  }
+  popupEl.querySelectorAll('.popup-actions button').forEach(btn => {
+    btn.onclick = ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const act = btn.dataset.act;
+      const addr = (btn.dataset.addr || address || '').toLowerCase();
+      if (act === 'alert-sar') {
+        const txt = btn.dataset.sar || '';
+        if (txt) copyTextToClipboard(txt, 'SAR copied');
+        return;
+      }
+      if (act === 'replay') {
+        if (!addr) return;
+        replayFollowAddress = addr;
+        replayOnlyFocus = true;
+        replayDirection = 1;
+        followCenteringPaused = false;
+        syncReplayDirectionButton();
+        syncRecenterButton();
+        $('replaySlider').value = '0';
+        lastReplayScrubValue = null;
+        if (state.popup) state.popup.remove();
+        setReplayMode(true, { startAtTrackStart: true, play: true });
+        syncReplayFollowLabel();
+        return;
+      }
+      if (act === 'track') {
+        if (!addr) return;
+        toggleSelection(addr, false);
+        const aa = findAircraftByAddress(addr);
+        if (aa && state.popup && state.popup.isOpen()) {
+          state.popup.setHTML(popup(aa));
+          s3dBind2DPopupHandlers(state.popup.getElement(), key, addr);
+        }
+      } else if (act === 'share') {
+        const base = getShareUrl();
+        const url = addr ? `${base.replace(/#.*/, '')}#${map.getCenter().lat.toFixed(4)},${map.getCenter().lng.toFixed(4)},${map.getZoom()},${encodeURIComponent(addr)}` : base;
+        copyTextToClipboard(url, 'Link copied');
+      } else if (act === 'sar') {
+        const aa = findAircraftByAddress(addr);
+        if (aa) copyTextToClipboard(buildSarText(aa), 'SAR info copied');
+      } else if (act === 'igc') {
+        downloadIgc(addr);
+      }
+    };
+  });
+}
+
+function s3dPopupPane() {
+  let pane = $('mapWrap').querySelector('.ogn-3d-popup-pane');
+  if (!pane) {
+    // The Leaflet container class gives the close button its 2D styling. The
+    // pane is a sibling of #map3d so the popup can sit above the 3D canvas.
+    pane = document.createElement('div');
+    pane.className = 'leaflet-container leaflet-popup-pane popup-pane-raised ogn-3d-popup-pane';
+    $('mapWrap').appendChild(pane);
+  }
+  return pane;
+}
+
+function s3dPositionPopup(popupEl) {
+  if (!popupEl?.isConnected) return;
+  const wrap = $('mapWrap');
+  const mapEl = map3dActive ? ($('map3d') || map3d?.getContainer()) : $('map');
+  if (!wrap || !mapEl) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  const mapRect = mapEl.getBoundingClientRect();
+  const popupRect = popupEl.getBoundingClientRect();
+  const safeBottom = popupSafeBottom(mapRect);
+  const margin = 8;
+  let targetY = mapRect.height / 2;
+  if (safeBottom != null) targetY = Math.min(targetY, safeBottom / 2);
+  targetY = Math.max(popupRect.height / 2 + margin, Math.min(targetY, mapRect.height - popupRect.height / 2 - margin));
+  popupEl.style.left = `${mapRect.left - wrapRect.left + mapRect.width / 2}px`;
+  popupEl.style.top = `${mapRect.top - wrapRect.top + targetY}px`;
+}
+
+function s3dRepositionOpenPopups() {
+  if (!map3dActive) return;
+  for (const st of map3dDomPopupState.values()) {
+    if (st.popup?.isOpen()) s3dPositionPopup(st.popup.getElement());
+  }
+}
+
+function s3dCreatePopupController(key) {
+  const el = document.createElement('div');
+  // Same markup as Leaflet's popup, so 2D and 3D share all .leaflet-popup styles.
+  el.className = 'leaflet-popup ogn-2d-in-3d-popup ogn-3d-leaflet-popup';
+  el.innerHTML = `
+    <a class="leaflet-popup-close-button" href="#close" aria-label="Close popup">&times;</a>
+    <div class="leaflet-popup-content-wrapper"><div class="leaflet-popup-content"></div></div>
+    <div class="leaflet-popup-tip-container"><div class="leaflet-popup-tip"></div></div>
+  `;
+  const contentEl = el.querySelector('.leaflet-popup-content');
+  el.querySelector('.leaflet-popup-close-button').addEventListener('click', ev => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    map3dDomPopupState.get(key)?.popup?.remove();
+  });
+  const controller = {
+    el,
+    isOpen: () => el.isConnected,
+    getElement: () => el,
+    addTo: () => {
+      s3dPopupPane().appendChild(el);
+      s3dPositionPopup(el);
+      return controller;
+    },
+    setHTML: html => {
+      const st = map3dDomPopupState.get(key);
+      const detailsEl = el.querySelector('[data-popup-details]');
+      if (detailsEl && st) st.detailsOpen = detailsEl.open;
+      contentEl.innerHTML = html;
+      s3dPositionPopup(el);
+      return controller;
+    },
+    remove: () => {
+      const st = map3dDomPopupState.get(key);
+      const detailsEl = el.querySelector('[data-popup-details]');
+      if (detailsEl && st) st.detailsOpen = detailsEl.open;
+      el.remove();
+    }
+  };
+  return controller;
+}
+
+function s3dOpenPopupForKey(key, dataObj) {
+  if (!map3d || !dataObj) return;
+  for (const [otherKey, st] of map3dDomPopupState.entries()) {
+    if (otherKey !== key && st.popup && st.popup.isOpen()) {
+      st.popup.remove();
+    }
+  }
+  let st = map3dDomPopupState.get(key) || { popup: null, detailsOpen: false };
+  if (!st.popup) st.popup = s3dCreatePopupController(key);
+  st.popup.setHTML(popup(dataObj)).addTo(map3d);
+  map3dDomPopupState.set(key, st);
+  requestAnimationFrame(() => {
+    s3dBind2DPopupHandlers(st.popup.getElement(), key, dataObj.address);
+    s3dPositionPopup(st.popup.getElement());
+  });
+}
+
+function s3dProject3DPoint(lng, lat, altMSL) {
+  if (!map3d || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  const Mc = window.maplibregl?.MercatorCoordinate;
+  const transform = map3d.transform;
+  if (Mc && transform && typeof transform.coordinatePoint === 'function' && transform._pixelMatrix3D) {
+    // Keep the DOM marker/label above the DEM surface as well as the WebGL arrow.
+    const elevation = s3dRenderAltitude(lng, lat, altMSL);
+    try {
+      return transform.coordinatePoint(
+        Mc.fromLngLat([lng, lat]),
+        elevation,
+        transform._pixelMatrix3D
+      );
+    } catch (err) {
+      // Fall through to the 2D projection if the internal matrix is unavailable.
+    }
+  }
+  return map3d.project?.([lng, lat]) || null;
+}
+
+function s3dUpdateDomMarkerPosition(item) {
+  if (!item || !item.el || !map3d) return;
+  const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+  // The arrowhead itself is rotated in WebGL. Keep the DOM hit target and its
+  // name screen-aligned so the label always reads below the marker, whatever
+  // the map bearing or pitch.
+  item.el.style.transform =
+    `translate(-50%, -50%) translate(${pt.x.toFixed(1)}px, ${pt.y.toFixed(1)}px)`;
+}
+
+function s3dUpdateDomMarkerPositions() {
+  if (!map3dActive || !map3dDomMarkers.size) return;
+  for (const item of map3dDomMarkers.values()) s3dUpdateDomMarkerPosition(item);
+}
+
+function s3dMarkerColor(item) {
+  // 3D markers use the same type colours as the aircraft-list stripes, not
+  // the per-track colour used by the flat 2D icons.
+  const typeColor = item?.popupData ? typeStripeColor(item.popupData) : null;
+  const inline = item?.el?.querySelector('.glider-wrap')?.style.getPropertyValue('--marker-color');
+  return s3dResolveColor(typeColor, s3dResolveColor(inline, THEME.accent));
+}
+
+function s3dMarkerGeometry() {
+  const features = [];
+  if (!map3d || !map3dActive) return s3dFeatureCollection(features);
+  // Only a small ground shadow is native MapLibre geometry. The arrowhead
+  // itself is drawn in the three.js custom layer at its true 3D altitude.
+  for (const [key, item] of map3dDomMarkers.entries()) {
+    if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
+    const ground = s3dQueryTerrainElevation(item.lon, item.lat) ?? 0;
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [item.lon, item.lat, ground] },
+      properties: {
+        id: key,
+        color: s3dResolveColor(s3dMarkerColor(item), THEME.accent),
+        label: item.el?.querySelector('.glider-label')?.textContent || '',
+        role: 'ground'
+      }
+    });
+  }
+  return s3dFeatureCollection(features);
+}
+
+function s3dSyncMarkerGeometry() {
+  if (!map3dReady || !map3dActive) return;
+  const source = map3d.getSource(S3D_MARKERS);
+  if (!source) return;
+  const data = s3dMarkerGeometry();
+  const sig = JSON.stringify(data.features.map(f => [f.geometry.type, f.geometry.coordinates, f.properties]));
+  if (sig === s3dMarkerGeoJsonSig) return;
+  s3dMarkerGeoJsonSig = sig;
+  source.setData(data);
+}
+
+function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) {
+  if (!map3d || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  let item = map3dDomMarkers.get(key);
+  if (!item) {
+    const el = document.createElement('div');
+    el.className = `ogn-3d-dom-marker${opts.focused ? ' focused' : ''}`;
+    el.innerHTML = iconHtml;
+    // Positioned directly from MapLibre's 3D projection each render. Using a
+    // normal MapLibre Marker would clamp the icon to the terrain surface, not
+    // to the aircraft's MSL altitude in the pitched 3D view.
+    ($('map3d') || map3d.getContainer()).appendChild(el);
+    el.addEventListener('click', ev => {
+      ev.stopPropagation();
+      if (measureMode) {
+        addMeasurePoint(lat, lon);
+        return;
+      }
+      if (opts.onClick) opts.onClick();
+      if (popupData) {
+        s3dOpenPopupForKey(key, popupData);
+      }
+    });
+    item = { el, lat, lon, alt, html: iconHtml, popupData };
+    map3dDomMarkers.set(key, item);
+  } else {
+    item.popupData = popupData;
+    if (item.html !== iconHtml) {
+      item.html = iconHtml;
+      item.el.innerHTML = iconHtml;
+    }
+    if (opts.focused != null) item.el.classList.toggle('focused', !!opts.focused);
+  }
+  item.lat = lat;
+  item.lon = lon;
+  item.alt = alt;
+  s3dUpdateDomMarkerPosition(item);
+  const st = map3dDomPopupState.get(key);
+  if (st && st.popup && st.popup.isOpen() && popupData) {
+    st.popup.setHTML(popup(popupData));
+    requestAnimationFrame(() => {
+      s3dBind2DPopupHandlers(st.popup.getElement(), key, popupData.address);
+      s3dPositionPopup(st.popup.getElement());
+    });
+  }
+}
+
+function s3dClearDomMarkers(prefix = '') {
+  for (const [key, item] of [...map3dDomMarkers.entries()]) {
+    if (!prefix || key.startsWith(prefix)) {
+      item.el.remove();
+      map3dDomMarkers.delete(key);
+    }
+  }
+}
+
+function s3dUpdateDomLabelsCollision() {
+  if (!map3dActive || !map3dDomMarkers.size) return;
+  const mapRect = $('map3d')?.getBoundingClientRect();
+  if (!mapRect) return;
+  const candidates = [];
+  for (const [key, item] of map3dDomMarkers.entries()) {
+    const el = item.el;
+    if (!el) continue;
+    el.classList.remove('show-name');
+    const iconRect = el.getBoundingClientRect();
+    if (iconRect.width <= 0 || iconRect.height <= 0) continue;
+    const label = el.querySelector('.glider-label');
+    if (!label) continue;
+    const labelRect = label.getBoundingClientRect();
+    if (labelRect.width <= 0 || labelRect.height <= 0) continue;
+    if (labelRect.left < mapRect.left + 2 || labelRect.right > mapRect.right - 2 ||
+        labelRect.top < mapRect.top + 2 || labelRect.bottom > mapRect.bottom - 2) continue;
+    const isTracked = selectedTracks.has(key.replace(/^live:/, ''));
+    const isFocus = el.classList.contains('focused') || key.startsWith('rfocus:');
+    const priority = (isFocus ? 5 : 0) + (isTracked ? 2 : 0);
+    candidates.push({ el, iconRect, labelRect, priority });
+  }
+  candidates.sort((a, b) => b.priority - a.priority ||
+    a.labelRect.left - b.labelRect.left || a.labelRect.top - b.labelRect.top);
+  const shown = [];
+  for (const c of candidates) {
+    if (candidates.some(o => o !== c && markerRectsOverlap(c.labelRect, o.iconRect, 2))) continue;
+    if (shown.some(rect => markerRectsOverlap(c.labelRect, rect, 3))) continue;
+    c.el.classList.add('show-name');
+    shown.push(c.labelRect);
+  }
+}
+
+function s3dScheduleLabelUpdate() {
+  if (s3dDomMarkerSyncRaf !== null) return;
+  s3dDomMarkerSyncRaf = requestAnimationFrame(() => {
+    s3dDomMarkerSyncRaf = null;
+    s3dUpdateDomMarkerPositions();
+    s3dSyncMarkerGeometry();
+    s3dUpdateDomLabelsCollision();
+  });
+}
+
+function setup3DLayers() {
+  // The initial load handler and a base-style swap can both finish after the
+  // first 3D activation; add the custom sources only once per style.
+  try { map3d.setSky?.(S3D_SKY); } catch (err) {}
+  s3dTerrainElevationCache.clear();
+  if (map3d.getSource(S3D_DEM)) return;
+  s3dArrowLayer = null;
+  map3d.addSource(S3D_DEM, {
+    type: 'raster-dem',
+    tiles: [MAP3D_DEM_URL],
+    encoding: 'terrarium',
+    tileSize: 256,
+    maxzoom: 15,
+    attribution: 'Terrain &copy; <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / Tilezen / AWS Open Data</a>'
+  });
+  for (const id of [S3D_TRACKS, S3D_CURTAINS, S3D_AIRSPACE, S3D_THERMALS, S3D_REPLAY_TRACK, S3D_REPLAY_PROGRESS, S3D_MARKERS]) {
+    map3d.addSource(id, { type: 'geojson', data: S3D_EMPTY_FC });
+  }
+  map3d.setTerrain({ source: S3D_DEM });
+
+  map3d.addLayer({
+    id: 'ogn-3d-thermals-heat', type: 'heatmap', source: S3D_THERMALS,
+    paint: {
+      'heatmap-weight': ['coalesce', ['get', 'intensity'], 0.5],
+      'heatmap-intensity': 1.1,
+      'heatmap-radius': 18,
+      'heatmap-opacity': 0.65,
+      'heatmap-color': [
+        'interpolate', ['linear'], ['heatmap-density'],
+        0, 'rgba(56,189,248,0)',
+        0.2, '#38bdf8',
+        0.5, THEME.yellow,
+        0.8, '#f97316',
+        1.0, '#ef4444'
+      ]
+    }
+  });
+  map3d.addLayer({
+    id: 'ogn-3d-airspace-fill', type: 'fill', source: S3D_AIRSPACE,
+    paint: { 'fill-color': THEME.yellow, 'fill-opacity': 0.14 }
+  });
+  map3d.addLayer({
+    id: 'ogn-3d-airspace-line', type: 'line', source: S3D_AIRSPACE,
+    paint: { 'line-color': THEME.yellow, 'line-width': 2 }
+  });
+  map3d.addLayer({
+    id: 'ogn-3d-track-line', type: 'line', source: S3D_TRACKS,
+    paint: {
+      'line-color': ['coalesce', ['get', 'color'], THEME.accent],
+      'line-width': S3D_TRACK_PX,
+      'line-opacity': 0.95
+    }
+  });
+  map3d.addLayer({
+    id: 'ogn-3d-replay-track-line', type: 'line', source: S3D_REPLAY_TRACK,
+    paint: {
+      'line-color': ['coalesce', ['get', 'color'], THEME.accent],
+      'line-width': S3D_TRACK_PX,
+      'line-opacity': 0.5
+    }
+  });
+  map3d.addLayer({
+    id: 'ogn-3d-replay-progress-line', type: 'line', source: S3D_REPLAY_PROGRESS,
+    paint: {
+      'line-color': ['coalesce', ['get', 'color'], THEME.accent],
+      'line-width': S3D_PROGRESS_PX,
+      'line-opacity': 0.98
+    }
+  });
+  map3d.addLayer({
+    id: 'ogn-3d-marker-ground', type: 'circle', source: S3D_MARKERS,
+    filter: ['==', ['get', 'role'], 'ground'],
+    paint: {
+      'circle-radius': 4,
+      'circle-color': ['coalesce', ['get', 'color'], THEME.accent],
+      'circle-opacity': 0.35,
+      'circle-stroke-width': 1,
+      'circle-stroke-color': '#0b121a',
+      'circle-stroke-opacity': 0.8
+    }
+  });
+  // Real 3D arrowheads and elevated track lines are drawn by a custom
+  // WebGL layer; the plain circle above only marks the ground position.
+  if (s3dThree()) {
+    s3dArrowLayer = s3dCreateArrowLayer();
+    if (s3dArrowLayer) map3d.addLayer(s3dArrowLayer);
+  }
+  s3dMarkerGeoJsonSig = '';
+}
+
+function ensure3DMap() {
+  if (map3d) return true;
+  if (!window.maplibregl) {
+    showToast('3D map could not load.');
+    return false;
+  }
+  const c = map.getCenter();
+  try {
+    map3d = new maplibregl.Map({
+      container: 'map3d',
+      style: MAP3D_BASE_STYLES[map3dBaseKey] || MAP3D_BASE_STYLES.liberty,
+      center: [c.lng, c.lat],
+      zoom: Math.max(2, Math.min(16, map.getZoom() + 1)),
+      pitch: 58,
+      bearing: 0,
+      maxPitch: 85,
+      minZoom: 2,
+      maxZoom: 16,
+      attributionControl: false,
+      antialias: true
+    });
+  } catch (err) {
+    console.warn('3D map init failed:', err);
+    map3d = null;
+    showToast('3D map could not start.');
+    return false;
+  }
+  map3d.addControl(new maplibregl.NavigationControl({ visualizePitch: true, showCompass: true, showZoom: false }), 'bottom-left');
+  map3d.on('load', () => {
+    setup3DLayers();
+    map3dReady = true;
+    resize3D();
+    syncAll3DData();
+    sync3DFromLeaflet();
+  });
+  map.on('moveend', () => {
+    if (!map3dActive || performance.now() < ignoreLeaflet3DSyncUntil) return;
+    sync3DFromLeaflet();
+  });
+  map3d.on('moveend', () => {
+    if (!map3dActive || performance.now() < ignoreMap3DSyncUntil) return;
+    syncLeafletFrom3D();
+  });
+  map3d.on('move', s3dScheduleLabelUpdate);
+  map3d.on('sourcedata', e => {
+    if (e.sourceId === S3D_DEM && e.isSourceLoaded) s3dScheduleTerrainRefresh();
+  });
+  map3d.on('click', e => {
+    const hit = map3d.queryRenderedFeatures(e.point, {
+      layers: ['ogn-3d-marker-ground']
+    })[0];
+    const key = hit?.properties?.id;
+    const item = key ? map3dDomMarkers.get(key) : null;
+    if (!item?.popupData) return;
+    if (item.popupData.address && !selectedTracks.has(item.popupData.address)) {
+      toggleSelection(item.popupData.address, false);
+    }
+    s3dOpenPopupForKey(key, item.popupData);
+  });
+  map3d.on('render', s3dScheduleLabelUpdate);
+  map3d.on('dragstart', () => { pauseFollowCentering(); });
+  // Replay playback normally keeps the camera on the followed aircraft. Pause
+  // that as soon as the user touches or scrolls the 3D map, before MapLibre's
+  // drag threshold, so panning/zooming stays possible while replay runs.
+  const pause3DFollow = () => { if (replayActive) pauseFollowCentering(); };
+  map3d.getCanvasContainer().addEventListener('pointerdown', pause3DFollow, { passive: true });
+  map3d.getCanvasContainer().addEventListener('wheel', pause3DFollow, { passive: true });
+  return true;
+}
+
+function resize3D() {
+  if (!map3dReady) return;
+  requestAnimationFrame(() => { map3d.resize(); s3dScheduleLabelUpdate(); });
+}
+
+function sync3DFromLeaflet() {
+  if (!map3dReady || !map3dActive) return;
+  const c = map.getCenter();
+  ignoreMap3DSyncUntil = performance.now() + 250;
+  map3d.jumpTo({
+    center: [c.lng, c.lat],
+    zoom: Math.max(2, Math.min(16, map.getZoom() + 1))
+  });
+  s3dScheduleLabelUpdate();
+}
+
+function syncLeafletFrom3D() {
+  if (!map3dReady || !map3dActive) return;
+  const c = map3d.getCenter();
+  ignoreLeaflet3DSyncUntil = performance.now() + 250;
+  map.setView(
+    [c.lat, c.lng],
+    Math.max(1, Math.min(16, Math.round(map3d.getZoom() - 1))),
+    { animate: false }
+  );
+}
+
+function sync3DLive(aircraftList) {
+  if (!map3d || !map3dActive) return;
+  const seen = new Set();
+  for (const a of aircraftList || []) {
+    if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
+    const key = `live:${a.address}`;
+    seen.add(key);
+    const iconHtml = markerIcon(a).options.html;
+    s3dUpsertDomMarker(key, a.lat, a.lon, a.altitude, iconHtml, a, {
+      focused: !replayActive && activeMapFocusAddress() === a.address,
+      onClick: () => {
+        if (!selectedTracks.has(a.address)) toggleSelection(a.address, false);
+      }
+    });
+  }
+  for (const [key, item] of [...map3dDomMarkers.entries()]) {
+    if (key.startsWith('live:') && !seen.has(key)) {
+      item.el.remove();
+      map3dDomMarkers.delete(key);
+    }
+  }
+  s3dScheduleLabelUpdate();
+}
+
+function sync3DTracks() {
+  if (!map3dReady) return;
+  s3dSyncThreeLines();
+  const features = [];
+  if (!s3dArrowLayer) {
+    // Fallback for browsers without three.js.
+    for (const entry of selectedTracks.values()) {
+      features.push(...s3dTrackLineFeatures(entry.points, entry.color));
+    }
+  }
+  s3dSetData(S3D_TRACKS, s3dFeatureCollection(features));
+  s3dSetData(S3D_CURTAINS, S3D_EMPTY_FC);
+}
+
+function sync3DAirspace() {
+  if (!map3dReady) return;
+  const gj = airspaceLayer.toGeoJSON();
+  s3dSetData(S3D_AIRSPACE, gj && Array.isArray(gj.features) ? gj : S3D_EMPTY_FC);
+}
+
+function sync3DThermals(points) {
+  if (!map3dReady) return;
+  if (!map.hasLayer(thermalLayer) || !Array.isArray(points) || !points.length) {
+    s3dSetData(S3D_THERMALS, S3D_EMPTY_FC);
+    return;
+  }
+  const features = points
+    .filter(p => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]))
+    .map(p => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [p[1], p[0]] },
+      properties: { intensity: Number.isFinite(p[2]) ? p[2] : 0.5 }
+    }));
+  s3dSetData(S3D_THERMALS, s3dFeatureCollection(features));
+}
+
+function sync3DReplayPoints() {
+  if (!map3d || !map3dActive || !replayActive) return;
+  const seen = new Set();
+  for (const p of replayPoints || []) {
+    if (!Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+    if (replayFollowAddress && p.id === replayFollowAddress) continue;
+    const key = `rpts:${p.id}`;
+    seen.add(key);
+    const name = esc(p.label);
+    const iconHtml = `<div class="glider-wrap" style="--marker-color:${THEME.yellow}"><div class="replay-dot"></div><div class="glider-label" title="${name}">${name}</div></div>`;
+    const popupObj = {
+      lat: p.lat,
+      lon: p.lon,
+      id: p.id,
+      liveLabel: p.label,
+      address: String(p.id).toLowerCase(),
+      altitude: p.alt ?? null,
+      speed: null,
+      course: null,
+      climb: null,
+      snr: null,
+      weather: null,
+      type: 0,
+      receiver: '',
+      aprsPacket: '',
+      aprsReceivedAt: p.ts || '',
+      receivedAtMs: (Number(p.ts) || 0) * 1000
+    };
+    s3dUpsertDomMarker(key, p.lat, p.lon, p.alt, iconHtml, popupObj, {
+      onClick: () => {
+        if (!selectedTracks.has(popupObj.address)) toggleSelection(popupObj.address, false);
+      }
+    });
+  }
+  for (const [key, item] of [...map3dDomMarkers.entries()]) {
+    if (key.startsWith('rpts:') && !seen.has(key)) {
+      item.el.remove();
+      map3dDomMarkers.delete(key);
+    }
+  }
+  s3dScheduleLabelUpdate();
+}
+
+function sync3DReplayFocus(pos) {
+  if (!map3d || !map3dActive) return;
+  const key = 'rfocus:active';
+  if (!pos || !replayActive || !replayFollowAddress) {
+    const existing = map3dDomMarkers.get(key);
+    if (existing) { existing.el.remove(); map3dDomMarkers.delete(key); }
+    return;
+  }
+  const label = esc(replayFocusLabel());
+  const metricsText = replayFocusHudText(pos);
+  const iconHtml = `<div class="glider-wrap focused" style="--marker-color:#ec4899"><div class="replay-dot focused"></div><div class="glider-label" title="${label}">${label}</div></div>${focusHudHtml(metricsText)}`;
+  const baseAc = findAircraftByAddress(replayFollowAddress);
+  const popupObj = {
+    ...(baseAc || {}),
+    lat: pos.lat,
+    lon: pos.lon,
+    id: replayFollowAddress,
+    liveLabel: baseAc?.liveLabel || replayFocusLabel(),
+    address: replayFollowAddress.toLowerCase(),
+    altitude: pos.alt ?? baseAc?.altitude ?? null,
+    speed: pos.speed != null ? pos.speed * 3.6 : (baseAc?.speed ?? null),
+    climb: pos.climb != null ? Number(pos.climb.toFixed(1)) : (baseAc?.climb ?? null),
+    receivedAtMs: (Number(pos.ts) || Math.floor(replayTsMs / 1000)) * 1000
+  };
+  s3dUpsertDomMarker(key, pos.lat, pos.lon, pos.alt, iconHtml, popupObj, {
+    focused: true,
+    onClick: () => {
+      if (!selectedTracks.has(popupObj.address)) toggleSelection(popupObj.address, false);
+    }
+  });
+  s3dScheduleLabelUpdate();
+}
+
+function sync3DReplayTrack() {
+  if (!map3dReady) return;
+  s3dSyncThreeLines();
+  const features = [];
+  const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
+  if (!s3dArrowLayer) {
+    for (const seg of replayRenderSegments || []) {
+      features.push(...s3dTrackLineFeatures(seg.points, color));
+    }
+  }
+  s3dSetData(S3D_REPLAY_TRACK, s3dFeatureCollection(features));
+  s3dSetData(S3D_CURTAINS, S3D_EMPTY_FC);
+}
+
+function sync3DReplayProgress(perSegment) {
+  if (!map3dReady) return;
+  s3dSyncThreeProgress(perSegment);
+  const features = [];
+  if (!s3dArrowLayer) {
+    const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
+    for (const pts of perSegment || []) {
+      features.push(...s3dTrackLineFeatures(pts, color));
+    }
+  }
+  s3dSetData(S3D_REPLAY_PROGRESS, s3dFeatureCollection(features));
+}
+
+function sync3DReplayMode(on) {
+  if (on) {
+    s3dClearDomMarkers('live:');
+    if (map3dReady) {
+      s3dSetData(S3D_TRACKS, S3D_EMPTY_FC);
+    }
+  } else {
+    s3dClearDomMarkers('rpts:');
+    s3dClearDomMarkers('rfocus:');
+    if (map3dReady) {
+      for (const id of [S3D_REPLAY_TRACK, S3D_REPLAY_PROGRESS, S3D_CURTAINS]) {
+        s3dSetData(id, S3D_EMPTY_FC);
+      }
+      sync3DLive(filtered());
+      sync3DTracks();
+    }
+  }
+}
+
+function syncAll3DData() {
+  if (!map3d || !map3dActive) return;
+  if (map3dReady) {
+    sync3DAirspace();
+    if (map.hasLayer(thermalLayer)) sync3DThermals(thermalLayer._latlngs || []);
+  }
+  if (replayActive) {
+    s3dClearDomMarkers('live:');
+    if (map3dReady) {
+      sync3DTracks();
+      sync3DReplayTrack();
+      updateReplayProgressLine(performance.now(), true);
+    }
+    sync3DReplayPoints();
+    updateReplayFocusMarker();
+  } else {
+    s3dClearDomMarkers('rpts:');
+    s3dClearDomMarkers('rfocus:');
+    if (map3dReady) {
+      for (const id of [S3D_REPLAY_TRACK, S3D_REPLAY_PROGRESS, S3D_CURTAINS]) {
+        s3dSetData(id, S3D_EMPTY_FC);
+      }
+      sync3DTracks();
+    }
+    sync3DLive(filtered());
+  }
+}
+
+function set3DBaseStyle(key) {
+  if (!MAP3D_BASE_STYLES[key] || map3dBaseKey === key) return;
+  map3dBaseKey = key;
+  savedBaseLayer = VIEW3D_TO_BASE[key] || savedBaseLayer;
+  updateMapAttribution();
+  if (!map3d) return;
+  const seq = ++s3dStyleSwapSeq;
+  map3dReady = false;
+  // Clear terrain before swapping styles; MapLibre cannot recompile the DEM
+  // shader while its source is being removed by setStyle().
+  try { map3d.setTerrain(null); } catch (err) {}
+  const expectedSource = key === 'topo' ? 'opentopo' : key === 'satellite' ? 'esri' : 'openmaptiles';
+  // Force a clean rebuild instead of a diff: the old style still contains the
+  // custom DEM/GeoJSON sources that would otherwise collide with setup3DLayers().
+  map3d.setStyle(MAP3D_BASE_STYLES[key], { diff: false });
+  const finishSwap = () => {
+    if (seq !== s3dStyleSwapSeq || !map3d) return;
+    const style = map3d.getStyle();
+    if (!map3d.isStyleLoaded() || !style.sources?.[expectedSource]) {
+      setTimeout(finishSwap, 100);
+      return;
+    }
+    setup3DLayers();
+    map3dReady = true;
+    syncAll3DData();
+  };
+  setTimeout(finishSwap, 100);
+}
+
+const ViewModeControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd: function () {
+    const container = L.DomUtil.create('div', 'leaflet-control-view3d');
+    const button = L.DomUtil.create('button', 'leaflet-control-view3d-btn', container);
+    button.type = 'button';
+    button.textContent = map3dActive ? '3D' : '2D';
+    button.title = map3dActive ? '3D terrain view active' : '2D map active';
+    button.setAttribute('aria-label', button.title);
+    button.setAttribute('aria-pressed', 'false');
+    L.DomEvent.disableClickPropagation(container);
+    L.DomEvent.disableScrollPropagation(container);
+    L.DomEvent.on(button, 'click', event => {
+      L.DomEvent.preventDefault(event);
+      toggle3DView();
+    });
+    this._button = button;
+    return container;
+  }
+});
+const view3DModeControl = new ViewModeControl().addTo(map);
+
+function syncViewModeControl() {
+  const button = view3DModeControl?._button;
+  if (!button) return;
+  button.textContent = map3dActive ? '3D' : '2D';
+  const title = map3dActive ? '3D terrain view active' : '2D map active';
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.setAttribute('aria-pressed', String(map3dActive));
+  button.classList.toggle('active', map3dActive);
+}
+
+function toggle3DView() {
+  const turningOn = !map3dActive;
+  const el3d = $('map3d');
+  // MapLibre measures its container on init, so reveal it before creating the map.
+  if (turningOn && !map3d) el3d.hidden = false;
+  if (!ensure3DMap()) {
+    if (turningOn && !map3d) el3d.hidden = true;
+    return;
+  }
+  map3dActive = turningOn;
+  savedView3d = map3dActive;
+  saveMenuPrefs();
+  el3d.hidden = !map3dActive;
+  $('mapWrap').classList.toggle('view3d', map3dActive);
+  syncViewModeControl();
+  if (map3dActive) {
+    set3DBaseStyle(BASE_TO_3D[currentLayerSelection().baseLayer] || 'liberty');
+    resize3D();
+    sync3DFromLeaflet();
+    syncAll3DData();
+  } else {
+    for (const st of map3dDomPopupState.values()) {
+      if (st.popup && st.popup.isOpen()) st.popup.remove();
+    }
+    requestAnimationFrame(() => map.invalidateSize({ pan: false, animate: false }));
+  }
+}
+
+window.addEventListener('resize', resize3D);
+
 let lastBottomBarSpace = -1;
+let lastPopupMaxH = null;
 let emergencyBannerDismissedSig = null;
 
 function syncBottomBarOffset() {
@@ -506,16 +1980,22 @@ function syncBottomBarOffset() {
   }
 
   const mapRect = $('map').getBoundingClientRect();
-  if (hasBar) {
-    // Cap popup content to the shortened map, leaving room for wrapper/tip.
-    wrap.style.setProperty('--popup-max-h', `${Math.max(0, Math.floor(mapRect.height - 44))}px`);
-  } else {
-    wrap.style.removeProperty('--popup-max-h');
+  const popupMaxH = hasBar ? `${Math.max(0, Math.floor(mapRect.height - 44))}px` : null;
+  if (popupMaxH !== lastPopupMaxH) {
+    if (popupMaxH) wrap.style.setProperty('--popup-max-h', popupMaxH);
+    else wrap.style.removeProperty('--popup-max-h');
+    lastPopupMaxH = popupMaxH;
   }
 
   requestAnimationFrame(() => {
-    if (spaceChanged) map.invalidateSize({ pan: false, animate: false });
+    // Replaying calls this every frame. Resizing MapLibre when the map size did
+    // not actually change fires movestart continuously and blocks drag-pan.
+    if (spaceChanged) {
+      map.invalidateSize({ pan: false, animate: false });
+      resize3D();
+    }
     keepPopupAboveBottomBar();
+    s3dRepositionOpenPopups();
   });
 }
 
@@ -665,7 +2145,12 @@ if (restoredAirspace) {
 }
 syncClearAirspaceButton();
 
-const baseMaps = { "Terrain (OpenTopoMap)": terrainLayer, "Satellite (Esri)": satelliteLayer, "Standard (OSM)": osmLayer };
+// A single choice replaces the old duplicated 2D/3D base-layer buttons.
+const baseMaps = {
+  "Standard": osmLayer,
+  "Terrain": terrainLayer,
+  "Satellite": satelliteLayer
+};
 const overlayMaps = { "Thermals(6h)": thermalLayer, "RF Coverage (SNR)": coverageLayer, "Airspace / Hazards": airspaceLayer };
 const layersControl = L.control.layers(baseMaps, overlayMaps, { position: 'bottomright' }).addTo(map);
 const layersToggle = layersControl.getContainer()?.querySelector('.leaflet-control-layers-toggle');
@@ -744,8 +2229,12 @@ function applySavedLayers() {
   }
 }
 
-map.on('baselayerchange overlayadd overlayremove', () => {
-  if (!applyingSavedLayers) saveMenuPrefs();
+map.on('baselayerchange overlayadd overlayremove', e => {
+  if (applyingSavedLayers) return;
+  saveMenuPrefs();
+  updateMapAttribution();
+  const key = Object.keys(BASE_LAYER_KEYS).find(k => BASE_LAYER_KEYS[k] === e?.layer);
+  if (key && map3dActive) set3DBaseStyle(BASE_TO_3D[key] || 'liberty');
 });
 
 const clusterGroup = L.markerClusterGroup({
@@ -779,6 +2268,9 @@ let lastMetaBounds = null;
 const knownIds = new Map(); // address -> last seen ms
 
 let followedAddress = null;
+// Aircraft selected by a list click. It gets the same focused marker/HUD as a
+// followed aircraft, but it is a one-shot selection rather than a live follow.
+let mapFocusAddress = null;
 let varioTrackMode = savedVarioTrackMode;
 let activeTrackAddress = null;
 const lastPinnedStatus = new Map();
@@ -1164,17 +2656,31 @@ function varioColor(climb) {
   return '#3b82f6';
 }
 
+// Keep every track line in its own pane below Leaflet's markerPane (600).
+// This is independent of add order, so redraws or replay layers can never
+// paint over aircraft, clusters, emergency icons or replay focus markers.
+function trackPaneName() {
+  const name = 'ognTrackPane';
+  if (!map.getPane(name)) {
+    const pane = map.createPane(name);
+    pane.style.zIndex = '350';
+    pane.style.pointerEvents = 'none';
+  }
+  return name;
+}
+
 function buildTrackLayer(points, flatColor) {
   if (!points || points.length < 2) return null;
+  const pane = trackPaneName();
   if (!varioTrackMode) {
-    return L.polyline(points.map(p => [p[0], p[1]]), { color: flatColor, weight: 3, opacity: 0.9 });
+    return L.polyline(points.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 });
   }
   const grp = L.layerGroup();
   for (let i = 1; i < points.length; i++) {
     const p0 = points[i - 1], p1 = points[i];
     const dt = p1[3] - p0[3];
     const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
-    L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], { color: varioColor(climb), weight: 3.5, opacity: 0.92 }).addTo(grp);
+    L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], { pane, color: varioColor(climb), weight: 3.5, opacity: 0.92 }).addTo(grp);
   }
   return grp;
 }
@@ -1186,6 +2692,7 @@ function redrawAllTracks() {
     if (entry.layer) entry.layer.addTo(map);
   }
   updateReplayTrackLine();
+  sync3DTracks();
   syncVarioLegend();
 }
 
@@ -1252,6 +2759,8 @@ function setBaroEnabled(on) {
 function toggleFollow(address) {
   if (!address) return;
   followedAddress = (followedAddress === address) ? null : address;
+  // Follow and list-click selection share one focused marker/HUD.
+  mapFocusAddress = followedAddress;
   document.querySelectorAll('.follow-btn[data-follow]').forEach(btn => {
     const active = btn.dataset.follow === followedAddress;
     btn.classList.toggle('active', active);
@@ -1273,18 +2782,74 @@ function toggleFollow(address) {
 }
 
 // --- Shared follow-centering control (live and replay) ---
-const FOLLOW_CENTER_MIN_ZOOM = 15;
+// Leaflet zoom (MapLibre is +1). Follow auto-centering applies at zoom 13+.
+const FOLLOW_CENTER_MIN_ZOOM = 13;
 let followCenteringPaused = false;
 
 function activeFollowAddress() {
   return replayActive ? replayFollowAddress : followedAddress;
 }
 
+// The aircraft that should carry the pink halo + metric HUD. A list-click
+// selection takes precedence over a stale follow address; replay has its own
+// focused marker, so live focus never leaks into replay.
+function activeMapFocusAddress() {
+  if (replayActive) return replayFollowAddress;
+  return mapFocusAddress || followedAddress;
+}
+
+let recenterBtnSig = '';
+
+function focusLatLng() {
+  if (replayActive) {
+    if (replayFocusMarker?.getLatLng) {
+      const ll = replayFocusMarker.getLatLng();
+      if (ll && Number.isFinite(ll.lat) && Number.isFinite(ll.lng)) return ll;
+    }
+    const p = replayPoints.find(x => x.id === replayFollowAddress);
+    if (p && Number.isFinite(p.lat) && Number.isFinite(p.lon)) return L.latLng(p.lat, p.lon);
+    return null;
+  }
+  const a = aircraft.find(x => x.address === followedAddress);
+  if (a && Number.isFinite(a.lat) && Number.isFinite(a.lon)) return L.latLng(a.lat, a.lon);
+  return null;
+}
+
+// Offer Recenter only once the focused aircraft reaches the outer 20% of the
+// visible map (or leaves it). Small pans and ordinary map interaction do not
+// nag with an offer while the aircraft is still comfortably in view.
+function focusNearMapEdge() {
+  const addr = activeFollowAddress();
+  if (!addr) return false;
+  if (map3dReady && map3dActive) {
+    const key = replayActive ? 'rfocus:active' : `live:${addr}`;
+    const item = map3dDomMarkers.get(key);
+    const markerRect = item?.el?.getBoundingClientRect();
+    const mapRect = $('map3d')?.getBoundingClientRect();
+    if (markerRect && mapRect && markerRect.width && mapRect.width && mapRect.height) {
+      const x = markerRect.left + markerRect.width / 2 - mapRect.left;
+      const y = markerRect.top + markerRect.height / 2 - mapRect.top;
+      return x < mapRect.width * 0.2 || x > mapRect.width * 0.8 ||
+             y < mapRect.height * 0.2 || y > mapRect.height * 0.8;
+    }
+  }
+  const ll = focusLatLng();
+  const size = map.getSize?.();
+  if (!ll || !size || !size.x || !size.y) return false;
+  const p = map.latLngToContainerPoint(ll);
+  return p.x < size.x * 0.2 || p.x > size.x * 0.8 ||
+         p.y < size.y * 0.2 || p.y > size.y * 0.8;
+}
+
 function syncRecenterButton() {
   const btn = $('recenterBtn');
   if (!btn) return;
   const addr = activeFollowAddress();
-  const needsRecenter = !!addr && followCenteringPaused;
+  const needsRecenter = !!addr && followCenteringPaused &&
+    map.getZoom() >= FOLLOW_CENTER_MIN_ZOOM && focusNearMapEdge();
+  const sig = `${needsRecenter}:${addr || ''}`;
+  if (sig === recenterBtnSig) return;
+  recenterBtnSig = sig;
   btn.hidden = !needsRecenter;
   if (needsRecenter) {
     const a = aircraft.find(x => x.address === addr);
@@ -1335,7 +2900,10 @@ function focusFollowedOnMap(address) {
 function centerOnFollowed(force = false, animate = true, panDuration = 0.2) {
   const addr = activeFollowAddress();
   if (!addr) return false;
-  if (!force && (followCenteringPaused || map.getZoom() < FOLLOW_CENTER_MIN_ZOOM)) return false;
+  if (!force && (followCenteringPaused || map.getZoom() < FOLLOW_CENTER_MIN_ZOOM)) {
+    syncRecenterButton();
+    return false;
+  }
   let lat, lon;
   if (replayActive) {
     const p = replayPoints.find(x => x.id === addr);
@@ -1351,6 +2919,11 @@ function centerOnFollowed(force = false, animate = true, panDuration = 0.2) {
   const dest = L.latLng(lat, lon);
   if (map.getCenter().distanceTo(dest) > 1) {
     map.setView(dest, map.getZoom(), { animate, duration: panDuration });
+  }
+  if (map3dReady && map3dActive) {
+    ignoreMap3DSyncUntil = performance.now() + 250;
+    if (animate) map3d.easeTo({ center: [lon, lat], duration: Math.round(panDuration * 1000) });
+    else map3d.jumpTo({ center: [lon, lat] });
   }
   return true;
 }
@@ -1474,6 +3047,7 @@ function removeTrack(address) {
   }
   updateListHint();
   syncClearTracksButton();
+  sync3DTracks();
   syncVarioLegend();
 }
 
@@ -1486,6 +3060,7 @@ function clearAllTracks() {
   updateListHint();
   updateUrlHash();
   syncClearTracksButton();
+  sync3DTracks();
   syncVarioLegend();
 }
 
@@ -1516,6 +3091,7 @@ async function loadTrack(address) {
     current.points = Array.isArray(data.points) ? data.points : [];
     current.layer = buildTrackLayer(current.points, current.color);
     if (current.layer) current.layer.addTo(map);
+    sync3DTracks();
     syncVarioLegend();
     refreshMarkerPopup(address);
     return true;
@@ -1779,41 +3355,105 @@ function focusListRow(address) {
   if (row) row.focus({ preventScroll: true });
 }
 
-function showSearchResultPopup(a) {
+function showSearchResultPopup(a, recenterOnClose = false) {
   if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
   map.setView([a.lat, a.lon], Math.max(map.getZoom(), 12));
   const m = ensureSearchResultMarker(a);
-  if (m) requestAnimationFrame(() => m.openPopup());
+  if (m) {
+    if (recenterOnClose) m._recenterOnClose = true;
+    requestAnimationFrame(() => m.openPopup());
+  }
+}
+
+// A popup opened by a list click is centered in the map. When it is dismissed,
+// put the focused aircraft back at the center so it stays easy to find.
+function recenterFocusedMarkerOnClose(m) {
+  if (!m) return;
+  m.on('popupclose', e => {
+    if (!m._recenterOnClose) return;
+    m._recenterOnClose = false;
+    if (replayActive) return;
+    const closingPopupEl = e.popup?.getElement?.();
+    if (closingPopupEl) closingPopupEl.style.translate = '';
+    const recenter = () => {
+      // Ignore the popup that is closing itself, but do not fight a newer popup.
+      const otherPopupOpen = [...document.querySelectorAll('.leaflet-popup')]
+        .some(el => el !== closingPopupEl && el.isConnected);
+      if (otherPopupOpen) return;
+      const a = m._data;
+      if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
+      map.setView([a.lat, a.lon], map.getZoom(), { animate: false });
+    };
+    if (mapMoving) map.once('moveend', recenter);
+    else requestAnimationFrame(recenter);
+  });
+}
+
+// Clear the one-shot list focus. When the same aircraft was also followed,
+// use toggleFollow() so the follow buttons and live centering state stay in sync.
+function clearMapFocus(address = null) {
+  const m = address ? (markers.get(address) || searchResultMarkers.get(address)) : null;
+  if (m) {
+    // Do not let the popup-close handler recenter an aircraft we just unfocused.
+    m._recenterOnClose = false;
+    if (m.isPopupOpen?.()) map.closePopup(m.getPopup());
+  }
+  if (followedAddress && (!address || followedAddress === address)) {
+    toggleFollow(followedAddress);
+    return;
+  }
+  mapFocusAddress = null;
+  followCenteringPaused = false;
+  syncRecenterButton();
+}
+
+// A list click is a one-shot focus: open its popup centered, then leave the
+// aircraft highlighted with the shared HUD and centered after the popup closes.
+function focusAircraftOnMap(address, fallbackAircraft = null) {
+  if (!address) return false;
+  if (followedAddress && followedAddress !== address) {
+    // Clearing follow prevents the live follow loop from fighting this selection.
+    toggleFollow(followedAddress);
+  }
+  mapFocusAddress = address;
+  const a = findAircraftByAddress(address) || fallbackAircraft;
+  if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return false;
+  const m = markers.get(address);
+  const centerAndOpen = () => {
+    map.setView([a.lat, a.lon], map.getZoom(), { animate: false });
+    if (m) {
+      m._recenterOnClose = true;
+      m.openPopup();
+    } else {
+      showSearchResultPopup(a, true);
+    }
+  };
+  if (m && clusterGroup.hasLayer(m)) clusterGroup.zoomToShowLayer(m, centerAndOpen);
+  else centerAndOpen();
+  return true;
 }
 
 function toggleSelection(address, openOnMap = false) {
   const target = findAircraftByAddress(address);
+  // A second list click on the same aircraft clears focus instead of re-focusing.
+  const wasFocused = openOnMap && !replayActive && activeMapFocusAddress() === address;
   // A searched aircraft gets one render free of the type preference filters.
   if (target?.search24h) oneTimeSearchBypass.add(address);
   if (selectedTracks.has(address)) {
     removeTrack(address);
-    if (openOnMap && target?.search24h) showSearchResultPopup(target);
+    if (openOnMap && !wasFocused) focusAircraftOnMap(address, target);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
     activeTrackAddress = address;
     updateUrlHash();
     syncClearTracksButton();
     loadTrack(address);
-    if (openOnMap) {
+    if (openOnMap && !wasFocused) {
       if (window.innerWidth <= 800) revealMapForListAction();
-      const m = markers.get(address);
-      if (m) {
-        if (m._isEmergency) {
-          map.setView(m.getLatLng(), Math.max(map.getZoom(), 12));
-          m.openPopup();
-        } else {
-          clusterGroup.zoomToShowLayer(m, () => m.openPopup());
-        }
-      } else {
-        showSearchResultPopup(target);
-      }
+      focusAircraftOnMap(address, target);
     }
   }
+  if (wasFocused) clearMapFocus(address);
   updateListHint();
   render();
   requestAnimationFrame(() => focusListRow(address));
@@ -1979,7 +3619,7 @@ map.on('click', e => {
 });
 
 map.on('dragstart', () => { pauseFollowCentering(); });
-map.on('zoomend', () => { syncRecenterButton(); });
+map.on('move zoom resize', () => { syncRecenterButton(); });
 $('recenterBtn').addEventListener('click', () => { centerOnFollowed(true); });
 
 function sanitizeWeather(wx) {
@@ -2714,6 +4354,32 @@ function centerPopupInView(marker) {
   panPopupInView(marker.getPopup()?.getElement(), true);
 }
 
+function isFocusedMapMarker(marker) {
+  if (!marker || replayActive) return false;
+  const addr = marker._data?.address;
+  return !!addr && activeMapFocusAddress() === addr;
+}
+
+// A focused aircraft stays at the map center. Shift only the popup element so
+// it can open centered (and cover the marker) without panning the map away.
+function centerFocusedPopupInView(marker) {
+  if (!marker?.isPopupOpen?.()) return;
+  const popupEl = marker.getPopup()?.getElement?.();
+  if (!popupEl) return;
+  popupEl.style.translate = '';
+  const mapRect = $('map').getBoundingClientRect();
+  const popupRect = popupEl.getBoundingClientRect();
+  const safeBottom = popupSafeBottom(mapRect);
+  const margin = 8;
+  const targetX = mapRect.width / 2;
+  const targetY = safeBottom == null ? mapRect.height / 2
+    : Math.max(popupRect.height / 2 + margin, Math.min(safeBottom / 2, safeBottom - popupRect.height / 2 - margin));
+  const dx = popupRect.left + popupRect.width / 2 - (mapRect.left + targetX);
+  const dy = popupRect.top + popupRect.height / 2 - (mapRect.top + targetY);
+  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+  popupEl.style.translate = `${-dx}px ${-dy}px`;
+}
+
 function keepPopupAboveBottomBar(popupEl = $('map').querySelector('.leaflet-popup')) {
   panPopupInView(popupEl, false);
 }
@@ -2721,7 +4387,9 @@ function keepPopupAboveBottomBar(popupEl = $('map').querySelector('.leaflet-popu
 function keepOpenPopupAboveBar(marker) {
   if (!marker?.isPopupOpen()) return;
   requestAnimationFrame(() => {
-    if (marker.isPopupOpen()) keepPopupAboveBottomBar(marker.getPopup()?.getElement());
+    if (!marker.isPopupOpen()) return;
+    if (isFocusedMapMarker(marker)) centerFocusedPopupInView(marker);
+    else keepPopupAboveBottomBar(marker.getPopup()?.getElement());
   });
 }
 
@@ -2740,6 +4408,7 @@ function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
   const emergClass = isEmergency(a) ? ' emergency' : '';
+  const focused = !replayActive && activeMapFocusAddress() === a.address;
   const trackColor = selectedTracks.get(a.address)?.color || THEME.accent;
   const name = esc(displayName(a));
   let svgPath = ICONS.default;
@@ -2753,8 +4422,8 @@ function markerIcon(a) {
     case 15: svgPath = ICONS.tower; break;
   }
   return L.divIcon({
-    className: 'glider-icon', iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
-    html: `<div class="glider-wrap${emergClass}" style="--marker-color:${trackColor}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div></div>`
+    className: `glider-icon${focused ? ' focused' : ''}`, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
+    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}" style="--marker-color:${trackColor}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div>${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
   });
 }
 
@@ -2792,11 +4461,12 @@ function updateMarkerLabels() {
     });
     if (replayFocusMarker) collect(replayFocusMarker, 5);
   } else {
+    const focusAddr = activeMapFocusAddress();
     for (const m of markers.values()) {
       const a = m._data;
       if (!a) continue;
       const priority = (isEmergency(a) ? 4 : 0) + (selectedTracks.has(a.address) ? 2 : 0) +
-        (pinnedAircraft.has(a.address) ? 1 : 0);
+        (pinnedAircraft.has(a.address) ? 1 : 0) + (focusAddr === a.address ? 8 : 0);
       collect(m, priority);
     }
   }
@@ -2939,6 +4609,7 @@ function refreshOpenPopupForAddress(address) {
   m._popupSig = html;
   m.setPopupContent(html);
   if (m._trackerMarker) keepOpenPopupAboveBar(m);
+  else if (isFocusedMapMarker(m)) requestAnimationFrame(() => centerFocusedPopupInView(m));
   else requestAnimationFrame(() => centerPopupInView(m));
 }
 
@@ -3126,8 +4797,12 @@ function ensureSearchResultMarker(a) {
         d.removeEventListener('toggle', d.onTogglePopupDetails);
         d.addEventListener('toggle', d.onTogglePopupDetails);
       }
-      requestAnimationFrame(() => centerPopupInView(m));
+      requestAnimationFrame(() => {
+        if (isFocusedMapMarker(m)) centerFocusedPopupInView(m);
+        else centerPopupInView(m);
+      });
     });
+    recenterFocusedMarkerOnClose(m);
     m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
     searchResultGroup.addLayer(m);
     searchResultMarkers.set(a.address, m);
@@ -3153,6 +4828,7 @@ function rowSignature(a) {
     statusText, statusColor(a, statusText),
     track ? track.color : '', pinnedAircraft.has(a.address) ? 1 : 0,
     followedAddress === a.address ? 1 : 0,
+    !replayActive && activeMapFocusAddress() === a.address ? 1 : 0,
     rxStats ? rxStats.count : '',
     a.weather ? JSON.stringify(a.weather) : '',
     a.receivedAtMs,
@@ -3163,6 +4839,8 @@ function buildRowHtml(a, now) {
   const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
   const trackEntry = selectedTracks.get(a.address);
   const isSelected = trackEntry ? ' selected' : '';
+  const isFocused = !replayActive && activeMapFocusAddress() === a.address;
+  const focusedClass = isFocused ? ' focused' : '';
   const isPinned = pinnedAircraft.has(a.address);
   const pinnedClass = isPinned ? ' pinned' : '';
   const emergClass = isEmergency(a) ? ' emergency' : '';
@@ -3195,7 +4873,7 @@ function buildRowHtml(a, now) {
   }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
-  return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}" data-key="${esc(a.address)}" tabindex="0" role="option" aria-selected="${trackEntry ? 'true' : 'false'}" aria-label="${esc(label)}">
+  return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}${focusedClass}" data-key="${esc(a.address)}" tabindex="0" role="option" aria-selected="${trackEntry ? 'true' : 'false'}" aria-label="${esc(label)}">
     <div class="stripe" style="background:${stripeColor}" title="${esc(typeName(a))}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'} ${esc(displayName(a))}" aria-pressed="${isPinned ? 'true' : 'false'}">📌</button></div>
     <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
     <div class="${altClass}">${rightColHtml}</div>
@@ -3293,12 +4971,14 @@ function render() {
     const key = a.address;
     const emerg = isEmergency(a);
     const trackColor = selectedTracks.get(key)?.color || '';
-    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}_${emerg ? 1 : 0}_${trackColor}_${displayName(a)}`;
+    const focusedLive = !replayActive && activeMapFocusAddress() === key;
+    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}_${emerg ? 1 : 0}_${trackColor}_${displayName(a)}` +
+      (focusedLive ? `_focus_${liveFocusHudText(a)}` : '');
     let m = markers.get(key);
 
     if (!m) {
       if (isSpiderfied && !emerg) return;
-      m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : 0 });
+      m = L.marker([a.lat, a.lon], { icon: markerIcon(a), zIndexOffset: emerg ? 1000 : (focusedLive ? 900 : 0) });
       m._iconSig = iconSig; m._isEmergency = emerg; m._trueLat = a.lat; m._trueLon = a.lon; m._data = a; m._trackerMarker = true;
       m.on('click', e => {
         if (measureMode) {
@@ -3325,8 +5005,12 @@ function render() {
           d.removeEventListener('toggle', d.onTogglePopupDetails);
           d.addEventListener('toggle', d.onTogglePopupDetails);
         }
-        requestAnimationFrame(() => centerPopupInView(m));
+        requestAnimationFrame(() => {
+        if (isFocusedMapMarker(m)) centerFocusedPopupInView(m);
+        else centerPopupInView(m);
       });
+      });
+      recenterFocusedMarkerOnClose(m);
       m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
       markers.set(key, m);
       if (emerg) emergencyGroup.addLayer(m);
@@ -3350,6 +5034,7 @@ function render() {
           if (trackEntry.layer) map.removeLayer(trackEntry.layer);
           trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
           if (trackEntry.layer) trackEntry.layer.addTo(map);
+          sync3DTracks();
           syncVarioLegend();
         }
       }
@@ -3359,7 +5044,7 @@ function render() {
         m._isEmergency = emerg;
       }
       if ((!isSpiderfied || m._isEmergency) && m._iconSig !== iconSig) {
-        m.setIcon(markerIcon(a)); m.setZIndexOffset(emerg ? 1000 : 0); m._iconSig = iconSig;
+        m.setIcon(markerIcon(a)); m.setZIndexOffset(emerg ? 1000 : (focusedLive ? 900 : 0)); m._iconSig = iconSig;
       }
       refreshMarkerPopup(key, a);
     }
@@ -3368,17 +5053,19 @@ function render() {
   });
 
   updateCoverageLayer();
+  sync3DLive(visible);
   $('listCount').textContent = listVisible.length;
 
   const byName = (a, b) =>
     displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   const sorted = listVisible.slice().sort((a, b) => {
-    // Emergency rows stay first. The followed aircraft comes next, followed by
-    // aircraft with an active track; pinned rows and the selected sort only order
-    // the remaining rows (and rows within each group).
+    // Emergency rows stay first. The focused/followed aircraft comes next,
+    // followed by aircraft with an active track; pinned rows and the selected
+    // sort only order the remaining rows (and rows within each group).
     const ea = isEmergency(a) ? 1 : 0, eb = isEmergency(b) ? 1 : 0;
     if (ea !== eb) return eb - ea;
-    const fa = followedAddress === a.address ? 1 : 0, fb = followedAddress === b.address ? 1 : 0;
+    const focusAddr = activeMapFocusAddress();
+    const fa = focusAddr === a.address ? 1 : 0, fb = focusAddr === b.address ? 1 : 0;
     if (fa !== fb) return fb - fa;
     const ta = selectedTracks.has(a.address) ? 1 : 0, tb = selectedTracks.has(b.address) ? 1 : 0;
     if (ta !== tb) return tb - ta;
@@ -3692,7 +5379,9 @@ async function fetchThermals(force = false) {
     const res = await fetch(`ogn-proxy.php?${params}`, { cache: 'no-store' });
     if (res.ok) {
       const data = await res.json();
-      thermalLayer.setLatLngs(Array.isArray(data.points) ? data.points : []);
+      const pts = Array.isArray(data.points) ? data.points : [];
+      thermalLayer.setLatLngs(pts);
+      sync3DThermals(pts);
     }
   } catch (e) {}
 }
@@ -3700,10 +5389,12 @@ async function fetchThermals(force = false) {
 map.on('overlayadd', e => {
   if (e.layer === thermalLayer) fetchThermals(true);
   if (e.layer === coverageLayer) updateCoverageLayer();
+  if (e.layer === airspaceLayer) sync3DAirspace();
 });
 
 map.on('overlayremove', e => {
-  if (e.layer === thermalLayer) lastThermalBoundsKey = '';
+  if (e.layer === thermalLayer) { lastThermalBoundsKey = ''; sync3DThermals([]); }
+  if (e.layer === airspaceLayer) sync3DAirspace();
 });
 
 setInterval(() => fetchThermals(true), 600000);
@@ -4611,6 +6302,37 @@ function tzShortLabel(tz, ms = Date.now()) {
   return String(tz).split('/').pop().replace(/_/g, ' ');
 }
 
+function focusMetricText(speedKmh, climbMps, altM) {
+  const parts = [];
+  if (Number.isFinite(speedKmh)) parts.push(fmtWindSpeed(speedKmh));
+  if (Number.isFinite(climbMps)) parts.push(fmtClimb(climbMps));
+  if (Number.isFinite(altM)) parts.push(fmtAltCompact(altM));
+  return parts.join(' · ');
+}
+
+// Live aircraft already carry km/h; replay trackpoints carry m/s.
+function liveFocusHudText(a) {
+  if (!a) return '';
+  return focusMetricText(
+    Number.isFinite(a.speed) ? a.speed : NaN,
+    Number.isFinite(a.climb) ? a.climb : NaN,
+    Number.isFinite(a.altitude) ? a.altitude : NaN
+  );
+}
+
+function replayFocusHudText(pos) {
+  if (!pos) return '';
+  return focusMetricText(
+    Number.isFinite(pos.speed) ? pos.speed * 3.6 : NaN,
+    Number.isFinite(pos.climb) ? pos.climb : NaN,
+    Number.isFinite(pos.alt) ? pos.alt : NaN
+  );
+}
+
+function focusHudHtml(text) {
+  return `<div class="replay-hud focus-hud"><div class="hud-line">${esc(text || '—')}</div></div>`;
+}
+
 function replayFocusMetrics(pos) {
   const speed = (pos && pos.speed != null && Number.isFinite(pos.speed))
     ? fmtWindSpeed(pos.speed * 3.6) : '';
@@ -4624,12 +6346,7 @@ function replayFocusMetrics(pos) {
 }
 
 function replayFocusMetricsText(pos) {
-  const m = replayFocusMetrics(pos);
-  return [m.speed, m.climb, m.alt].filter(Boolean).join(' · ');
-}
-
-function replayHudHtml() {
-  return '<div class="hud-line"></div>';
+  return replayFocusHudText(pos);
 }
 
 function applyReplayHud(marker, text) {
@@ -4691,10 +6408,12 @@ function updateReplayFocusMarker() {
       replayFocusGroup.clearLayers();
       replayFocusMarker = null;
     }
+    sync3DReplayFocus(null);
     return;
   }
   const pos = interpolateReplayFocusPosition(replayTsMs) || replayFocusFallbackPosition();
-  if (!pos) return;
+  if (!pos) { sync3DReplayFocus(null); return; }
+  sync3DReplayFocus(pos);
   const alt = pos.alt != null ? Math.round(pos.alt) : null;
   const ts = Math.floor(pos.ts);
   let entry = replayPoints.find(p => p.id === replayFollowAddress);
@@ -4720,7 +6439,7 @@ function updateReplayFocusMarker() {
       icon: L.divIcon({
         className: 'glider-icon replay-icon focused',
         html: `<div class="replay-dot focused"></div><div class="glider-label" title="${esc(label)}">` +
-          `${esc(label)}</div><div class="replay-hud">${replayHudHtml()}</div>`,
+          `${esc(label)}</div>${focusHudHtml(metricsText)}`,
         iconSize: [16, 16], iconAnchor: [8, 8]
       }),
       zIndexOffset: 1000
@@ -4776,6 +6495,7 @@ function startReplayPlayback() {
     updateReplayTimeReadout(replayTsMs);
     maybeUpdateReplayTrackLine(wallNow);
     updateReplayFocusMarker();
+    syncRecenterButton();
     // Short animated pans keep high-zoom follow smooth; the 200ms throttle
     // avoids a moveend storm on every animation frame.
     if (wallNow - replayLastPanAtMs >= 200) {
@@ -4792,9 +6512,10 @@ function startReplayPlayback() {
 
 function replayTrackLayers(points, weight, opacity, dashed = false) {
   if (points.length < 2) return [];
+  const pane = trackPaneName();
   if (!varioTrackMode) {
     const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
-    return [L.polyline(points.map(p => [p[0], p[1]]), { color, weight, opacity, dashArray: dashed ? '3 6' : null })];
+    return [L.polyline(points.map(p => [p[0], p[1]]), { pane, color, weight, opacity, dashArray: dashed ? '3 6' : null })];
   }
   const layers = [];
   for (let i = 1; i < points.length; i++) {
@@ -4802,7 +6523,7 @@ function replayTrackLayers(points, weight, opacity, dashed = false) {
     const dt = p1[3] - p0[3];
     const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
     layers.push(L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], {
-      color: varioColor(climb), weight, opacity, dashArray: dashed ? '3 6' : null
+      pane, color: varioColor(climb), weight, opacity, dashArray: dashed ? '3 6' : null
     }));
   }
   return layers;
@@ -4835,6 +6556,8 @@ function clearReplayTrackLayers() {
   replayTrackLineSig = '';
   replayProgressCutoff = -1;
   replayProgressKey = '';
+  sync3DReplayTrack();
+  sync3DReplayProgress([]);
   syncVarioLegend();
 }
 
@@ -4854,6 +6577,7 @@ function rebuildReplayTrackBase() {
       Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[3]));
     replayTrackLayers(valid, 2, 0.25, true).forEach(l => l.addTo(replayTrackBaseGroup));
   }
+  sync3DReplayTrack();
   syncVarioLegend();
 }
 
@@ -4875,6 +6599,7 @@ function updateReplayProgressLine(wallNow, force = false) {
       replayProgressCutoff = -1;
       replayProgressKey = '';
     }
+    sync3DReplayProgress([]);
     return;
   }
   // The rAF loop calls this often; geometry is cached and the head is capped at ~10 Hz.
@@ -4901,6 +6626,7 @@ function updateReplayProgressLine(wallNow, force = false) {
   if (key === replayProgressKey) return;
   replayProgressKey = key;
   replayProgressCutoff = cutoffTotal;
+  sync3DReplayProgress(perSegment);
   replayProgressGroup.clearLayers();
   for (const pts of perSegment) {
     replayTrackLayers(pts, 3, 0.9).forEach(l => l.addTo(replayProgressGroup));
@@ -4998,12 +6724,15 @@ async function loadReplaySlice() {
     });
     updateMarkerLabels();
     updateReplayFocusMarker();
+    sync3DReplayPoints();
     if (hasFocus) centerOnFollowed(false, false);
   } catch (e) {}
 }
 
 function setReplayMode(on, opts = {}) {
   replayActive = on;
+  // Replay owns its own focused marker; do not restore a stale list selection.
+  mapFocusAddress = null;
   renderFeedStatusBanner();
   $('btnReplay').classList.toggle('active', on);
   $('btnReplay').setAttribute('aria-pressed', String(on));
@@ -5065,6 +6794,7 @@ function setReplayMode(on, opts = {}) {
     clusterGroup.addTo(map); emergencyGroup.addTo(map);
     fetchLive(true);
   }
+  sync3DReplayMode(on);
   syncVarioLegend();
 }
 
@@ -5181,6 +6911,7 @@ $('type').addEventListener('change', e => {
 });
 
 applySavedLayers();
+updateMapAttribution();
 bringToFront($('mapFilterControl'));
 applySavedMenuPrefs();
 syncUnitButtons();
@@ -5275,6 +7006,7 @@ function setHeaderCollapsed(collapsed) {
   requestAnimationFrame(() => {
     syncStickyTop();
     map.invalidateSize({ pan: false, animate: false });
+    resize3D();
   });
 }
 siteHeader?.addEventListener('click', () => {
@@ -5384,6 +7116,7 @@ function exitListMode(returnToMap) {
     requestAnimationFrame(() => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       map.invalidateSize({ pan: false, animate: false });
+      resize3D();
     });
   }
 }
@@ -5419,9 +7152,10 @@ window.addEventListener('scroll', syncListMode, { passive: true });
 window.addEventListener('resize', syncListMode);
 syncListMode();
 
-// Mobile-only: ANY upward swipe starting outside Leaflet's #map triggers the
-// same smooth scroll as the map's down arrow, but only while the map is still
-// on screen. Once it has scrolled away, normal (desktop-like) scrolling resumes.
+// Mobile-only: ANY upward swipe starting outside the map (Leaflet #map or the
+// MapLibre #map3d overlay) triggers the same smooth scroll as the map's down
+// arrow, but only while the map is still on screen. Once it has scrolled away,
+// normal (desktop-like) scrolling resumes.
 let outsideSwipe = null;
 let suppressOutsideClick = false;
 const OUTSIDE_SWIPE_PX = 40;
@@ -5437,7 +7171,7 @@ document.addEventListener('touchstart', (e) => {
   if (!compactMenuQuery.matches || e.touches.length !== 1) return;
   const t = e.touches[0];
   const el = t.target instanceof Element ? t.target : null;
-  if (!el || el.closest('#map')) return;
+  if (!el || el.closest('#map') || el.closest('#map3d') || el.closest('#mapAttribution')) return;
   // In list mode the document is locked and only the list scrolls. Before
   // that, stop arming once the sidebar top is reached (8px tolerance).
   if (listMode) return;
@@ -5521,6 +7255,42 @@ function finishChromeBackSwipe(e) {
 }
 document.addEventListener('touchend', finishChromeBackSwipe, { passive: true, capture: true });
 document.addEventListener('touchcancel', finishChromeBackSwipe, { passive: true, capture: true });
+
+// Once the aircraft list has been scrolled back to its top, the next downward
+// swipe is an overscroll and returns to the map exactly like the chrome swipe.
+const aircraftListEl = $('aircraftList');
+let listBackSwipe = null;
+
+aircraftListEl?.addEventListener('touchstart', e => {
+  listBackSwipe = null;
+  if (!listMode || e.touches.length !== 1) return;
+  if (aircraftListEl.scrollTop > 1) return;
+  const t = e.touches[0];
+  listBackSwipe = { y: t.clientY, lastY: t.clientY, fired: false };
+}, { passive: true, capture: true });
+
+document.addEventListener('touchmove', e => {
+  if (!listBackSwipe || listBackSwipe.fired || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  listBackSwipe.lastY = t.clientY;
+  if (t.clientY - listBackSwipe.y < 4) return;
+  if (e.cancelable) e.preventDefault();
+}, { passive: false, capture: true });
+
+function finishListBackSwipe(e) {
+  const swipe = listBackSwipe;
+  listBackSwipe = null;
+  if (!swipe || !listMode || swipe.fired) return;
+  const changed = e.changedTouches && e.changedTouches[0];
+  const y = changed ? changed.clientY : swipe.lastY;
+  if (y - swipe.y < OUTSIDE_SWIPE_PX) return;
+  swipe.fired = true;
+  suppressOutsideClick = true;
+  setTimeout(() => { suppressOutsideClick = false; }, 400);
+  exitListMode(true);
+}
+document.addEventListener('touchend', finishListBackSwipe, { passive: true, capture: true });
+document.addEventListener('touchcancel', finishListBackSwipe, { passive: true, capture: true });
 
 function openFilterPanel(focusFirst = true) {
   closeToolbarMenu(false);
@@ -5982,6 +7752,7 @@ $('airspaceFile').addEventListener('change', async e => {
     const gj = file.name.toLowerCase().endsWith('.txt') ? parseOpenAirToGeoJson(text) : JSON.parse(text);
     airspaceLayer.clearLayers();
     airspaceLayer.addData(gj);
+    sync3DAirspace();
     if (!map.hasLayer(airspaceLayer)) airspaceLayer.addTo(map);
     let saved = false;
     try {
@@ -6003,6 +7774,7 @@ $('airspaceFile').addEventListener('change', async e => {
 $('btnClearAirspace').addEventListener('click', () => {
   airspaceLayer.clearLayers();
   localStorage.removeItem(AIRSPACE_STORAGE_KEY);
+  sync3DAirspace();
   syncClearAirspaceButton();
   showToast('Airspace cleared');
 });
