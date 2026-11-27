@@ -30,7 +30,7 @@ button{cursor:pointer;font-size:13px}button:hover{border-color:var(--accent)}but
 .map-filter-control::before,.toolbar-menu-control::before{content:"";position:absolute;top:100%;left:0;width:30px;height:6px}
 .shortcuts-control{position:relative;display:inline-flex}
 #btnShortcuts{padding:7px 0;text-align:center;font-weight:800}
-.shortcuts-modal{position:absolute;top:calc(100% + 6px);right:0;z-index:1100;width:258px;padding:9px 24px 9px 10px;background:#17232ff7;border:1px solid var(--focus);border-radius:9px;box-shadow:0 6px 20px #000b;font-size:11px}
+.shortcuts-modal{position:absolute;top:calc(100% + 6px);left:0;right:auto;z-index:1100;width:258px;padding:9px 24px 9px 10px;background:#17232ff7;border:1px solid var(--focus);border-radius:9px;box-shadow:0 6px 20px #000b;font-size:11px}
 .shortcuts-modal[hidden]{display:none}
 .shortcuts-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}
 .shortcuts-head strong{font-size:12px}
@@ -369,9 +369,9 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .measure-dot.dragging>span{cursor:grabbing}
 .map-wrap:has(.emerg-banner.show) .measure-readout{top:88px}
 @media(max-width:800px){
-  .shortcuts-modal{position:fixed;top:54px;right:var(--edge-gutter);width:min(258px,calc(100vw - 16px))}
+  .shortcuts-modal{position:fixed;top:54px;left:auto;right:var(--edge-gutter);width:min(258px,calc(100vw - 16px))}
   .toolbar-menu-panel,.map-filter-panel{padding:7px}
-  .toolbar-menu-panel{position:fixed;top:44px;left:38px;right:auto;width:min(220px,calc(100vw - 46px));max-height:calc(100dvh - 56px);overflow:auto}
+  .toolbar-menu-panel{width:min(220px,calc(100vw - 46px));max-height:calc(100dvh - 78px);overflow:auto}
   .map-filter-control{top:var(--edge-gutter);left:var(--edge-gutter)}
   .toolbar-menu-control{top:var(--edge-gutter);left:38px}
   .map-filter-panel{left:0;width:min(248px,calc(100vw - 16px));max-height:calc(82dvh - 56px)}
