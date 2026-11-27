@@ -4213,9 +4213,27 @@ function currentBounds() {
   try { return map.getBounds(); } catch (e) { return null; }
 }
 
+// In 3D the Leaflet bounds mirror can be much wider than MapLibre's pitched
+// camera view. Use the same projected-screen test as the 3D marker culling so
+// the list matches the aircraft markers that are actually on screen.
+// Returns null when 3D projection is unavailable, so callers fall back to bounds.
+function s3dProjectedPointVisible(lng, lat, altMSL = null) {
+  if (!map3dActive || !map3dReady || !map3d) return null;
+  const pt = s3dProject3DPoint(lng, lat, altMSL);
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return false;
+  const canvas = map3d.getCanvas?.();
+  const width = map3d.transform?.width || canvas?.clientWidth || 0;
+  const height = map3d.transform?.height || canvas?.clientHeight || 0;
+  if (!width || !height) return true;
+  const margin = S3D_MARKER_CULL_MARGIN_PX;
+  return pt.x >= -margin && pt.x <= width + margin && pt.y >= -margin && pt.y <= height + margin;
+}
+
 // Callers doing a whole-list pass fetch bounds once and pass them in.
-function isInCurrentViewport(lat, lon, bounds = null) {
+function isInCurrentViewport(lat, lon, bounds = null, altitude = null) {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  const projected = s3dProjectedPointVisible(lon, lat, altitude);
+  if (projected !== null) return projected;
   const b = bounds || currentBounds();
   if (!b) return false;
   try { return b.contains([lat, lon]); } catch (e) { return false; }
@@ -5013,7 +5031,7 @@ function filtered() {
 function hasViewportSearchMatches(visible = null, bounds = null) {
   const rows = visible || filtered();
   const b = bounds || currentBounds();
-  return rows.some(a => isInCurrentViewport(a.lat, a.lon, b));
+  return rows.some(a => isInCurrentViewport(a.lat, a.lon, b, a.altitude));
 }
 
 function clearSearch24h() {
@@ -5210,7 +5228,7 @@ function updateListHint(visible = null, bounds = null) {
   const b = bounds || currentBounds();
   const visibleKeys = new Set(rows.map(a => a.address));
   const hiddenTracks = [...selectedTracks.keys()].filter(k => !visibleKeys.has(k));
-  const outsideCount = rows.reduce((n, a) => n + (isInCurrentViewport(a.lat, a.lon, b) ? 0 : 1), 0);
+  const outsideCount = rows.reduce((n, a) => n + (isInCurrentViewport(a.lat, a.lon, b, a.altitude) ? 0 : 1), 0);
   const parts = [];
   if (q) parts.push(`Filtering by "${q}". Tracks are kept; hidden tracks may not be in list.`);
   const search24hCount = q ? effectiveSearch24hResults().length : 0;
@@ -5236,7 +5254,7 @@ function render() {
   const consumedSearchBypass = new Set(oneTimeSearchBypass);
   const visible = filtered();
   const bounds = currentBounds();
-  const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon, bounds));
+  const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon, bounds, a.altitude));
   const searchQ = $('search').value.trim();
   const search24h = searchQ ? effectiveSearch24hResults() : [];
   const useSearch24h = viewportList.length === 0 && search24h.length > 0;
