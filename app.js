@@ -2353,31 +2353,99 @@ function syncAll3DData() {
 
 function set3DBaseStyle(key) {
   if (!MAP3D_BASE_STYLES[key] || map3dBaseKey === key) return;
+  const seq = ++s3dStyleSwapSeq;
+  const prevKey = map3dBaseKey;
+  const prevStyle = MAP3D_BASE_STYLES[prevKey] || MAP3D_BASE_STYLES.liberty;
   map3dBaseKey = key;
   savedBaseLayer = VIEW3D_TO_BASE[key] || savedBaseLayer;
   updateMapAttribution();
   if (!map3d) return;
-  const seq = ++s3dStyleSwapSeq;
   map3dReady = false;
   // Clear terrain before swapping styles; MapLibre cannot recompile the DEM
   // shader while its source is being removed by setStyle().
   try { map3d.setTerrain(null); } catch (err) {}
-  const expectedSource = key === 'topo' ? 'opentopo' : key === 'satellite' ? 'esri' : 'openmaptiles';
+  let recovering = false;
+  const sourceFor = k => (k === 'topo' ? 'opentopo' : k === 'satellite' ? 'esri' : 'openmaptiles');
+
+  const waitForStyle = (targetKey, allowRecovery) => {
+    const expectedSource = sourceFor(targetKey);
+    let attempts = 0;
+    const finish = () => {
+      if (seq !== s3dStyleSwapSeq || !map3d) return;
+      let style = null;
+      try { style = map3d.getStyle(); } catch (err) {
+        if (allowRecovery && !recovering) recover('getStyle failed', err);
+        return;
+      }
+      let loaded = false;
+      try { loaded = !!map3d.isStyleLoaded?.(); } catch (err) {}
+      if (!loaded || !style?.sources?.[expectedSource]) {
+        // A stalled style must not leave map3dReady false forever.
+        if (++attempts >= 60) {
+          if (allowRecovery && !recovering) recover('style did not finish loading');
+          else showToast('Could not switch 3D map style. Reload the page to restore 3D.');
+          return;
+        }
+        setTimeout(finish, 100);
+        return;
+      }
+      try {
+        setup3DLayers();
+      } catch (err) {
+        if (allowRecovery && !recovering) recover('layer setup failed', err);
+        else showToast('Could not set up 3D map layers. Reload the page to restore 3D.');
+        return;
+      }
+      map3dReady = true;
+      syncAll3DData();
+    };
+    setTimeout(finish, 100);
+  };
+
+  const recover = (reason, err) => {
+    if (seq !== s3dStyleSwapSeq || !map3d || recovering) return;
+    recovering = true;
+    console.warn('3D base style swap failed:', reason, err || '');
+    map3dBaseKey = prevKey;
+    let retries = 0;
+    const applyRecovery = () => {
+      if (seq !== s3dStyleSwapSeq || !map3d) return;
+      try { map3d.setTerrain(null); } catch (e) {}
+      try {
+        // Force a clean rebuild of the previous style, including custom layers.
+        map3d.setStyle(prevStyle, { diff: false });
+      } catch (restoreErr) {
+        if (++retries < 5) {
+          setTimeout(applyRecovery, 200);
+          return;
+        }
+        console.warn('3D style recovery failed:', restoreErr);
+        showToast('Could not restore the 3D map style. Reload the page to recover.');
+        // Last chance: if the previous style is actually loaded, keep 3D usable.
+        try {
+          const style = map3d.getStyle();
+          if (map3d.isStyleLoaded?.() && style?.sources?.[sourceFor(prevKey)]) {
+            setup3DLayers();
+            map3dReady = true;
+            syncAll3DData();
+          }
+        } catch (e) {}
+        return;
+      }
+      waitForStyle(prevKey, false);
+    };
+    applyRecovery();
+  };
+
   // Force a clean rebuild instead of a diff: the old style still contains the
   // custom DEM/GeoJSON sources that would otherwise collide with setup3DLayers().
-  map3d.setStyle(MAP3D_BASE_STYLES[key], { diff: false });
-  const finishSwap = () => {
-    if (seq !== s3dStyleSwapSeq || !map3d) return;
-    const style = map3d.getStyle();
-    if (!map3d.isStyleLoaded() || !style.sources?.[expectedSource]) {
-      setTimeout(finishSwap, 100);
-      return;
-    }
-    setup3DLayers();
-    map3dReady = true;
-    syncAll3DData();
-  };
-  setTimeout(finishSwap, 100);
+  try {
+    map3d.setStyle(MAP3D_BASE_STYLES[key], { diff: false });
+  } catch (err) {
+    recover('setStyle threw', err);
+    return;
+  }
+  waitForStyle(key, true);
 }
 
 const ViewModeControl = L.Control.extend({
