@@ -43,7 +43,7 @@ if (!$doGenerate) {
     http_response_code(503);
     ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzreplay1"></head><body>
+<link rel="stylesheet" href="style.css?v=20261128zzsnd1"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
@@ -682,7 +682,7 @@ $genDuration = microtime(true) - $generationStarted;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzreplay1">
+<link rel="stylesheet" href="style.css?v=20261128zzsnd1">
 <style>
   header{cursor:default}
   main{display:block!important}

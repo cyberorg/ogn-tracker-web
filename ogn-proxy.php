@@ -11,8 +11,16 @@ declare(strict_types=1);
 
 const THERMAL_CACHE_TTL = 600;
 const SOUNDING_CACHE_TTL = 60;
+const SOUNDING_MAX_CANDIDATES = 4000;
 const SOUNDING_MAX_TRACK_ROWS = 24000;
-const SOUNDING_MAX_POINTS_PER_AC = 200;
+const SOUNDING_MAX_POINTS_PER_AC = 400;
+const SOUNDING_TURN_RELAXED_GAP_SEC = 10;
+const SOUNDING_TURN_STRICT_GAP_SEC = 6;
+const SOUNDING_TURN_MIN_RADIUS_M = 25.0;
+const SOUNDING_TURN_MAX_RADIUS_M = 150.0;
+const SOUNDING_TURN_MIN_RATE_DPS = 6.0;
+const SOUNDING_TURN_MAX_RATE_DPS = 30.0;
+const SOUNDING_TURN_MAX_RADIAL_RESIDUAL = 0.30;
 const STALE_CACHE_MAX_AGE = 300;
 
 if (!ob_start('ob_gzhandler')) {
@@ -256,6 +264,225 @@ function sounding_bearing_deg(float $lat1, float $lon1, float $lat2, float $lon2
 function sounding_angle_delta(float $from, float $to): float {
     $delta = ($to - $from + 540.0) % 360.0 - 180.0;
     return $delta;
+}
+
+function sounding_median(array $values): ?float {
+    $values = array_values(array_filter($values, 'is_numeric'));
+    if ($values === []) return null;
+    sort($values, SORT_NUMERIC);
+    $count = count($values);
+    $mid = intdiv($count, 2);
+    if ($count % 2 === 1) return (float)$values[$mid];
+    return ((float)$values[$mid - 1] + (float)$values[$mid]) / 2.0;
+}
+
+/** Solve a small dense linear system with partial pivoting; null when singular. */
+function sounding_solve_linear(array $a, array $b): ?array {
+    $size = count($b);
+    if ($size === 0) return null;
+    $rows = [];
+    for ($i = 0; $i < $size; $i++) {
+        $row = [];
+        for ($j = 0; $j < $size; $j++) $row[] = (float)$a[$i][$j];
+        $row[] = (float)$b[$i];
+        $rows[] = $row;
+    }
+    for ($col = 0; $col < $size; $col++) {
+        $pivot = $col;
+        for ($r = $col + 1; $r < $size; $r++) {
+            if (abs($rows[$r][$col]) > abs($rows[$pivot][$col])) $pivot = $r;
+        }
+        if (abs($rows[$pivot][$col]) < 1e-9) return null;
+        if ($pivot !== $col) {
+            $tmp = $rows[$col];
+            $rows[$col] = $rows[$pivot];
+            $rows[$pivot] = $tmp;
+        }
+        $divisor = $rows[$col][$col];
+        for ($c = $col; $c <= $size; $c++) $rows[$col][$c] /= $divisor;
+        for ($r = 0; $r < $size; $r++) {
+            if ($r === $col) continue;
+            $factor = $rows[$r][$col];
+            if ($factor == 0.0) continue;
+            for ($c = $col; $c <= $size; $c++) $rows[$r][$c] -= $factor * $rows[$col][$c];
+        }
+    }
+    return array_map(static fn(array $row): float => (float)$row[$size], $rows);
+}
+
+/**
+ * Fit a drifting circle to one turn window, in local metres. A full circle in
+ * wind is a trochoid on the ground, so the model is centre + circular arc +
+ * linear drift. This avoids treating the wind itself as part of the radius.
+ */
+function sounding_fit_turn(array $pts): ?array {
+    $count = count($pts);
+    if ($count < 5) return null;
+    $lat0 = (float)$pts[0]['lat'];
+    $lon0 = (float)$pts[0]['lon'];
+    $mPerDegLat = 111320.0;
+    $mPerDegLon = 111320.0 * cos(deg2rad($lat0));
+    $xy = [];
+    $times = [];
+    $t0 = (float)$pts[0]['ts'];
+    foreach ($pts as $p) {
+        $times[] = (float)$p['ts'] - $t0;
+        $dLon = (float)$p['lon'] - $lon0;
+        if ($dLon > 180.0) $dLon -= 360.0;
+        if ($dLon < -180.0) $dLon += 360.0;
+        $xy[] = [$dLon * $mPerDegLon, ((float)$p['lat'] - $lat0) * $mPerDegLat];
+    }
+    $duration = max($times);
+    if ($duration <= 0.0) return null;
+
+    // Estimate sweep from consecutive ground-track bearings. The first bearing
+    // has no predecessor, so add one average step to avoid undercounting a
+    // full circle by one segment.
+    $bearingSum = 0.0;
+    $bearingSteps = 0;
+    $prevBearing = null;
+    for ($i = 1; $i < $count; $i++) {
+        [$x0, $y0] = $xy[$i - 1];
+        [$x1, $y1] = $xy[$i];
+        $dx = $x1 - $x0;
+        $dy = $y1 - $y0;
+        if (hypot($dx, $dy) < 1.0) return null;
+        $bearing = rad2deg(atan2($dx, $dy));
+        if ($prevBearing !== null) {
+            $step = sounding_angle_delta($prevBearing, $bearing);
+            if (abs($step) > 150.0) return null;
+            $bearingSum += $step;
+            $bearingSteps++;
+        }
+        $prevBearing = $bearing;
+    }
+    if ($bearingSteps < 2 || abs($bearingSum) < 1.0) return null;
+    $estimatedSweep = $bearingSum + $bearingSum / $bearingSteps;
+    $rateDegPerSec = $estimatedSweep / $duration;
+    if (!is_finite($rateDegPerSec) || abs($rateDegPerSec) < 3.0 || abs($rateDegPerSec) > 45.0) return null;
+    $sign = $rateDegPerSec >= 0.0 ? 1.0 : -1.0;
+    $omega = deg2rad(abs($rateDegPerSec));
+
+    // For fixed omega the drifting-circle model is linear:
+    // position = centre + A*cos + B*sin + drift*t.
+    $ata = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]];
+    $atx = [0.0, 0.0, 0.0, 0.0];
+    $aty = [0.0, 0.0, 0.0, 0.0];
+    foreach ($times as $idx => $t) {
+        $row = [1.0, cos($omega * $t), sin($omega * $t), $t];
+        [$x, $y] = $xy[$idx];
+        for ($i = 0; $i < 4; $i++) {
+            for ($j = 0; $j < 4; $j++) $ata[$i][$j] += $row[$i] * $row[$j];
+            $atx[$i] += $row[$i] * $x;
+            $aty[$i] += $row[$i] * $y;
+        }
+    }
+    $xCoeff = sounding_solve_linear($ata, $atx);
+    $yCoeff = sounding_solve_linear($ata, $aty);
+    if ($xCoeff === null || $yCoeff === null) return null;
+    [$ox, $ax, $bx, $vx] = $xCoeff;
+    [$oy, $ay, $by, $vy] = $yCoeff;
+    $radiusX = hypot($ax, $bx);
+    $radiusY = hypot($ay, $by);
+    if ($radiusX <= 0.0 || $radiusY <= 0.0) return null;
+    if (abs($radiusX - $radiusY) / max($radiusX, $radiusY) > 0.25) return null;
+    $radius = ($radiusX + $radiusY) / 2.0;
+    $phaseX = rad2deg(atan2(-$bx, $ax));
+    $phaseY = rad2deg(atan2($ay, $by));
+    if (abs(sounding_angle_delta($phaseX, $phaseY)) > 30.0) return null;
+
+    $residual = 0.0;
+    foreach ($times as $idx => $t) {
+        $phase = $omega * $t;
+        $px = $ox + $ax * cos($phase) + $bx * sin($phase) + $vx * $t;
+        $py = $oy + $ay * cos($phase) + $by * sin($phase) + $vy * $t;
+        [$x, $y] = $xy[$idx];
+        $residual += hypot($x - $px, $y - $py) / $radius;
+    }
+    $residual /= $count;
+    if (!is_finite($residual) || $residual > SOUNDING_TURN_MAX_RADIAL_RESIDUAL) return null;
+
+    // The fitted circular component gives a cleaner sweep than the raw
+    // bearings, which a strong wind can inflate by a few degrees.
+    $fittedSweep = 0.0;
+    $prevCircularAngle = null;
+    foreach ($times as $idx => $t) {
+        [$x, $y] = $xy[$idx];
+        $dx = $x - ($ox + $vx * $t);
+        $dy = $y - ($oy + $vy * $t);
+        if (hypot($dx, $dy) < 1.0) return null;
+        $angle = rad2deg(atan2($dy, $dx));
+        if ($prevCircularAngle !== null) {
+            $step = sounding_angle_delta($prevCircularAngle, $angle);
+            if (abs($step) > 150.0) return null;
+            $fittedSweep += $step;
+        }
+        $prevCircularAngle = $angle;
+    }
+
+    return [
+        'center_x_m' => $ox,
+        'center_y_m' => $oy,
+        'radius_m' => $radius,
+        'radial_residual' => $residual,
+        // Circular angle is CCW from east; OGN bearings are CW from north.
+        'sweep_deg' => -$fittedSweep,
+        'drift_east_mps' => $vx,
+        'drift_north_mps' => $vy,
+    ];
+}
+
+/** Quality metrics for one candidate turn window. */
+function sounding_turn_metrics(array $pts, array $dts, array $speedsKmh): ?array {
+    if (count($dts) !== count($pts) - 1 || count($dts) < 2) return null;
+    $fit = sounding_fit_turn($pts);
+    if ($fit === null) return null;
+    $duration = array_sum($dts);
+    $medianDt = sounding_median($dts);
+    $medianSpeed = sounding_median($speedsKmh);
+    if ($duration <= 0.0 || $medianDt === null || $medianDt <= 0.0 || $medianSpeed === null) return null;
+    $sweep = abs((float)$fit['sweep_deg']);
+    return [
+        'sweep_deg' => $sweep,
+        'signed_sweep_deg' => (float)$fit['sweep_deg'],
+        'radius_m' => (float)$fit['radius_m'],
+        'radial_residual' => (float)$fit['radial_residual'],
+        'duration_sec' => (float)$duration,
+        'points' => count($pts),
+        'median_dt_sec' => $medianDt,
+        'max_gap_sec' => (float)max($dts),
+        'median_speed_kmh' => $medianSpeed,
+        'turn_rate_dps' => $sweep / $duration,
+    ];
+}
+
+/** Strict, relaxed and slow-aircraft turn tiers; all still require a near-full circle. */
+function sounding_turn_tier(array $m): ?string {
+    if ($m['points'] < 5) return null;
+    if ($m['radius_m'] < SOUNDING_TURN_MIN_RADIUS_M || $m['radius_m'] > SOUNDING_TURN_MAX_RADIUS_M) return null;
+    if ($m['turn_rate_dps'] < SOUNDING_TURN_MIN_RATE_DPS || $m['turn_rate_dps'] > SOUNDING_TURN_MAX_RATE_DPS) return null;
+    if ($m['radial_residual'] > SOUNDING_TURN_MAX_RADIAL_RESIDUAL) return null;
+
+    if ($m['max_gap_sec'] <= SOUNDING_TURN_STRICT_GAP_SEC
+        && $m['points'] >= 6
+        && $m['sweep_deg'] >= 340.0
+        && $m['duration_sec'] >= max(20.0, 5.0 * $m['median_dt_sec'])) {
+        return 'strict';
+    }
+    if ($m['max_gap_sec'] <= SOUNDING_TURN_RELAXED_GAP_SEC
+        && $m['points'] >= 5
+        && $m['sweep_deg'] >= 330.0
+        && $m['duration_sec'] >= max(25.0, 4.0 * $m['median_dt_sec'])) {
+        return 'relaxed';
+    }
+    if ($m['median_speed_kmh'] < 50.0
+        && $m['max_gap_sec'] <= SOUNDING_TURN_RELAXED_GAP_SEC
+        && $m['points'] >= 6
+        && $m['sweep_deg'] >= 320.0
+        && $m['duration_sec'] >= 35.0) {
+        return 'slow';
+    }
+    return null;
 }
 
 /** Circular median direction: the observed direction with the lowest total angular distance. */
@@ -774,7 +1001,7 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
     $n02 = ceil($north * 5.0) / 5.0;
     $w02 = floor($w * 5.0) / 5.0;
     $e02 = ceil($e * 5.0) / 5.0;
-    $cacheKey = 'snd_v3_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
+    $cacheKey = 'snd_v4_' . md5(sprintf('%.1f_%.1f_%.1f_%.1f', $s02, $n02, $w02, $e02));
     if (($cached = cache_get($cacheDir, $cacheKey, SOUNDING_CACHE_TTL)) !== null) {
         echo $cached;
         exit;
@@ -799,9 +1026,9 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             $params[':east'] = $e;
         }
 
-        // Resolve candidate aircraft first, then fetch only their fixes. Doing
-        // the type filter in PHP preserves the packet/DDB fallback logic and
-        // stops station or ADS-B traffic from consuming the global row budget.
+        // Resolve candidate aircraft first, then filter by type in PHP. The
+        // larger candidate budget stops busy station/ADS-B traffic from pushing
+        // gliders and paragliders out before their packet/DDB type is known.
         $idStmt = $pdo->prepare("
             SELECT t.id
             FROM tracks t
@@ -811,7 +1038,7 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
               AND t.alt IS NOT NULL
             GROUP BY t.id
             ORDER BY MAX(t.ts) DESC
-            LIMIT 1000
+            LIMIT " . SOUNDING_MAX_CANDIDATES . "
         ");
         $idStmt->execute($params);
         $candidateIds = [];
@@ -943,48 +1170,65 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             $pts = $entry['pts'];
             $n = count($pts);
 
-            // Complete-turn drift: a full circle cancels airspeed and leaves
-            // the wind vector. Require dense fixes and reject straight tow legs.
+            // Complete-turn drift: a near-full circle cancels airspeed and
+            // leaves the wind vector. A circle fit judges sparse/noisy fixes,
+            // while the cumulative bearing is only a cheap prefilter.
             $turnStart = null;
             $cumTurn = 0.0;
-            $turnDuration = 0;
+            $turnDuration = 0.0;
+            $turnDts = [];
+            $turnSpeeds = [];
             $prevBearing = null;
+            $resetTurn = static function () use (&$turnStart, &$cumTurn, &$turnDuration, &$turnDts, &$turnSpeeds, &$prevBearing): void {
+                $turnStart = null;
+                $cumTurn = 0.0;
+                $turnDuration = 0.0;
+                $turnDts = [];
+                $turnSpeeds = [];
+                $prevBearing = null;
+            };
             for ($i = 1; $i < $n; $i++) {
                 $p0 = $pts[$i - 1];
                 $p1 = $pts[$i];
                 $dt = $p1['ts'] - $p0['ts'];
-                if ($dt < 1 || $dt > 6) {
-                    $turnStart = null; $cumTurn = 0.0; $turnDuration = 0; $prevBearing = null;
+                // Gaps above 10 s break the circle window; they cannot be
+                // bridged without inventing fixes between the two positions.
+                if ($dt < 1 || $dt > SOUNDING_TURN_RELAXED_GAP_SEC) {
+                    $resetTurn();
                     continue;
                 }
                 $segSpeedMps = sounding_haversine_km($p0['lat'], $p0['lon'], $p1['lat'], $p1['lon']) * 1000.0 / $dt;
                 if ($segSpeedMps > 200.0 / 3.6) {
-                    $turnStart = null; $cumTurn = 0.0; $turnDuration = 0; $prevBearing = null;
+                    $resetTurn();
                     continue;
                 }
                 $bearing = sounding_bearing_deg($p0['lat'], $p0['lon'], $p1['lat'], $p1['lon']);
+                $turnDts[] = $dt;
+                $turnSpeeds[] = $segSpeedMps * 3.6;
+                $turnDuration += $dt;
                 if ($turnStart === null) {
                     $turnStart = $i - 1;
                     $cumTurn = 0.0;
-                    $turnDuration = 0;
                     $prevBearing = $bearing;
                     continue;
                 }
                 $cumTurn += sounding_angle_delta($prevBearing, $bearing);
-                $turnDuration += $dt;
                 $prevBearing = $bearing;
 
-                // Prefer a complete 360° turn: at only 300° the aircraft's
-                // airspeed still leaks into the displacement vector and tilts
-                // the derived wind direction. Accept 300° only as a late fallback.
-                $complete = ($turnDuration >= 20 && abs($cumTurn) >= 340.0)
-                    || ($turnDuration > 120 && abs($cumTurn) >= 300.0);
-                if (!$complete) {
-                    if ($turnDuration > 120) {
-                        $turnStart = $i - 1;
-                        $cumTurn = 0.0;
-                        $turnDuration = 0;
-                    }
+                // A partial arc still leaks airspeed into displacement. Fit a
+                // circle only after the cheap bearing sum is close to a turn.
+                if (abs($cumTurn) < 300.0) {
+                    if ($turnDuration > 120.0) $resetTurn();
+                    continue;
+                }
+                $window = array_slice($pts, $turnStart, $i - $turnStart + 1);
+                $metrics = sounding_turn_metrics($window, $turnDts, $turnSpeeds);
+                $tier = null;
+                if ($metrics !== null && $metrics['signed_sweep_deg'] * $cumTurn > 0) {
+                    $tier = sounding_turn_tier($metrics);
+                }
+                if ($tier === null) {
+                    if ($turnDuration > 120.0) $resetTurn();
                     continue;
                 }
                 $start = $pts[$turnStart];
@@ -999,12 +1243,17 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
                         $meanAlt = ($start['alt'] + $p1['alt']) / 2.0;
                         $band = (int)(floor($meanAlt / 250.0) * 250.0);
                         $dir = fmod(rad2deg(atan2(-$dEast, -$dNorth)) + 360.0, 360.0);
-                        $turnSamples[$band][] = ['dir' => $dir, 'spd' => $windKmh, 'id' => $id];
+                        $turnSamples[$band][] = [
+                            'dir' => $dir,
+                            'spd' => $windKmh,
+                            'id' => $id,
+                            'tier' => $tier,
+                        ];
                     }
                 }
-                $turnStart = $i;
-                $cumTurn = 0.0;
-                $turnDuration = 0;
+                // Start the next window at the current fix so one flight can
+                // contribute several independent circles without double-counting.
+                $resetTurn();
             }
 
             // Empirical thermal ceiling support: climbing segments only.
@@ -1025,12 +1274,20 @@ if (isset($_GET['sounding']) && $_GET['sounding'] === '1') {
             foreach ($samples as $s) $allIds[$s['id']] = true;
             if (count($allIds) < 2) continue; // one aircraft must not define a layer
 
-            // Reject wind vectors >60° from the layer's circular median before
-            // averaging, so one bad turn cannot drag the reference direction.
+            // Strict turns keep the original 60° agreement window. If a layer
+            // relies on a relaxed/slow-aircraft circle, tighten it to 45° so
+            // the wider angular tolerance cannot weaken the direction floor.
+            $maxSpreadDeg = 60.0;
+            foreach ($samples as $s) {
+                if (($s['tier'] ?? 'strict') !== 'strict') {
+                    $maxSpreadDeg = 45.0;
+                    break;
+                }
+            }
             $medianDir = sounding_circular_median_dir(array_column($samples, 'dir'));
             $kept = [];
             foreach ($samples as $s) {
-                if (abs(sounding_angle_delta($medianDir, $s['dir'])) <= 60.0) $kept[] = $s;
+                if (abs(sounding_angle_delta($medianDir, $s['dir'])) <= $maxSpreadDeg) $kept[] = $s;
             }
             $keptIds = [];
             foreach ($kept as $s) $keptIds[$s['id']] = true;
