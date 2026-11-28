@@ -2365,14 +2365,25 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
         s3dOpenPopupForKey(key, currentPopup);
       }
     });
-    item = { el, lat, lon, alt, html: iconHtml, popupData, onClick: opts.onClick, s3dShowName: false };
+    item = {
+      el, lat, lon, alt, html: iconHtml || '', _iconSig: opts.iconSig || '',
+      popupData, onClick: opts.onClick, s3dShowName: false
+    };
     map3dDomMarkers.set(key, item);
   } else {
     item.popupData = popupData;
     // The callback captures the address/payload from the upsert that created the
     // marker. Refresh it on every update so a reused key cannot act on stale data.
     item.onClick = opts.onClick;
-    if (item.html !== iconHtml) {
+    if (opts.iconSig != null) {
+      // Live sync passes a signature so we can skip markerIcon() and innerHTML
+      // entirely when only position/popup data changed.
+      if (item._iconSig !== opts.iconSig) {
+        item._iconSig = opts.iconSig;
+        item.html = iconHtml || '';
+        if (item.html) item.el.innerHTML = item.html;
+      }
+    } else if (iconHtml && item.html !== iconHtml) {
       item.html = iconHtml;
       item.el.innerHTML = iconHtml;
     }
@@ -2842,9 +2853,18 @@ function sync3DLive(aircraftList) {
     if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
     const key = `live:${a.address}`;
     seen.add(key);
-    const iconHtml = markerIcon(a).options.html;
+    const focused = !replayActive && activeMapFocusAddress() === a.address;
+    const iconSig = liveMarkerIconSig(a, focused);
+    const existing = map3dDomMarkers.get(key);
+    // markerIcon() serializes SVG + label + HUD. Only rebuild it when the
+    // signature changed; otherwise pass null and let the upsert update only
+    // position/popup data.
+    const iconHtml = existing && existing._iconSig === iconSig
+      ? null
+      : markerIcon(a).options.html;
     s3dUpsertDomMarker(key, a.lat, a.lon, a.altitude, iconHtml, a, {
-      focused: !replayActive && activeMapFocusAddress() === a.address,
+      focused,
+      iconSig,
       onClick: () => {
         if (!selectedTracks.has(a.address)) toggleSelection(a.address, false);
       }
@@ -3305,7 +3325,7 @@ function applyUnitPreset(mode) {
   render();
 }
 
-map.on('zoomend moveend resize', updateMarkerLabels);
+map.on('zoomend moveend resize', () => scheduleMarkerLabelUpdate(true));
 map.on('zoomend resize', () => keepPopupAboveBottomBar());
 map.on('move zoom zoomanim resize zoomend viewreset', syncRaisedPopupPane);
 window.addEventListener('resize', syncBottomBarOffset);
@@ -6150,6 +6170,15 @@ function signalBarsHtml(snr) {
   return `<span class="sig-bars ${cls}" title="Signal: ${snr.toFixed(1)} dB" aria-label="Signal ${snr.toFixed(1)} dB">${items}</span>`;
 }
 
+// Shared signature for 2D icons, 3D DOM icons, and label scheduling. Keeping
+// this in one place lets both renderers skip HTML rebuilds when nothing that
+// affects the marker image changed.
+function liveMarkerIconSig(a, focused = false) {
+  const trackColor = selectedTracks.get(a.address)?.color || '';
+  const base = `${getResolvedType(a)}_${a.course ?? ''}_${isEmergency(a) ? 1 : 0}_${trackColor}_${displayName(a)}`;
+  return focused ? `${base}_focus_${liveFocusHudText(a)}` : base;
+}
+
 function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
@@ -6178,9 +6207,88 @@ function markerRectsOverlap(a, b, pad = 0) {
            a.bottom + pad < b.top || b.bottom + pad < a.top);
 }
 
+// Label collision is layout-heavy. Keep it off the live tick unless the
+// camera, marker set, or label-affecting state actually changed, and use a
+// grid instead of comparing every label against every other marker.
+const LABEL_GRID_PX = 120;
+let labelRafId = null;
+let labelForceUpdate = false;
+let lastLabelKey = '';
+let labelRectCacheKey = '';
+const labelRectCache = new Map();
+
+function labelGridCells(rect, pad = 0) {
+  const cells = [];
+  const x0 = Math.floor((rect.left - pad) / LABEL_GRID_PX);
+  const x1 = Math.floor((rect.right + pad) / LABEL_GRID_PX);
+  const y0 = Math.floor((rect.top - pad) / LABEL_GRID_PX);
+  const y1 = Math.floor((rect.bottom + pad) / LABEL_GRID_PX);
+  for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1; y++) cells.push(`${x},${y}`);
+  }
+  return cells;
+}
+
+function labelGridAdd(grid, rect) {
+  for (const cell of labelGridCells(rect)) {
+    let bucket = grid.get(cell);
+    if (!bucket) grid.set(cell, bucket = []);
+    bucket.push(rect);
+  }
+}
+
+function labelGridQuery(grid, rect, pad = 0) {
+  const found = new Set();
+  for (const cell of labelGridCells(rect, pad)) {
+    const bucket = grid.get(cell);
+    if (!bucket) continue;
+    for (const item of bucket) found.add(item);
+  }
+  return found;
+}
+
+function markerLabelKey() {
+  let bbox = '';
+  try {
+    const b = map.getBounds();
+    bbox = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()]
+      .map(v => Number(v).toFixed(5)).join(',');
+  } catch (e) {}
+  const size = map.getSize ? map.getSize() : { x: 0, y: 0 };
+  const parts = [
+    map.getZoom(), size.x, size.y, bbox,
+    markers.size, replayActive ? 1 : 0, activeMapFocusAddress() || ''
+  ];
+  let selected = '';
+  for (const key of selectedTracks.keys()) selected += `${key},`;
+  parts.push(selected);
+  for (const [key, m] of markers) {
+    parts.push(`${key}:${m._iconSig || ''}:${pinnedAircraft.has(key) ? 1 : 0}`);
+  }
+  if (replayActive) replayGroup.eachLayer(m => parts.push(`r:${m._replayId || ''}`));
+  return parts.join('|');
+}
+
+function scheduleMarkerLabelUpdate(force = false) {
+  if (force) labelForceUpdate = true;
+  if (labelRafId !== null) return;
+  labelRafId = requestAnimationFrame(() => {
+    labelRafId = null;
+    const key = markerLabelKey();
+    if (!labelForceUpdate && key === lastLabelKey) return;
+    labelForceUpdate = false;
+    lastLabelKey = key;
+    updateMarkerLabels();
+  });
+}
+
 function updateMarkerLabels() {
   // Names are no longer gated by zoom: show them whenever they fit without
   // colliding with other markers/labels, including at zoomed-out levels.
+  const key = markerLabelKey();
+  const useCache = key === labelRectCacheKey;
+  if (!useCache) labelRectCache.clear();
+  labelRectCacheKey = key;
   const mapRect = $('map').getBoundingClientRect();
   const barRect = visibleBottomBarEl()?.getBoundingClientRect();
   const candidates = [];
@@ -6189,12 +6297,27 @@ function updateMarkerLabels() {
     const el = m.getElement?.();
     if (!el) return;
     el.classList.remove('show-name');
-    const iconRect = el.getBoundingClientRect();
-    if (iconRect.width <= 0 || iconRect.height <= 0) return;
-    const label = el.querySelector('.glider-label');
-    if (!label) return;
-    const labelRect = label.getBoundingClientRect();
-    if (labelRect.width <= 0 || labelRect.height <= 0) return;
+    const cached = useCache ? labelRectCache.get(el) : null;
+    let iconRect = cached?.iconRect || null;
+    let labelRect = cached?.labelRect || null;
+    if (!iconRect || !labelRect) {
+      iconRect = el.getBoundingClientRect();
+      if (iconRect.width <= 0 || iconRect.height <= 0) {
+        labelRectCache.delete(el);
+        return;
+      }
+      const label = el.querySelector('.glider-label');
+      if (!label) {
+        labelRectCache.delete(el);
+        return;
+      }
+      labelRect = label.getBoundingClientRect();
+      if (labelRect.width <= 0 || labelRect.height <= 0) {
+        labelRectCache.delete(el);
+        return;
+      }
+      labelRectCache.set(el, { iconRect, labelRect });
+    }
     if (labelRect.left < mapRect.left + 2 || labelRect.right > mapRect.right - 2 ||
         labelRect.top < mapRect.top + 2 || labelRect.bottom > mapRect.bottom - 2) return;
     if (barRect && markerRectsOverlap(labelRect, barRect, 4)) return;
@@ -6221,12 +6344,28 @@ function updateMarkerLabels() {
   candidates.sort((a, b) => b.priority - a.priority ||
     a.labelRect.left - b.labelRect.left || a.labelRect.top - b.labelRect.top);
 
-  const shown = [];
+  const iconGrid = new Map();
+  for (const c of candidates) labelGridAdd(iconGrid, c.iconRect);
+  const shownGrid = new Map();
   for (const c of candidates) {
-    if (candidates.some(o => o !== c && markerRectsOverlap(c.labelRect, o.iconRect, 2))) continue;
-    if (shown.some(rect => markerRectsOverlap(c.labelRect, rect, 3))) continue;
+    let overlapsIcon = false;
+    for (const iconRect of labelGridQuery(iconGrid, c.labelRect, 2)) {
+      if (iconRect !== c.iconRect && markerRectsOverlap(c.labelRect, iconRect, 2)) {
+        overlapsIcon = true;
+        break;
+      }
+    }
+    if (overlapsIcon) continue;
+    let overlapsShown = false;
+    for (const shownRect of labelGridQuery(shownGrid, c.labelRect, 3)) {
+      if (markerRectsOverlap(c.labelRect, shownRect, 3)) {
+        overlapsShown = true;
+        break;
+      }
+    }
+    if (overlapsShown) continue;
     c.el.classList.add('show-name');
-    shown.push(c.labelRect);
+    labelGridAdd(shownGrid, c.labelRect);
   }
 }
 
@@ -6751,25 +6890,7 @@ function updateListHint(visible = null, bounds = null, candidates = null) {
   syncListFilterPill();
 }
 
-function render() {
-  if (replayActive) return;
-  const consumedSearchBypass = new Set(oneTimeSearchBypass);
-  const visible = filtered();
-  const bounds = currentBounds();
-  const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon, bounds, a.altitude));
-  const searchQ = $('search').value.trim();
-  const search24h = searchQ ? effectiveSearch24hResults() : [];
-  const useSearch24h = viewportList.length === 0 && search24h.length > 0;
-  // The 24h fallback is already driven by the search term, so do not hide its
-  // results because of the type preference filter.
-  const listVisible = useSearch24h ? search24h.slice() : viewportList;
-  const keep = new Set(visible.map(a => a.address));
-  const now = serverNow();
-  let tracksChanged = false;
-
-  render24hAlertsSummary(now);
-  updateListHint(visible, bounds, aircraft);
-
+function renderEmergencyBanner(visible) {
   const emergencies = visible.filter(isEmergency);
   if (emergencies.length > 0) {
     const first = emergencies[0];
@@ -6787,13 +6908,25 @@ function render() {
     $('mapWrap').classList.remove('has-emergency');
     emergencyBannerDismissedSig = null;
   }
+}
+
+function syncLiveMarkers(visible, keep, now) {
+  let tracksChanged = false;
+  // Batch cluster mutations. Adding/removing one marker at a time makes
+  // Leaflet.markercluster recompute and re-spiderfy on every live tick.
+  const clusterRemove = [];
+  const emergencyRemove = [];
+  const clusterAdd = [];
+  const emergencyAdd = [];
+  const clusterMoveIn = [];
+  const emergencyMoveIn = [];
 
   if (!isSpiderfied) {
     for (const [key, m] of markers) {
       if (!keep.has(key)) {
         forgetPopupForMarker(m);
-        if (m._isEmergency) emergencyGroup.removeLayer(m);
-        else clusterGroup.removeLayer(m);
+        if (m._isEmergency) emergencyRemove.push(m);
+        else clusterRemove.push(m);
         markers.delete(key);
       }
     }
@@ -6804,8 +6937,7 @@ function render() {
     const emerg = isEmergency(a);
     const trackColor = selectedTracks.get(key)?.color || '';
     const focusedLive = !replayActive && activeMapFocusAddress() === key;
-    const iconSig = `${getResolvedType(a)}_${a.course ?? ''}_${emerg ? 1 : 0}_${trackColor}_${displayName(a)}` +
-      (focusedLive ? `_focus_${liveFocusHudText(a)}` : '');
+    const iconSig = liveMarkerIconSig(a, focusedLive);
     let m = markers.get(key);
 
     if (!m) {
@@ -6847,8 +6979,8 @@ function render() {
       m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
       setMeasurePopupDetached(m, measureMode);
       markers.set(key, m);
-      if (emerg) emergencyGroup.addLayer(m);
-      else clusterGroup.addLayer(m);
+      if (emerg) emergencyAdd.push(m);
+      else clusterAdd.push(m);
     } else {
       m._data = a;
       const moved = m._trueLat !== a.lat || m._trueLon !== a.lon;
@@ -6872,8 +7004,13 @@ function render() {
         }
       }
       if (!isSpiderfied && m._isEmergency !== emerg) {
-        if (m._isEmergency) { emergencyGroup.removeLayer(m); clusterGroup.addLayer(m); }
-        else { clusterGroup.removeLayer(m); emergencyGroup.addLayer(m); }
+        if (m._isEmergency) {
+          emergencyRemove.push(m);
+          clusterMoveIn.push(m);
+        } else {
+          clusterRemove.push(m);
+          emergencyMoveIn.push(m);
+        }
         m._isEmergency = emerg;
       }
       if ((!isSpiderfied || m._isEmergency) && m._iconSig !== iconSig) {
@@ -6885,17 +7022,17 @@ function render() {
     if (followedAddress === key) centerOnFollowed();
   });
 
-  // Several tracked aircraft can move on one live tick; sync the 3D tubes and
-  // Vario legend once instead of once per appended track point.
-  if (tracksChanged) {
-    sync3DTracks();
-    syncVarioLegend();
-  }
+  if (emergencyRemove.length) emergencyGroup.removeLayers(emergencyRemove);
+  if (clusterRemove.length) clusterGroup.removeLayers(clusterRemove);
+  if (clusterAdd.length) clusterGroup.addLayers(clusterAdd);
+  if (emergencyAdd.length) emergencyGroup.addLayers(emergencyAdd);
+  if (clusterMoveIn.length) clusterGroup.addLayers(clusterMoveIn);
+  if (emergencyMoveIn.length) emergencyGroup.addLayers(emergencyMoveIn);
+  return tracksChanged;
+}
 
-  updateCoverageLayer();
-  sync3DLive(visible);
+function renderAircraftList(listVisible, now) {
   $('listCount').textContent = listVisible.length;
-
   const byName = (a, b) =>
     displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   const sorted = listVisible.slice().sort((a, b) => {
@@ -7010,7 +7147,9 @@ function render() {
       if (focusRow && document.activeElement !== focusRow) focusRow.focus({ preventScroll: true });
     }
   }
+}
 
+function finishMarkerBookkeeping(consumedSearchBypass) {
   for (const [addr, m] of searchResultMarkers) {
     if (markers.has(addr)) {
       searchResultGroup.removeLayer(m);
@@ -7024,7 +7163,39 @@ function render() {
     toggleSelection(target, true);
   }
   for (const addr of consumedSearchBypass) oneTimeSearchBypass.delete(addr);
-  updateMarkerLabels();
+}
+
+function render() {
+  if (replayActive) return;
+  const consumedSearchBypass = new Set(oneTimeSearchBypass);
+  const visible = filtered();
+  const bounds = currentBounds();
+  const viewportList = visible.filter(a => isInCurrentViewport(a.lat, a.lon, bounds, a.altitude));
+  const searchQ = $('search').value.trim();
+  const search24h = searchQ ? effectiveSearch24hResults() : [];
+  const useSearch24h = viewportList.length === 0 && search24h.length > 0;
+  // The 24h fallback is already driven by the search term, so do not hide its
+  // results because of the type preference filter.
+  const listVisible = useSearch24h ? search24h.slice() : viewportList;
+  const keep = new Set(visible.map(a => a.address));
+  const now = serverNow();
+
+  render24hAlertsSummary(now);
+  updateListHint(visible, bounds, aircraft);
+  renderEmergencyBanner(visible);
+
+  const tracksChanged = syncLiveMarkers(visible, keep, now);
+  // Several tracked aircraft can move on one live tick; sync the 3D tubes and
+  // Vario legend once instead of once per appended track point.
+  if (tracksChanged) {
+    sync3DTracks();
+    syncVarioLegend();
+  }
+  updateCoverageLayer();
+  sync3DLive(visible);
+  renderAircraftList(listVisible, now);
+  finishMarkerBookkeeping(consumedSearchBypass);
+  scheduleMarkerLabelUpdate();
 }
 
 $('alertsToggle').addEventListener('click', () => {
@@ -8382,7 +8553,7 @@ function updateReplayFocusMarker() {
       replayFocusMarker._hudSig = hudSig;
     }
   }
-  if (isNew) updateMarkerLabels();
+  if (isNew) scheduleMarkerLabelUpdate(true);
 }
 
 function stopReplayPlayback() {
@@ -8639,7 +8810,7 @@ async function loadReplaySlice() {
       marker._replayId = p.id;
       marker.addTo(replayGroup);
     });
-    updateMarkerLabels();
+    scheduleMarkerLabelUpdate(true);
     updateReplayFocusMarker();
     sync3DReplayPoints();
     if (hasFocus) centerOnFollowed(false, true, 0.2, false);
