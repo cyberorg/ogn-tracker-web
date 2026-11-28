@@ -681,6 +681,11 @@ let s3dDomMarkerSyncRaf = null;
 let s3dTerrainRefreshRaf = null;
 let s3dMarkerGeoJsonSig = '';
 let s3dArrowLayer = null;
+const S3D_TERRAIN_NULL_TTL_MS = 15000;
+let s3dTerrainDegraded = false;
+let s3dTerrainErrorNotifiedAtMs = 0;
+let s3dTerrainRetryTimer = null;
+// key -> { value, at }. A null value is a retryable miss, not a permanent result.
 const s3dTerrainElevationCache = new Map();
 const map3dDomMarkers = new Map();       // key -> { el, lat, lon, alt, html, isFocus, isReplay }
 const map3dDomPopupState = new Map();    // key -> { popup, detailsOpen }
@@ -695,20 +700,33 @@ function s3dResolveColor(value, fallback) {
   return raw;
 }
 
-// Terrain DEM queries are cached per coordinate; the cache is cleared when DEM
-// tiles arrive or the style changes, because queryTerrainElevation() is null
-// until the relevant tile is loaded.
+// Terrain DEM queries are cached per coordinate. A null result is cached only
+// briefly so a failed/late tile can recover without a page reload; real numbers
+// stay cached until DEM tiles arrive or the style changes.
 function s3dQueryTerrainElevation(lng, lat) {
   if (!map3d || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
   const key = `${lat.toFixed(5)},${lng.toFixed(5)}`;
-  if (s3dTerrainElevationCache.has(key)) return s3dTerrainElevationCache.get(key);
+  const now = Date.now();
+  const cached = s3dTerrainElevationCache.get(key);
+  if (cached && (cached.value != null || now - cached.at < S3D_TERRAIN_NULL_TTL_MS)) {
+    return cached.value;
+  }
   let value = null;
   try {
     const queried = map3d.queryTerrainElevation?.([lng, lat]);
     if (typeof queried === 'number' && Number.isFinite(queried)) value = queried;
   } catch (err) {}
-  if (s3dTerrainElevationCache.size > 4000) s3dTerrainElevationCache.clear();
-  s3dTerrainElevationCache.set(key, value);
+  if (s3dTerrainElevationCache.size > 4000) {
+    for (const [k, entry] of s3dTerrainElevationCache) {
+      if (entry.value == null && now - entry.at >= S3D_TERRAIN_NULL_TTL_MS) {
+        s3dTerrainElevationCache.delete(k);
+      }
+    }
+    if (s3dTerrainElevationCache.size > 4000) s3dTerrainElevationCache.clear();
+  }
+  s3dTerrainElevationCache.set(key, { value, at: now });
+  if (value != null) s3dMarkTerrainRecovered();
+  else s3dScheduleTerrainRetry();
   return value;
 }
 
@@ -765,11 +783,65 @@ function s3dScheduleTerrainRefresh() {
     s3dTerrainElevationCache.clear();
     s3dReplayCenterSig = '';
     s3dScheduleLabelUpdate();
-    if (map3dActive) {
+    if (map3dActive && !map3dPaused) {
       sync3DTracks();
       positionMeasure3D();
     }
   });
+}
+
+// A null DEM sample used to stay cached forever. Expire retryable misses in the
+// background so a late or recovered tile is picked up even on a static camera.
+function s3dScheduleTerrainRetry() {
+  if (s3dTerrainRetryTimer !== null || map3dPaused || !map3dActive) return;
+  s3dTerrainRetryTimer = setTimeout(() => {
+    s3dTerrainRetryTimer = null;
+    if (map3dPaused || !map3dActive) return;
+    const now = Date.now();
+    let hasExpired = false;
+    for (const [key, entry] of s3dTerrainElevationCache) {
+      if (entry.value == null && now - entry.at >= S3D_TERRAIN_NULL_TTL_MS) {
+        s3dTerrainElevationCache.delete(key);
+        hasExpired = true;
+      }
+    }
+    if (!hasExpired) return;
+    s3dScheduleTerrainRefresh();
+    s3dScheduleTerrainRetry();
+  }, S3D_TERRAIN_NULL_TTL_MS + 250);
+}
+
+function s3dIsDemErrorEvent(e) {
+  if (!e) return false;
+  if (e.sourceId === S3D_DEM || e.error?.sourceId === S3D_DEM) return true;
+  const text = [e.error?.message, e.error?.url, e.tile?.url, e.url]
+    .filter(Boolean).map(String).join(' ');
+  return /elevation-tiles-prod|terrain-tiles|\bDEM\b/i.test(text);
+}
+
+function s3dMarkTerrainDegraded() {
+  const now = Date.now();
+  const shouldNotify = !s3dTerrainDegraded || now - s3dTerrainErrorNotifiedAtMs > 60000;
+  s3dTerrainDegraded = true;
+  if (shouldNotify) {
+    s3dTerrainErrorNotifiedAtMs = now;
+    if (map3dActive) showToast('3D terrain unavailable — elevation is approximate', 3500);
+  }
+  // Drop retryable misses so a later tile load is picked up immediately.
+  s3dScheduleTerrainRefresh();
+  s3dScheduleTerrainRetry();
+}
+
+function s3dMarkTerrainRecovered() {
+  if (!s3dTerrainDegraded) return;
+  s3dTerrainDegraded = false;
+  s3dTerrainErrorNotifiedAtMs = 0;
+  if (s3dTerrainRetryTimer !== null) {
+    clearTimeout(s3dTerrainRetryTimer);
+    s3dTerrainRetryTimer = null;
+  }
+  if (map3dActive) showToast('3D terrain restored', 2500);
+  s3dScheduleTerrainRefresh();
 }
 
 function s3dLineFeature(coords, color) {
@@ -1961,6 +2033,10 @@ function setup3DLayers() {
   // first 3D activation; add the custom sources only once per style.
   try { map3d.setSky?.(S3D_SKY); } catch (err) {}
   s3dTerrainElevationCache.clear();
+  if (s3dTerrainRetryTimer !== null) {
+    clearTimeout(s3dTerrainRetryTimer);
+    s3dTerrainRetryTimer = null;
+  }
   if (map3d.getSource(S3D_DEM)) return;
   s3dArrowLayer = null;
   map3d.addSource(S3D_DEM, {
@@ -2094,7 +2170,12 @@ function ensure3DMap() {
   });
   map3d.on('move', s3dScheduleLabelUpdate);
   map3d.on('sourcedata', e => {
-    if (e.sourceId === S3D_DEM && e.isSourceLoaded) s3dScheduleTerrainRefresh();
+    if (e.sourceId !== S3D_DEM) return;
+    if (e.isSourceLoaded) s3dMarkTerrainRecovered();
+    s3dScheduleTerrainRefresh();
+  });
+  map3d.on('error', e => {
+    if (s3dIsDemErrorEvent(e)) s3dMarkTerrainDegraded();
   });
   map3d.on('click', e => {
     const hit = map3d.queryRenderedFeatures(e.point, {
@@ -6733,14 +6814,76 @@ function renderSounding() {
 }
 
 const WIDE_VIEW_AREA = 100;
+const LIVE_BBOX_PAD_FRACTION = 0.15;
+const LIVE_BBOX_PAD_MIN_DEG = 0.08;
+const LIVE_BBOX_PAD_MAX_LAT_DEG = 2;
+const LIVE_BBOX_PAD_MAX_LON_DEG = 4;
 let nextLivePollAtMs = 0;
 
-function currentViewArea() {
-  const b = map.getBounds();
-  const spanLat = Math.max(0, b.getNorth() - b.getSouth());
-  let spanLon = b.getEast() - b.getWest();
+// Small plain bounds object with the Leaflet getters used by the live fetch.
+// Keeping west/east raw preserves the backend's antimeridian convention.
+function makeViewBounds(south, north, west, east, source) {
+  if (![south, north, west, east].every(Number.isFinite)) return null;
+  if (north < south) [south, north] = [north, south];
+  south = Math.max(-85, Math.min(85, south));
+  north = Math.max(-85, Math.min(85, north));
+  let spanLon = east - west;
   if (spanLon < 0) spanLon += 360;
-  return spanLat * Math.min(spanLon, 360);
+  let centerLng = west + spanLon / 2;
+  if (centerLng > 180) centerLng -= 360;
+  else if (centerLng < -180) centerLng += 360;
+  return {
+    source,
+    spanLat: Math.max(0, north - south),
+    spanLon,
+    getSouth: () => south,
+    getNorth: () => north,
+    getWest: () => west,
+    getEast: () => east,
+    getCenter: () => ({ lat: (south + north) / 2, lng: centerLng })
+  };
+}
+
+function padViewBounds(b, source) {
+  if (!b) return null;
+  let south, north, west, east;
+  try {
+    south = b.getSouth(); north = b.getNorth();
+    west = b.getWest(); east = b.getEast();
+  } catch (err) {
+    return null;
+  }
+  if (![south, north, west, east].every(Number.isFinite)) return null;
+  const spanLat = Math.max(0, north - south);
+  let spanLon = east - west;
+  if (spanLon < 0) spanLon += 360;
+  const padLat = Math.min(LIVE_BBOX_PAD_MAX_LAT_DEG,
+    Math.max(LIVE_BBOX_PAD_MIN_DEG, spanLat * LIVE_BBOX_PAD_FRACTION));
+  const padLon = Math.min(LIVE_BBOX_PAD_MAX_LON_DEG,
+    Math.max(LIVE_BBOX_PAD_MIN_DEG, spanLon * LIVE_BBOX_PAD_FRACTION));
+  return makeViewBounds(south - padLat, north + padLat, west - padLon, east + padLon, source);
+}
+
+// In 3D the Leaflet mirror can cover a much larger ground area than the pitched
+// MapLibre camera. Poll the padded MapLibre bbox instead, and fall back to the
+// Leaflet bbox whenever 3D is inactive, paused, or not ready.
+function liveFetchBounds() {
+  if (map3d && map3dActive && map3dReady && !map3dPaused) {
+    let b = null;
+    try { b = map3d.getBounds?.(); } catch (err) {}
+    const padded = padViewBounds(b, 'maplibre');
+    if (padded) return padded;
+  }
+  let b = null;
+  try { b = map.getBounds(); } catch (err) {}
+  if (!b) return null;
+  return makeViewBounds(b.getSouth(), b.getNorth(), b.getWest(), b.getEast(), 'leaflet');
+}
+
+function currentViewArea() {
+  const b = liveFetchBounds();
+  if (!b) return WIDE_VIEW_AREA;
+  return Math.max(0, b.spanLat) * Math.min(Math.max(0, b.spanLon), 360);
 }
 
 function livePollIntervalMs(area) {
@@ -6751,7 +6894,7 @@ function livePollIntervalMs(area) {
 }
 
 function boundsMovedSignificantly(b) {
-  if (!lastMetaBounds) return true;
+  if (!b || !lastMetaBounds) return true;
   const c = b.getCenter();
   const dLat = Math.abs(c.lat - lastMetaBounds.lat);
   const dLng = Math.abs(c.lng - lastMetaBounds.lng);
@@ -6767,7 +6910,8 @@ async function fetchLive(force = false) {
   lastFetchAttemptAtMs = nowAttemptMs;
   fetching = true;
   try {
-    const b = map.getBounds();
+    const b = liveFetchBounds();
+    if (!b) throw new Error('No view bounds available');
     const shouldFetchMeta = needMeta || boundsMovedSignificantly(b);
     const params = new URLSearchParams({
       live: '1',
