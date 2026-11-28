@@ -50,7 +50,7 @@ if (!$doGenerate) {
     http_response_code(503);
     ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzdemfetch1"></head><body>
+<link rel="stylesheet" href="style.css?v=20261128zzlowsev1"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
@@ -277,6 +277,12 @@ function scrollChart(array $data, string $c1, string $c2, int $visible = 8): str
     }
     return $out . '</div></div>';
 }
+
+// Defaults keep the fatal page well-formed if generation fails before meta load.
+$dataUpdated = 0;
+$dataAge = -1;
+$dataOk = false;
+$nextRefreshAt = $generatedAt + $cacheTtl;
 
 try {
     if (!file_exists($dbFile)) throw new RuntimeException('Database file not found.');
@@ -689,7 +695,7 @@ $genDuration = microtime(true) - $generationStarted;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzdemfetch1">
+<link rel="stylesheet" href="style.css?v=20261128zzlowsev1">
 <style>
   header{cursor:default}
   main{display:block!important}
@@ -795,7 +801,7 @@ $genDuration = microtime(true) - $generationStarted;
   </div>
   <div class="status" id="insStatus" data-data-ts="<?php echo $dataUpdated; ?>" data-gen-ts="<?php echo $generatedAt; ?>">
     <span class="dot <?php echo $dataOk ? 'live' : 'error'; ?>"></span>
-    <span id="insStatusText"><?php echo $dataOk ? 'Snapshot OK' : 'Collector overdue'; ?></span>
+    <span id="insStatusText"><?php echo isset($fatal) ? 'Unavailable' : ($dataOk ? 'Snapshot OK' : 'Collector overdue'); ?></span>
     <span class="status-updated" id="insStatusAge">
       <?php if ($dataUpdated > 0): ?>data @ <time class="ins-time" data-ts="<?php echo $dataUpdated; ?>"><?php echo h(date('H:i', $dataUpdated)); ?></time><?php else: ?>no data timestamp<?php endif; ?>
     </span>

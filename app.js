@@ -671,8 +671,91 @@ mapAttributionEl.addEventListener('touchmove', event => {
 }, { passive: false });
 
 let s3dStyleSwapSeq = 0;
-let ignoreLeaflet3DSyncUntil = 0;
-let ignoreMap3DSyncUntil = 0;
+// Programmatic camera moves register the camera state they will land on. The
+// matching moveend consumes the token; an unmatched moveend is real user input
+// and syncs immediately, so no fixed wall-clock window can swallow a drag.
+let pendingLeafletCameraStops = [];
+let pending3DCameraStops = [];
+
+function armLeafletCameraStop(lat, lng, zoom = null) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  pendingLeafletCameraStops.push({ lat, lng, zoom: Number.isFinite(zoom) ? zoom : null });
+  if (pendingLeafletCameraStops.length > 8) pendingLeafletCameraStops.shift();
+}
+
+function arm3DCameraStop(lng, lat, zoom = null, wildcard = false) {
+  if (!wildcard && (!Number.isFinite(lng) || !Number.isFinite(lat))) return;
+  pending3DCameraStops.push({
+    lng, lat, wildcard, zoom: Number.isFinite(zoom) ? zoom : null
+  });
+  if (pending3DCameraStops.length > 8) pending3DCameraStops.shift();
+}
+
+function consumeLeafletCameraStop() {
+  if (!pendingLeafletCameraStops.length) return false;
+  let center, zoom, point;
+  try {
+    center = map.getCenter();
+    zoom = map.getZoom();
+    point = map.latLngToContainerPoint(L.latLng(center.lat, center.lng));
+  } catch (err) {
+    pendingLeafletCameraStops.length = 0;
+    return false;
+  }
+  // Prefer the newest matching stop: a coalesced move can represent several
+  // queued camera commands, so earlier superseded stops must not linger.
+  let idx = -1;
+  for (let i = pendingLeafletCameraStops.length - 1; i >= 0; i--) {
+    const token = pendingLeafletCameraStops[i];
+    if (token.wildcard) { idx = i; break; }
+    let expected;
+    try { expected = map.latLngToContainerPoint(L.latLng(token.lat, token.lng)); } catch (err) { continue; }
+    if (!point || !expected || !Number.isFinite(point.x) || !Number.isFinite(point.y) ||
+        !Number.isFinite(expected.x) || !Number.isFinite(expected.y)) continue;
+    if (Math.hypot(point.x - expected.x, point.y - expected.y) > 4) continue;
+    if (token.zoom != null && (!Number.isFinite(zoom) || Math.abs(zoom - token.zoom) > 0.05)) continue;
+    idx = i;
+    break;
+  }
+  if (idx < 0) {
+    pendingLeafletCameraStops.length = 0;
+    return false;
+  }
+  pendingLeafletCameraStops.splice(0, idx + 1);
+  return true;
+}
+
+function consume3DCameraStop() {
+  if (!pending3DCameraStops.length) return false;
+  let center, zoom, point;
+  try {
+    center = map3d.getCenter();
+    zoom = map3d.getZoom();
+    point = map3d.project?.([center.lng, center.lat]);
+  } catch (err) {
+    pending3DCameraStops.length = 0;
+    return false;
+  }
+  let idx = -1;
+  for (let i = pending3DCameraStops.length - 1; i >= 0; i--) {
+    const token = pending3DCameraStops[i];
+    if (token.wildcard) { idx = i; break; }
+    let expected;
+    try { expected = map3d.project?.([token.lng, token.lat]); } catch (err) { continue; }
+    if (!point || !expected || !Number.isFinite(point.x) || !Number.isFinite(point.y) ||
+        !Number.isFinite(expected.x) || !Number.isFinite(expected.y)) continue;
+    if (Math.hypot(point.x - expected.x, point.y - expected.y) > 4) continue;
+    if (token.zoom != null && (!Number.isFinite(zoom) || Math.abs(zoom - token.zoom) > 0.05)) continue;
+    idx = i;
+    break;
+  }
+  if (idx < 0) {
+    pending3DCameraStops.length = 0;
+    return false;
+  }
+  pending3DCameraStops.splice(0, idx + 1);
+  return true;
+}
 let s3dReplayCenterSig = '';
 let s3dReplayCenterRatio = null;
 let s3dReplaySmoothSig = '';
@@ -1493,17 +1576,33 @@ function s3dSetData(sourceId, data) {
   map3d.getSource(sourceId).setData(data);
 }
 
+function s3dUnbindPopupDetails(state) {
+  if (!state) return;
+  if (state.detailsEl && state.detailsHandler) {
+    try { state.detailsEl.removeEventListener('toggle', state.detailsHandler); } catch (err) {}
+  }
+  state.detailsEl = null;
+  state.detailsHandler = null;
+}
+
 function s3dBind2DPopupHandlers(popupEl, key, address) {
   if (!popupEl) return;
   const state = map3dDomPopupState.get(key) || { popup: null, detailsOpen: false };
   const detailsEl = popupEl.querySelector('[data-popup-details]');
+  s3dUnbindPopupDetails(state);
   if (detailsEl) {
     detailsEl.open = !!state.detailsOpen;
-    detailsEl.onchange = () => {
+    // <details> emits toggle, not change. Store the listener so a replaced
+    // popup body can unbind it instead of accumulating detached handlers.
+    const handler = () => {
       state.detailsOpen = detailsEl.open;
       map3dDomPopupState.set(key, state);
     };
+    detailsEl.addEventListener('toggle', handler);
+    state.detailsEl = detailsEl;
+    state.detailsHandler = handler;
   }
+  map3dDomPopupState.set(key, state);
   popupEl.querySelectorAll('.popup-actions button').forEach(btn => {
     btn.onclick = ev => {
       ev.preventDefault();
@@ -1617,6 +1716,7 @@ function s3dCreatePopupController(key) {
       const st = map3dDomPopupState.get(key);
       const detailsEl = el.querySelector('[data-popup-details]');
       if (detailsEl && st) st.detailsOpen = detailsEl.open;
+      if (st) s3dUnbindPopupDetails(st);
       contentEl.innerHTML = html;
       s3dPositionPopup(el);
       return controller;
@@ -1625,6 +1725,7 @@ function s3dCreatePopupController(key) {
       const st = map3dDomPopupState.get(key);
       const detailsEl = el.querySelector('[data-popup-details]');
       if (detailsEl && st) st.detailsOpen = detailsEl.open;
+      if (st) s3dUnbindPopupDetails(st);
       el.remove();
     }
   };
@@ -2161,11 +2262,13 @@ function ensure3DMap() {
     sync3DFromLeaflet();
   });
   map.on('moveend', () => {
-    if (map3dPaused || !map3dActive || performance.now() < ignoreLeaflet3DSyncUntil) return;
+    if (consumeLeafletCameraStop()) return;
+    if (map3dPaused || !map3dActive) return;
     sync3DFromLeaflet();
   });
   map3d.on('moveend', () => {
-    if (map3dPaused || !map3dActive || performance.now() < ignoreMap3DSyncUntil) return;
+    if (consume3DCameraStop()) return;
+    if (map3dPaused || !map3dActive) return;
     syncLeafletFrom3D();
   });
   map3d.on('move', s3dScheduleLabelUpdate);
@@ -2267,23 +2370,18 @@ function resize3D() {
 function sync3DFromLeaflet() {
   if (map3dPaused || !map3dReady || !map3dActive) return;
   const c = map.getCenter();
-  ignoreMap3DSyncUntil = performance.now() + 250;
-  map3d.jumpTo({
-    center: [c.lng, c.lat],
-    zoom: Math.max(2, Math.min(16, map.getZoom() + 1))
-  });
+  const zoom = Math.max(2, Math.min(16, map.getZoom() + 1));
+  arm3DCameraStop(c.lng, c.lat, zoom);
+  map3d.jumpTo({ center: [c.lng, c.lat], zoom });
   s3dScheduleLabelUpdate();
 }
 
 function syncLeafletFrom3D() {
   if (map3dPaused || !map3dReady || !map3dActive) return;
   const c = map3d.getCenter();
-  ignoreLeaflet3DSyncUntil = performance.now() + 250;
-  map.setView(
-    [c.lat, c.lng],
-    Math.max(1, Math.min(16, Math.round(map3d.getZoom() - 1))),
-    { animate: false }
-  );
+  const zoom = Math.max(1, Math.min(16, Math.round(map3d.getZoom() - 1)));
+  armLeafletCameraStop(c.lat, c.lng, zoom);
+  map.setView([c.lat, c.lng], zoom, { animate: false });
 }
 
 function sync3DLive(aircraftList) {
@@ -3667,7 +3765,19 @@ function align3DFollowedMarker(address) {
     syncLeafletFrom3D();
     return;
   }
-  ignoreMap3DSyncUntil = performance.now() + 250;
+  // Register the camera state this pan will reach so its moveend is ignored
+  // without suppressing a real drag that ends during the same animation.
+  let nextLng = null, nextLat = null;
+  try {
+    const c0 = map3d.getCenter();
+    const p0 = map3d.project?.([c0.lng, c0.lat]);
+    const ll = p0 && map3d.unproject?.([p0.x + dx * 0.65, p0.y + dy * 0.65]);
+    if (ll && Number.isFinite(ll.lng) && Number.isFinite(ll.lat)) {
+      nextLng = s3dWrapLon(ll.lng);
+      nextLat = ll.lat;
+    }
+  } catch (err) {}
+  arm3DCameraStop(nextLng, nextLat, map3d.getZoom(), nextLng === null);
   map3d.panBy([dx * 0.65, dy * 0.65], { duration: 0 });
   if (++follow3DAlignSteps >= 16) {
     stop3DFollowAlign();
@@ -3765,12 +3875,11 @@ function centerOnFollowed(force = false, animate = true, panDuration = 0.2, alig
         : s3dCameraCenterForPoint(lon, lat, alt)) || ground)
     : ground;
   if (use3D) {
-    const guardMs = Math.round(panDuration * 1000) + 250;
-    ignoreMap3DSyncUntil = performance.now() + guardMs;
-    // Leaflet is hidden in 3D mode. Move its state instantly and keep its
-    // moveend from syncing back into MapLibre while MapLibre is animating;
-    // otherwise the two maps ping-pong and replay visibly shakes.
-    ignoreLeaflet3DSyncUntil = performance.now() + guardMs;
+    // Leaflet is hidden in 3D mode. Move its state instantly and tag both
+    // moveends with their expected cameras; otherwise the two maps ping-pong
+    // and replay visibly shakes.
+    armLeafletCameraStop(dest.lat, dest.lng, map.getZoom());
+    arm3DCameraStop(dest.lng, dest.lat, map3d.getZoom());
   }
   if (map.getCenter().distanceTo(dest) > 1) {
     map.setView(dest, map.getZoom(), { animate: use3D ? false : animate, duration: panDuration });
@@ -4246,7 +4355,7 @@ function recenterFocusedMarkerOnClose(m) {
         ? (s3dCameraCenterForPoint(a.lon, a.lat, a.altitude) || ground)
         : ground;
       if (map3dReady && map3dActive) {
-        ignoreMap3DSyncUntil = performance.now() + 250;
+        arm3DCameraStop(dest.lng, dest.lat, map3d.getZoom());
         map3d.jumpTo({ center: [dest.lng, dest.lat] });
       }
       map.setView(dest, map.getZoom(), { animate: false });
@@ -4297,9 +4406,15 @@ function focusAircraftOnMap(address, fallbackAircraft = null) {
     if (use3D) {
       // Match MapLibre to the 2D zoom before computing the altitude correction,
       // then center on the rendered aircraft rather than its ground shadow.
-      map3d.jumpTo({ zoom: Math.max(2, Math.min(16, map.getZoom() + 1)) });
+      const zoom3D = Math.max(2, Math.min(16, map.getZoom() + 1));
+      const before = map3d.getCenter();
+      // The zoom-only jump is a separate moveend; tag it so it does not look
+      // like user input before the final centred camera lands.
+      arm3DCameraStop(before.lng, before.lat, zoom3D);
+      map3d.jumpTo({ zoom: zoom3D });
       dest = s3dCameraCenterForPoint(a.lon, a.lat, a.altitude) || ground;
-      ignoreMap3DSyncUntil = performance.now() + 500;
+      armLeafletCameraStop(dest.lat, dest.lng, map.getZoom());
+      arm3DCameraStop(dest.lng, dest.lat, zoom3D);
       map.setView(dest, map.getZoom(), { animate: false });
       map3d.jumpTo({ center: [dest.lng, dest.lat] });
     } else {
