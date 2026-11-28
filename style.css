@@ -53,7 +53,7 @@ button{cursor:pointer;font-size:13px}button:hover{border-color:var(--accent)}but
 .feed-status-retry{padding:3px 7px;font-size:10px;border-radius:6px}
 .dot{width:8px;height:8px;border-radius:50%;background:var(--yellow)}.dot.live{background:var(--accent);box-shadow:0 0 10px #57d3b088}.dot.warn,.dot.warning{background:var(--yellow)}.dot.error{background:var(--red)}
 main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
-.map-wrap{position:relative;height:100%;width:100%;min-height:0;transition:opacity 180ms ease}
+.map-wrap{position:relative;height:100%;width:100%;min-height:0}
 #map{height:100%;width:100%;background:#dce5e8}
 .map-wrap.has-bottom-bar #map{height:calc(100% - var(--bottom-bar-space,0px))}
 #map3d{position:absolute;inset:0;width:100%;height:100%;z-index:400;background:var(--bg)}
@@ -91,7 +91,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .replay-bar .replay-time-toggle.track-time .replay-tz-tag{color:var(--accent);border-color:var(--accent)}
 .replay-bar .replay-time-toggle:disabled{opacity:.45;cursor:not-allowed}
 .replay-bar .replay-time-toggle:disabled:hover{background:var(--control-bg);border-color:transparent;color:inherit}
-.sidebar{position:relative;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;transition:transform 180ms ease,opacity 180ms ease}
+.sidebar{position:relative;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;transition:transform 240ms cubic-bezier(.22,.61,.36,1)}
 .filters{display:grid;grid-template-columns:1fr auto;gap:7px;padding:10px 12px;border-bottom:1px solid var(--line);align-items:center}
 .filters .search{width:100%}
 .filters select,.filters input{min-width:0;width:100%;padding:7px 9px;font-size:13px}
@@ -417,12 +417,13 @@ html.list-mode .list-back-to-map-row{display:flex;justify-content:center;flex:0 
   header{position:sticky;top:0;z-index:1000;align-items:center;flex-wrap:wrap;gap:8px;padding:10px}
   .sidebar-chrome{position:sticky;top:var(--header-h);z-index:900;background:var(--panel);border-bottom:1px solid var(--line)}
   html.list-mode,html.list-mode body{overflow:hidden;overscroll-behavior:none}
-  html.list-mode header{display:none}
-  html.list-mode .map-wrap{visibility:hidden;pointer-events:none;opacity:0;transition:opacity 180ms ease,visibility 0s linear 180ms}
+  html.list-mode:not(.list-exit) header{display:none}
+  html.list-mode .map-wrap{visibility:hidden;pointer-events:none;transition:visibility 0s linear 240ms}
   html.list-mode .sidebar{position:fixed;top:var(--header-h);left:0;right:0;bottom:0;height:auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;z-index:800}
-  /* Enter/exit slide the list over a crossfading map instead of snapping. */
-  html.list-mode:is(.list-enter,.list-exit) .sidebar{transform:translateY(18px);opacity:.8}
-  html.list-mode.list-exit .map-wrap{visibility:visible;opacity:1;transition:opacity 180ms ease}
+  /* Bottom-sheet slide: the list rises over the map and drops back down. */
+  html.list-mode:is(.list-enter,.list-exit) .sidebar{transform:translateY(100%)}
+  html.list-mode.list-exit .map-wrap{visibility:visible;transition:none}
+  .list-snap .sidebar{transition:none}
   html.list-mode .sidebar-chrome{position:static;top:auto;flex:0 0 auto}
   html.list-mode .aircraft-list{flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
   html.list-mode .alerts-list{max-height:30dvh;overflow:auto}

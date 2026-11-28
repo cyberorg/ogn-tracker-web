@@ -8678,7 +8678,9 @@ function syncHeaderUi() {
 function syncStickyTop() {
   if (!siteHeader) return;
   // The header is hidden in list mode; the fixed list must start at the top.
-  const hidden = document.documentElement.classList.contains('list-mode');
+  // On exit the header comes back before the slide, so reveal its height too.
+  const classes = document.documentElement.classList;
+  const hidden = classes.contains('list-mode') && !classes.contains('list-exit');
   document.documentElement.style.setProperty(
     '--header-h',
     hidden ? '0px' : `${siteHeader.getBoundingClientRect().height}px`
@@ -8799,7 +8801,7 @@ const rootEl = document.documentElement;
 let listMode = false;
 let listModeDocTop = 0;
 let listModeExitGuard = false;
-const LIST_ANIM_MS = 180;
+const LIST_ANIM_MS = 240;
 let listModeAnimTimer = null;
 
 function clearListModeAnimTimer() {
@@ -8818,7 +8820,7 @@ function enterListMode() {
   listModeDocTop = sidebar.getBoundingClientRect().top + scrollTop;
   listMode = true;
   window.scrollTo(0, listModeDocTop);
-  rootEl.classList.remove('list-exit');
+  rootEl.classList.remove('list-exit', 'list-snap');
   rootEl.classList.add('list-mode', 'list-enter');
   sync3DMapVisibility();
   if (listForTopBtn) listForTopBtn.scrollTop = 0;
@@ -8835,10 +8837,14 @@ function exitListMode(returnToMap) {
   listMode = false;
   rootEl.classList.remove('list-enter');
   rootEl.classList.add('list-exit');
+  syncStickyTop();
   clearListModeAnimTimer();
   listModeAnimTimer = setTimeout(() => {
     listModeAnimTimer = null;
+    // Snap back to normal flow without animating the sheet's exit transform.
+    rootEl.classList.add('list-snap');
     rootEl.classList.remove('list-mode', 'list-exit');
+    requestAnimationFrame(() => rootEl.classList.remove('list-snap'));
     syncStickyTop();
     sync3DMapVisibility();
     if (returnToMap) {
