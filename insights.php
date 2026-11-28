@@ -3,9 +3,14 @@ declare(strict_types=1);
 
 /*
  * OGN Tracker Insights — read-only rolling 24-hour statistics.
- * Regeneration is done by a 4-hourly cron job (php insights.php --generate)
- * or on demand with ?fresh=1.
+ * Regeneration is done by a 4-hourly cron job (php insights.php --generate).
+ * Browser-triggered regeneration via ?fresh=1 is opt-in for local testing only.
  */
+
+// Set to true only on a private test instance. Browser-triggered regeneration
+// snapshots the database and can scan 24 hours of tracks, so leave this false
+// in production and rely on the 4-hourly cron job instead.
+if (!defined('INSIGHTS_ALLOW_WEB_REFRESH')) define('INSIGHTS_ALLOW_WEB_REFRESH', false);
 
 $dbFile = __DIR__ . '/ogn-live.sqlite';
 $cutoff = time() - 86400;
@@ -26,7 +31,9 @@ date_default_timezone_set($serverTz);
 $tzOffset = (new DateTimeZone($serverTz))->getOffset(new DateTimeImmutable('@' . time()));
 
 $cliGenerate  = PHP_SAPI === 'cli' && in_array('--generate', $_SERVER['argv'] ?? [], true);
-$forceGenerate = isset($_GET['fresh']);
+$forceGenerate = INSIGHTS_ALLOW_WEB_REFRESH
+    && isset($_GET['fresh'])
+    && (string)$_GET['fresh'] === '1';
 $doGenerate   = $cliGenerate || $forceGenerate;
 $generatedAt = time();
 $generationStarted = microtime(true);
@@ -34,7 +41,7 @@ $genDuration = 0.0;
 
 if (!is_dir($cacheDir)) @mkdir($cacheDir, 0755, true);
 
-// Web requests serve the snapshot unless ?fresh=1 forces a regeneration.
+// Web requests serve the snapshot unless web refresh is explicitly enabled and ?fresh=1 is requested.
 if (!$doGenerate) {
     if (is_readable($cacheFile)) {
         readfile($cacheFile);
@@ -43,7 +50,7 @@ if (!$doGenerate) {
     http_response_code(503);
     ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzc1fix1"></head><body>
+<link rel="stylesheet" href="style.css?v=20261128zzfresh1"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
@@ -682,7 +689,7 @@ $genDuration = microtime(true) - $generationStarted;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzc1fix1">
+<link rel="stylesheet" href="style.css?v=20261128zzfresh1">
 <style>
   header{cursor:default}
   main{display:block!important}

@@ -57,7 +57,9 @@ Requirements: PHP 8.0+ with `pdo_sqlite` and `sqlite3`, cron access, outbound TC
    0 */4 * * * /usr/bin/php /path/to/public_html/ogn/insights.php --generate >/dev/null 2>&1
    ```
 
-   Run `php insights.php --generate` once manually as that user to create the first snapshot. `insights.php?fresh=1` rebuilds on demand in the browser.
+   Run `php insights.php --generate` once manually as that user to create the first snapshot.
+
+   Browser-triggered regeneration with `insights.php?fresh=1` is **disabled by default**. It is only intended for testing on a private instance: set `INSIGHTS_ALLOW_WEB_REFRESH` to `true` near the top of `insights.php` to enable it. Leave it `false` in production and use the cron job above. When disabled, `?fresh=1` is ignored and the cached snapshot is served as usual. A forced browser refresh snapshots the database and can scan 24 hours of tracks, so an unauthenticated public refresh endpoint would be an availability risk.
 
 ---
 
