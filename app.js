@@ -1038,6 +1038,27 @@ function s3dLineFeature(coords, color) {
   };
 }
 
+// FANET packets often omit altitude. Carrying the nearest known altitude into
+// those fixes keeps a track from diving to the DEM surface in 3D while leaving
+// the stored/popup altitude untouched and honest.
+function fillTrackAltitudes(points) {
+  const out = (points || []).map(p => Array.isArray(p) ? p.slice() : p);
+  for (let i = 0; i < out.length; i++) {
+    if (!Array.isArray(out[i]) || Number.isFinite(out[i][2])) continue;
+    let alt = null;
+    for (let j = i - 1; j >= 0; j--) {
+      if (Number.isFinite(out[j][2])) { alt = out[j][2]; break; }
+    }
+    if (alt === null) {
+      for (let j = i + 1; j < out.length; j++) {
+        if (Number.isFinite(out[j][2])) { alt = out[j][2]; break; }
+      }
+    }
+    if (alt !== null) out[i][2] = alt;
+  }
+  return out;
+}
+
 // Long tracks otherwise produce hundreds of overlapping 3D curtain segments,
 // which look like a wall of lines. Keep the endpoints and sample evenly.
 function s3dSimplifyPoints(points, maxPoints) {
@@ -1371,7 +1392,7 @@ function s3dDisposeObject(obj) {
 function s3dCurveFromPoints(points) {
   const THREE = s3dThree();
   if (!THREE || !window.maplibregl?.MercatorCoordinate) return null;
-  const valid = s3dSimplifyPoints(points, 160);
+  const valid = s3dSimplifyPoints(fillTrackAltitudes(points), 160);
   if (valid.length < 2) return null;
   const vecs = valid.map(p => {
     const elevation = s3dRenderAltitude(p[1], p[0], p[2]);
@@ -1680,10 +1701,13 @@ function s3dReplaceThreeLines(group, segments) {
 function s3dSyncThreeLines() {
   if (!s3dArrowLayer?.lines) return;
   if (!replayActive) {
-    s3dReplaceThreeLines(s3dArrowLayer.lines.tracks,
-      [...selectedTracks.values()].map(entry => ({
-        points: entry.points, color: entry.color, opacity: 0.95, widthPx: S3D_TRACK_PX
-      })));
+    const liveSegments = [];
+    for (const entry of selectedTracks.values()) {
+      for (const points of splitTrackSegments(entry.points)) {
+        liveSegments.push({ points, color: entry.color, opacity: 0.95, widthPx: S3D_TRACK_PX });
+      }
+    }
+    s3dReplaceThreeLines(s3dArrowLayer.lines.tracks, liveSegments);
     s3dReplaceThreeLines(s3dArrowLayer.lines.replay, []);
     s3dReplaceThreeLines(s3dArrowLayer.lines.progress, []);
   } else {
@@ -1716,21 +1740,25 @@ function s3dTrackLineFeature(points, color) {
 // Fallback for browsers without the three.js custom layer. In vario mode each
 // fix pair gets the same climb bucket colour used by the flat 2D track.
 function s3dTrackLineFeatures(points, color) {
-  const valid = s3dSimplifyPoints(points, 220);
-  if (valid.length < 2) return [];
-  if (!varioTrackMode) {
-    const f = s3dTrackLineFeature(valid, color);
-    return f ? [f] : [];
-  }
-  const colors = s3dVarioTrackColors(valid, color);
   const features = [];
-  for (let i = 1; i < valid.length; i++) {
-    const p0 = valid[i - 1], p1 = valid[i];
-    const f = s3dLineFeature([
-      s3dTrackPointCoords(p0),
-      s3dTrackPointCoords(p1)
-    ], colors[i]);
-    if (f) features.push(f);
+  for (const segment of splitTrackSegments(points)) {
+    const valid = s3dSimplifyPoints(segment, 220);
+    if (valid.length < 2) continue;
+    const filled = fillTrackAltitudes(valid);
+    if (!varioTrackMode) {
+      const f = s3dTrackLineFeature(filled, color);
+      if (f) features.push(f);
+      continue;
+    }
+    const colors = s3dVarioTrackColors(valid, color);
+    for (let i = 1; i < filled.length; i++) {
+      const p0 = filled[i - 1], p1 = filled[i];
+      const f = s3dLineFeature([
+        s3dTrackPointCoords(p0),
+        s3dTrackPointCoords(p1)
+      ], colors[i]);
+      if (f) features.push(f);
+    }
   }
   return features;
 }
@@ -3835,28 +3863,37 @@ function varioSegmentColor(p0, p1) {
 // number of Leaflet SVG paths drops substantially on long tracks.
 function varioPolylineRuns(points, style) {
   const layers = [];
-  if (!points || points.length < 2) return layers;
-  let runColor = null;
-  let runCoords = null;
-  for (let i = 1; i < points.length; i++) {
-    const color = varioSegmentColor(points[i - 1], points[i]);
-    if (runCoords && color === runColor) {
-      runCoords.push([points[i][0], points[i][1]]);
-      continue;
+  for (const segment of splitTrackSegments(points)) {
+    let runColor = null;
+    let runCoords = null;
+    for (let i = 1; i < segment.length; i++) {
+      const color = varioSegmentColor(segment[i - 1], segment[i]);
+      if (runCoords && color === runColor) {
+        runCoords.push([segment[i][0], segment[i][1]]);
+        continue;
+      }
+      if (runCoords) layers.push(L.polyline(runCoords, { ...style, color: runColor }));
+      runColor = color;
+      runCoords = [[segment[i - 1][0], segment[i - 1][1]], [segment[i][0], segment[i][1]]];
     }
     if (runCoords) layers.push(L.polyline(runCoords, { ...style, color: runColor }));
-    runColor = color;
-    runCoords = [[points[i - 1][0], points[i - 1][1]], [points[i][0], points[i][1]]];
   }
-  if (runCoords) layers.push(L.polyline(runCoords, { ...style, color: runColor }));
   return layers;
 }
 
 function buildTrackLayer(points, flatColor) {
   if (!points || points.length < 2) return null;
   const pane = trackPaneName();
+  const segments = splitTrackSegments(points);
   if (!varioTrackMode) {
-    return L.polyline(points.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 });
+    if (segments.length <= 1) {
+      return L.polyline(points.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 });
+    }
+    const grp = L.layerGroup();
+    for (const segment of segments) {
+      L.polyline(segment.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 }).addTo(grp);
+    }
+    return grp;
   }
   const grp = L.layerGroup();
   for (const layer of varioPolylineRuns(points, { pane, weight: 3.5, opacity: 0.92 })) layer.addTo(grp);
