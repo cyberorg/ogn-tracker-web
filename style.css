@@ -246,7 +246,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .ogn-3d-dom-marker.focused{z-index:20!important}
 .ogn-3d-dom-marker .glider-wrap{background:transparent!important;border:0!important;box-shadow:none!important}
 .ogn-3d-dom-marker .glider-wrap::before{content:"";position:absolute;left:50%;top:50%;width:30px;height:30px;margin:-15px 0 0 -15px;border-radius:50%;box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow);transform:scale(var(--halo-scale,1));transform-origin:center;pointer-events:none;opacity:0}
-.ogn-3d-dom-marker .glider-wrap>svg{display:none!important}
+.ogn-3d-dom-marker .glider-wrap>svg,.ogn-3d-dom-marker .replay-dot{display:none!important}
 .ogn-3d-dom-marker .glider-label{top:calc(100% + 4px);transform:translateX(-50%);opacity:0;visibility:hidden}
 .ogn-3d-dom-marker.show-name .glider-label{opacity:1;visibility:visible}
 .ogn-3d-popup-pane{position:absolute;inset:0;z-index:var(--overlay-z);overflow:visible;background:transparent!important;pointer-events:none}

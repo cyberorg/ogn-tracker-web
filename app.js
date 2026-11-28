@@ -1194,8 +1194,9 @@ const S3D_ARROW_WIDTH = 9;
 const S3D_ARROW_HEIGHT = 3.5;
 const S3D_ARROW_PX = 30;        // on-screen aircraft marker size at every zoom
 const S3D_STATION_PX = 20;      // ground-station marker stays smaller
-const S3D_TRACK_PX = 2;                      // slim continuous track line (2 px)
+const S3D_TRACK_PX = 3;                      // slim continuous track tube (~3 px)
 const S3D_PROGRESS_PX = S3D_TRACK_PX * 1.25; // replay progress is only slightly heavier
+const S3D_TUBE_RADIAL_SEGMENTS = 10;         // enough facets to read as a round tube
 const S3D_MARKER_CULL_MARGIN_PX = 80;        // hide DOM/WebGL markers once fully outside the map
 const S3D_TRACK_SPLINE_MAX_DEVIATION_M = 20; // reject smooth curves that knot back through themselves
 
@@ -1772,7 +1773,7 @@ function s3dVarioTrackColors(points, fallbackColor) {
 
 function s3dApplyVarioVertexColors(geom, curve, steps, colors, fallbackColor, THREE) {
   if (!varioTrackMode || !colors || colors.length < 2) return false;
-  const radial = geom.parameters?.radialSegments ?? 5;
+  const radial = geom.parameters?.radialSegments ?? S3D_TUBE_RADIAL_SEGMENTS;
   const count = geom.attributes.position.count;
   const expected = (steps + 1) * (radial + 1);
   if (count !== expected) return false;
@@ -1788,6 +1789,28 @@ function s3dApplyVarioVertexColors(geom, curve, steps, colors, fallbackColor, TH
       attr[k] = c.r;
       attr[k + 1] = c.g;
       attr[k + 2] = c.b;
+    }
+  }
+  geom.setAttribute('color', new THREE.BufferAttribute(attr, 3));
+  return true;
+}
+
+// MeshBasicMaterial has no lights, so bake a subtle cylindrical shade into the
+// tube's vertex colours. Vario colours are kept and merely darkened per facet.
+function s3dApplyTubeShading(geom, steps, fallbackColor, THREE) {
+  const radial = geom.parameters?.radialSegments ?? S3D_TUBE_RADIAL_SEGMENTS;
+  const count = geom.attributes.position.count;
+  if (count !== (steps + 1) * (radial + 1)) return false;
+  const existing = geom.attributes.color?.array;
+  const base = new THREE.Color(fallbackColor);
+  const attr = existing ? Float32Array.from(existing) : new Float32Array(count * 3);
+  for (let i = 0; i <= steps; i++) {
+    for (let j = 0; j <= radial; j++) {
+      const shade = 0.72 + 0.28 * Math.cos((j / radial) * Math.PI * 2 - Math.PI / 4);
+      const k = (i * (radial + 1) + j) * 3;
+      attr[k] = (existing ? existing[k] : base.r) * shade;
+      attr[k + 1] = (existing ? existing[k + 1] : base.g) * shade;
+      attr[k + 2] = (existing ? existing[k + 2] : base.b) * shade;
     }
   }
   geom.setAttribute('color', new THREE.BufferAttribute(attr, 3));
@@ -1840,11 +1863,12 @@ function s3dReplaceThreeLines(group, segments) {
     const fallback = s3dResolveColor(seg.color, THEME.accent);
     const pointColors = s3dVarioTrackColors(valid, fallback);
     const steps = Math.min(420, Math.max(2, curve.points.length * 2));
-    const geom = new THREE.TubeGeometry(curve, steps, radius, 5, false);
-    const hasVario = s3dApplyVarioVertexColors(geom, curve, steps, pointColors, fallback, THREE);
+    const geom = new THREE.TubeGeometry(curve, steps, radius, S3D_TUBE_RADIAL_SEGMENTS, false);
+    s3dApplyVarioVertexColors(geom, curve, steps, pointColors, fallback, THREE);
+    s3dApplyTubeShading(geom, steps, fallback, THREE);
     const mat = new THREE.MeshBasicMaterial({
-      color: hasVario ? 0xffffff : new THREE.Color(fallback),
-      vertexColors: hasVario,
+      color: 0xffffff,
+      vertexColors: true,
       transparent: true,
       opacity: seg.opacity ?? 0.95,
       depthTest: true,
@@ -3061,7 +3085,7 @@ function sync3DReplayPoints() {
     const key = `rpts:${p.id}`;
     seen.add(key);
     const name = esc(p.label);
-    const iconHtml = `<div class="glider-wrap" style="${markerColorStyle(THEME.yellow)}"><div class="replay-dot"></div><div class="glider-label" title="${name}">${name}</div></div>`;
+    const iconHtml = `<div class="glider-wrap" style="${markerColorStyle(THEME.yellow)}"><div class="glider-label" title="${name}">${name}</div></div>`;
     const popupObj = {
       lat: p.lat,
       lon: p.lon,
@@ -3105,7 +3129,8 @@ function sync3DReplayFocus(pos) {
   }
   const label = esc(replayFocusLabel());
   const metricsText = replayFocusHudText(pos);
-  const iconHtml = `<div class="glider-wrap focused" style="${markerColorStyle('#ec4899')}"><div class="replay-dot focused"></div><div class="glider-label" title="${label}">${label}</div>${focusHudHtml(metricsText)}</div>`;
+  const replayColor = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
+  const iconHtml = `<div class="glider-wrap focused" style="${markerColorStyle(replayColor)}"><div class="glider-label" title="${label}">${label}</div>${focusHudHtml(metricsText)}</div>`;
   const baseAc = findAircraftByAddress(replayFollowAddress);
   const popupObj = {
     ...(baseAc || {}),
