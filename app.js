@@ -597,6 +597,7 @@ const s3dFeatureCollection = features => ({ type: 'FeatureCollection', features 
 let map3d = null;
 let map3dReady = false;
 let map3dActive = false;
+let map3dPaused = false;
 let map3dBaseKey = BASE_TO_3D[savedBaseLayer] || 'liberty';
 
 // One attribution button serves both 2D and 3D. Its open panel always shows
@@ -1193,6 +1194,7 @@ function s3dCreateArrowLayer() {
       this.renderer.autoClear = false;
     },
     render(gl, args) {
+      if (map3dPaused) return;
       const matrix = args?.defaultProjectionData?.mainMatrix;
       if (!matrix || !this.renderer || !this.scene || !map3dDomMarkers) return;
       s3dResizeThreeLines(this.map.getZoom());
@@ -1248,8 +1250,16 @@ function s3dCreateArrowLayer() {
       this.renderer.render(this.scene, this.camera);
     },
     onRemove() {
+      // setStyle({ diff: false }) tears this layer down and recreates it. The
+      // tube geometries/materials live in the line groups, not in models, so
+      // they must be disposed here or every style swap leaks GPU memory.
+      for (const group of Object.values(this.lines || {})) {
+        s3dDisposeObject(group);
+        group.clear?.();
+      }
       for (const model of this.models.values()) s3dDisposeObject(model);
       this.models.clear();
+      this.scene?.clear?.();
       this.renderer?.dispose();
     }
   };
@@ -1299,7 +1309,7 @@ function s3dApplyVarioVertexColors(geom, curve, steps, colors, fallbackColor, TH
 
 function s3dReplaceThreeLines(group, segments) {
   const THREE = s3dThree();
-  if (!group || !THREE) return;
+  if (!group || !THREE || map3dPaused) return;
   const lineOrder = s3dArrowLayer?.lines?.tracks === group ? -3
     : s3dArrowLayer?.lines?.replay === group ? -2 : -1;
   for (const child of [...group.children]) {
@@ -1936,7 +1946,7 @@ function s3dCloseOffscreenPopups() {
 }
 
 function s3dScheduleLabelUpdate() {
-  if (s3dDomMarkerSyncRaf !== null) return;
+  if (map3dPaused || s3dDomMarkerSyncRaf !== null) return;
   s3dDomMarkerSyncRaf = requestAnimationFrame(() => {
     s3dDomMarkerSyncRaf = null;
     s3dUpdateDomMarkerPositions();
@@ -2075,11 +2085,11 @@ function ensure3DMap() {
     sync3DFromLeaflet();
   });
   map.on('moveend', () => {
-    if (!map3dActive || performance.now() < ignoreLeaflet3DSyncUntil) return;
+    if (map3dPaused || !map3dActive || performance.now() < ignoreLeaflet3DSyncUntil) return;
     sync3DFromLeaflet();
   });
   map3d.on('moveend', () => {
-    if (!map3dActive || performance.now() < ignoreMap3DSyncUntil) return;
+    if (map3dPaused || !map3dActive || performance.now() < ignoreMap3DSyncUntil) return;
     syncLeafletFrom3D();
   });
   map3d.on('move', s3dScheduleLabelUpdate);
@@ -2125,6 +2135,7 @@ function ensure3DMap() {
     s3dOpenPopupForKey(key, item.popupData);
   });
   map3d.on('render', () => {
+    if (map3dPaused) return;
     s3dScheduleLabelUpdate();
     positionMeasure3D();
   });
@@ -2140,6 +2151,29 @@ function ensure3DMap() {
   return true;
 }
 
+function set3DMapPaused(paused) {
+  if (!map3d || map3dPaused === paused) return;
+  map3dPaused = paused;
+  if (paused) {
+    stop3DFollowAlign();
+    // Stop eases and any queued repaint before hiding the canvas.
+    try { map3d.stop(); } catch (err) {}
+    return;
+  }
+  // The container was hidden while paused; measure it again and repaint once.
+  resize3D();
+  syncAll3DData();
+  try { map3d.triggerRepaint?.(); } catch (err) {}
+}
+
+function sync3DMapVisibility() {
+  if (!map3d) return;
+  const el3d = $('map3d');
+  const running = map3dActive && !!el3d && !el3d.hidden &&
+    !document.documentElement.classList.contains('list-mode');
+  set3DMapPaused(!running);
+}
+
 function resize3D() {
   if (!map3dReady) return;
   requestAnimationFrame(() => {
@@ -2150,7 +2184,7 @@ function resize3D() {
 }
 
 function sync3DFromLeaflet() {
-  if (!map3dReady || !map3dActive) return;
+  if (map3dPaused || !map3dReady || !map3dActive) return;
   const c = map.getCenter();
   ignoreMap3DSyncUntil = performance.now() + 250;
   map3d.jumpTo({
@@ -2161,7 +2195,7 @@ function sync3DFromLeaflet() {
 }
 
 function syncLeafletFrom3D() {
-  if (!map3dReady || !map3dActive) return;
+  if (map3dPaused || !map3dReady || !map3dActive) return;
   const c = map3d.getCenter();
   ignoreLeaflet3DSyncUntil = performance.now() + 250;
   map.setView(
@@ -2172,7 +2206,7 @@ function syncLeafletFrom3D() {
 }
 
 function sync3DLive(aircraftList) {
-  if (!map3d || !map3dActive) return;
+  if (map3dPaused || !map3d || !map3dActive) return;
   const seen = new Set();
   for (const a of aircraftList || []) {
     if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
@@ -2196,7 +2230,7 @@ function sync3DLive(aircraftList) {
 }
 
 function sync3DTracks() {
-  if (!map3dReady) return;
+  if (map3dPaused || !map3dReady) return;
   s3dSyncThreeLines();
   const features = [];
   if (!s3dArrowLayer) {
@@ -2232,7 +2266,7 @@ function sync3DThermals(points) {
 }
 
 function sync3DReplayPoints() {
-  if (!map3d || !map3dActive || !replayActive) return;
+  if (map3dPaused || !map3d || !map3dActive || !replayActive) return;
   const seen = new Set();
   for (const p of replayPoints || []) {
     if (!Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
@@ -2275,7 +2309,7 @@ function sync3DReplayPoints() {
 }
 
 function sync3DReplayFocus(pos) {
-  if (!map3d || !map3dActive) return;
+  if (map3dPaused || !map3d || !map3dActive) return;
   const key = 'rfocus:active';
   if (!pos || !replayActive || !replayFollowAddress) {
     const existing = map3dDomMarkers.get(key);
@@ -2308,7 +2342,7 @@ function sync3DReplayFocus(pos) {
 }
 
 function sync3DReplayTrack() {
-  if (!map3dReady) return;
+  if (map3dPaused || !map3dReady) return;
   s3dSyncThreeLines();
   const features = [];
   const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
@@ -2322,7 +2356,7 @@ function sync3DReplayTrack() {
 }
 
 function sync3DReplayProgress(perSegment) {
-  if (!map3dReady) return;
+  if (map3dPaused || !map3dReady) return;
   s3dSyncThreeProgress(perSegment);
   const features = [];
   if (!s3dArrowLayer) {
@@ -2354,7 +2388,7 @@ function sync3DReplayMode(on) {
 }
 
 function syncAll3DData() {
-  if (!map3d || !map3dActive) return;
+  if (map3dPaused || !map3d || !map3dActive) return;
   if (map3dReady) {
     sync3DAirspace();
     if (map.hasLayer(thermalLayer)) sync3DThermals(thermalLayer._latlngs || []);
@@ -2541,6 +2575,7 @@ function toggle3DView() {
   saveMenuPrefs();
   el3d.hidden = !map3dActive;
   $('mapWrap').classList.toggle('view3d', map3dActive);
+  sync3DMapVisibility();
   syncViewModeControl();
   syncMeasureCursor();
   renderMeasure();
@@ -3523,7 +3558,7 @@ function stop3DFollowAlign() {
 
 function align3DFollowedMarker(address) {
   follow3DAlignTimer = null;
-  if (!map3dReady || !map3dActive || activeFollowAddress() !== address || followCenteringPaused) {
+  if (map3dPaused || !map3dReady || !map3dActive || activeFollowAddress() !== address || followCenteringPaused) {
     if (follow3DAlignAddress === address) stop3DFollowAlign();
     return;
   }
@@ -3562,7 +3597,7 @@ function align3DFollowedMarker(address) {
 }
 
 function start3DFollowAlign(address, delay = 0) {
-  if (!map3dReady || !map3dActive || !address) return;
+  if (map3dPaused || !map3dReady || !map3dActive || !address) return;
   if (follow3DAlignAddress === address && follow3DAlignTimer !== null) return;
   stop3DFollowAlign();
   follow3DAlignAddress = address;
@@ -3605,6 +3640,9 @@ function focusFollowedOnMap(address) {
 }
 
 function centerOnFollowed(force = false, animate = true, panDuration = 0.2, align3D = true) {
+  // A paused 3D map is hidden (2D mode or mobile list view); do not queue new
+  // eases into it. Leaflet following still works when 3D is simply inactive.
+  if (map3dActive && map3dPaused) return false;
   const addr = activeFollowAddress();
   if (!addr) {
     stop3DFollowAlign();
@@ -8121,6 +8159,7 @@ function enterListMode() {
   listMode = true;
   window.scrollTo(0, listModeDocTop);
   rootEl.classList.add('list-mode');
+  sync3DMapVisibility();
   if (listForTopBtn) listForTopBtn.scrollTop = 0;
   syncStickyTop();
   syncScrollListTopBtn();
@@ -8130,6 +8169,7 @@ function exitListMode(returnToMap) {
   if (!listMode) return;
   listMode = false;
   rootEl.classList.remove('list-mode');
+  sync3DMapVisibility();
   listModeExitGuard = true;
   if (returnToMap) {
     // Scroll all the way up so the map sits below the header, not under it.
