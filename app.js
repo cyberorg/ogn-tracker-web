@@ -255,7 +255,17 @@ function applySavedMenuPrefs() {
   if (savedView3d !== map3dActive) toggle3DView();
 }
 
-function resetFilters() {
+function resetFilters(restoreDefaults = false) {
+  if (restoreDefaults) {
+    // The ⚙ "Defaults" action resets every persisted preference, not just
+    // the filters. Filters, windows, units and sort are reset below for both
+    // entry points; these are the remaining menu/session preferences.
+    alertsEnabled = false;
+    savedView3d = false;
+    savedBaseLayer = 'terrain';
+    savedOverlays = [];
+    replayTimeMode = 'browser';
+  }
   $('search').value = '';
   clearSearch24h();
   savedTypes = ['para', 'wx'];
@@ -267,6 +277,10 @@ function resetFilters() {
   baroEnabled = false;
   altUnit = 'm'; speedUnit = 'kmh'; tempUnit = 'c'; climbUnit = 'mps';
   applySavedMenuPrefs();
+  if (restoreDefaults) {
+    applySavedLayers();
+    syncReplayTimeToggle();
+  }
   redrawAllTracks();
   saveMenuPrefs();
   syncUnitButtons();
@@ -274,7 +288,7 @@ function resetFilters() {
   needMeta = true;
   render();
   fetchLive(true);
-  showToast('Filters reset');
+  showToast(restoreDefaults ? 'Defaults restored' : 'Filters reset');
 }
 
 function fitToResults() {
@@ -9553,7 +9567,7 @@ syncReplayDirectionButton();
 syncReplayRangeButton();
 syncReplayFollowLabel();
 
-$('btnResetFilters').addEventListener('click', resetFilters);
+$('btnResetDefaults').addEventListener('click', () => resetFilters(true));
 
 $('btnNotify').addEventListener('click', async () => {
   if (!alertsEnabled && 'Notification' in window && Notification.permission === 'default') {
