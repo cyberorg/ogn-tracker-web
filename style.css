@@ -324,10 +324,15 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .recenter-btn{position:absolute;top:52px;left:50%;transform:translateX(-50%);z-index:900;padding:6px 12px;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--yellow);font-size:12px;font-weight:700;box-shadow:0 1px 5px #0009}
 .recenter-btn:hover{background:var(--hover);border-color:var(--line);color:var(--accent)}
 .recenter-btn[hidden]{display:none}
-.unselect-all-btn{display:grid;width:22px;height:22px;padding:0;place-items:center;border-radius:5px;background:var(--control-bg);border:1px solid var(--line);color:var(--red);line-height:1;white-space:nowrap}
+.unselect-all-btn{display:grid;width:22px;height:22px;padding:0;place-items:center;border-radius:5px;background:var(--control-bg);border:1px solid var(--line);color:var(--text);line-height:1;white-space:nowrap}
 .unselect-all-btn svg{display:block;width:14px;height:14px}
-.unselect-all-btn:hover{background:var(--hover);border-color:var(--red);color:#fff}
+.unselect-all-btn:hover{background:var(--hover);border-color:var(--accent);color:var(--accent)}
 .unselect-all-btn[hidden]{display:none}
+.sort-control{position:relative;display:grid;width:22px;height:22px;padding:0;place-items:center;border-radius:5px;background:var(--control-bg);border:1px solid var(--line);color:var(--muted)}
+.sort-control:focus-within{outline:2px solid var(--focus);outline-offset:2px}
+.sort-control:hover{border-color:var(--accent);color:var(--accent)}
+.sort-icon{display:block;width:14px;height:14px;pointer-events:none}
+.sort-control select{position:absolute;inset:0;width:100%;height:100%;margin:0;padding:0;appearance:none;border:0;background:transparent;opacity:0;cursor:pointer}
 .scroll-to-list-btn{display:none;position:absolute;bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px));left:50%;transform:translateX(-50%);z-index:900;width:44px;height:32px;padding:0;place-items:center;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--accent);font-size:22px;line-height:1;box-shadow:0 1px 5px #0009}
 .scroll-to-list-btn:hover{background:var(--hover);border-color:var(--line)}
 /* Mirror of the down arrow that opens the list: same 44x32 pill, centred above it. */
