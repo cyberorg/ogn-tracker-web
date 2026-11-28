@@ -1084,6 +1084,7 @@ const S3D_STATION_PX = 20;      // ground-station marker stays smaller
 const S3D_TRACK_PX = 2;                      // slim continuous track line (2 px)
 const S3D_PROGRESS_PX = S3D_TRACK_PX * 1.25; // replay progress is only slightly heavier
 const S3D_MARKER_CULL_MARGIN_PX = 80;        // hide DOM/WebGL markers once fully outside the map
+const S3D_TRACK_SPLINE_MAX_DEVIATION_M = 20; // reject smooth curves that knot back through themselves
 
 function s3dThree() {
   return window.THREE || null;
@@ -1389,6 +1390,60 @@ function s3dDisposeObject(obj) {
   });
 }
 
+function s3dPointSegmentDistance(p, a, b) {
+  const vx = b.x - a.x, vy = b.y - a.y, vz = b.z - a.z;
+  const wx = p.x - a.x, wy = p.y - a.y, wz = p.z - a.z;
+  const len2 = vx * vx + vy * vy + vz * vz;
+  const t = len2 > 0
+    ? Math.max(0, Math.min(1, (wx * vx + wy * vy + wz * vz) / len2))
+    : 0;
+  return Math.hypot(wx - t * vx, wy - t * vy, wz - t * vz);
+}
+
+// A smooth curve is only safe while it stays near the fixes it came from.
+// Stationary/repeated points and tight reversals can make even a centripetal
+// spline loop back through itself, which looks like a knot in 3D.
+function s3dCurveDeviationM(curve, vecs, metersPerUnit) {
+  const THREE = s3dThree();
+  if (!THREE || vecs.length < 3 || !curve?.getPoint) return 0;
+  const samples = Math.min(1200, Math.max(32, vecs.length * 8));
+  const probe = new THREE.Vector3();
+  let worst = 0;
+  for (let i = 0; i <= samples; i++) {
+    curve.getPoint(i / samples, probe);
+    let nearest = Infinity;
+    for (let j = 0; j < vecs.length - 1; j++) {
+      const d = s3dPointSegmentDistance(probe, vecs[j], vecs[j + 1]);
+      if (d < nearest) nearest = d;
+      if (nearest === 0) break;
+    }
+    if (!Number.isFinite(nearest)) continue;
+    worst = Math.max(worst, nearest);
+    if (worst * metersPerUnit > S3D_TRACK_SPLINE_MAX_DEVIATION_M) {
+      return worst * metersPerUnit;
+    }
+  }
+  return worst * metersPerUnit;
+}
+
+// three.js needs a Curve for TubeGeometry. This is the no-overshoot fallback:
+// piecewise linear interpolation through the original fixes.
+function s3dPolylineCurve(vecs) {
+  const THREE = s3dThree();
+  const curve = new THREE.Curve();
+  curve.points = vecs;
+  curve.arcLengthDivisions = Math.max(200, vecs.length * 4);
+  curve.getPoint = (t, target = new THREE.Vector3()) => {
+    if (!vecs.length) return target.set(0, 0, 0);
+    if (vecs.length === 1) return target.copy(vecs[0]);
+    const u = Math.max(0, Math.min(1, t)) * (vecs.length - 1);
+    const i = Math.min(vecs.length - 2, Math.floor(u));
+    return target.copy(vecs[i]).lerp(vecs[i + 1], u - i);
+  };
+  curve.userData = { linearized: true };
+  return curve;
+}
+
 function s3dCurveFromPoints(points) {
   const THREE = s3dThree();
   if (!THREE || !window.maplibregl?.MercatorCoordinate) return null;
@@ -1399,9 +1454,15 @@ function s3dCurveFromPoints(points) {
     const mc = maplibregl.MercatorCoordinate.fromLngLat([p[1], p[0]], elevation);
     return new THREE.Vector3(mc.x, mc.y, mc.z);
   });
-  // Centripetal Catmull-Rom keeps the line continuous and smooth without the
-  // overshoot that a uniform spline can introduce on uneven GPS sampling.
-  return new THREE.CatmullRomCurve3(vecs, false, 'centripetal', 0.5);
+  const smooth = new THREE.CatmullRomCurve3(vecs, false, 'centripetal', 0.5);
+  const ref = maplibregl.MercatorCoordinate.fromLngLat([valid[0][1], valid[0][0]]);
+  const unitsPerMeter = ref.meterInMercatorCoordinateUnits?.();
+  if (!Number.isFinite(unitsPerMeter) || unitsPerMeter <= 0) return smooth;
+  const deviationM = s3dCurveDeviationM(smooth, vecs, 1 / unitsPerMeter);
+  if (deviationM <= S3D_TRACK_SPLINE_MAX_DEVIATION_M) return smooth;
+  const linear = s3dPolylineCurve(vecs);
+  linear.userData.linearizedFromDeviationM = deviationM;
+  return linear;
 }
 
 function s3dCurvePoints(points) {
