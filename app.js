@@ -2,6 +2,7 @@
 'use strict';
 const BIR = [32.037, 76.708];
 const PINNED_STORAGE_KEY = 'ogn_pinned_aircraft';
+const BUDDIES_STORAGE_KEY = 'ogn_buddies';
 const MENU_PREFS_STORAGE_KEY = 'ogn_menu_prefs';
 const ALERTS_24H_STORAGE_KEY = 'ogn_alerts_24h';
 const NAME_CACHE_STORAGE_KEY = 'ogn_name_cache';
@@ -3713,7 +3714,55 @@ function togglePin(address) {
   requestAnimationFrame(() => focusListRow(address));
 }
 
+const buddyNames = new Map();
 const selectedTracks = new Map();
+// Selected aircraft are the Buddy list. Restore them before the first render so
+// their tracks, HUDs, halos and list rows all come back until manually removed.
+try {
+  const savedBuddies = JSON.parse(localStorage.getItem(BUDDIES_STORAGE_KEY) || '[]');
+  if (Array.isArray(savedBuddies)) {
+    const seen = new Set();
+    for (const item of savedBuddies) {
+      const address = typeof item?.address === 'string' ? item.address.trim().toLowerCase() : '';
+      if (!address || seen.has(address)) continue;
+      seen.add(address);
+      const color = /^#[0-9a-f]{6}$/i.test(String(item?.color || '')) ? String(item.color) : THEME.accent;
+      selectedTracks.set(address, { color, layer: null, points: [], reqId: 0 });
+      if (typeof item?.name === 'string' && item.name.trim()) {
+        buddyNames.set(address, item.name.trim().slice(0, 64));
+      }
+    }
+  }
+} catch (e) {}
+
+function saveBuddies() {
+  const buddies = [];
+  for (const [address, entry] of selectedTracks) {
+    const live = findAircraftByAddress(address);
+    if (live) buddyNames.set(address, displayName(live));
+    buddies.push({
+      address,
+      color: /^#[0-9a-f]{6}$/i.test(String(entry.color || '')) ? String(entry.color) : THEME.accent,
+      name: buddyNames.get(address) || address.toUpperCase()
+    });
+  }
+  try { localStorage.setItem(BUDDIES_STORAGE_KEY, JSON.stringify(buddies)); } catch (e) {}
+}
+
+function syncBuddyNames() {
+  let changed = false;
+  for (const address of selectedTracks.keys()) {
+    const live = findAircraftByAddress(address);
+    if (!live) continue;
+    const name = displayName(live);
+    if (buddyNames.get(address) !== name) {
+      buddyNames.set(address, name);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 syncClearTracksButton();
 let trackReqSeq = 0, colorSeq = 0;
 
@@ -4553,10 +4602,12 @@ function removeTrack(address) {
     if (entry.layer) map.removeLayer(entry.layer);
     selectedTracks.delete(address);
   }
+  buddyNames.delete(address);
   if (activeTrackAddress === address) {
     activeTrackAddress = [...selectedTracks.keys()].pop() || null;
     updateUrlHash();
   }
+  saveBuddies();
   updateListHint();
   syncClearTracksButton();
   sync3DTracks();
@@ -4568,7 +4619,9 @@ function clearAllTracks() {
     if (entry.layer) map.removeLayer(entry.layer);
   }
   selectedTracks.clear();
+  buddyNames.clear();
   activeTrackAddress = null;
+  saveBuddies();
   updateListHint();
   updateUrlHash();
   syncClearTracksButton();
@@ -4969,7 +5022,9 @@ function toggleSelection(address, openOnMap = false) {
     removeTrack(address);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
+    buddyNames.set(address, target ? displayName(target) : address.toUpperCase());
     activeTrackAddress = address;
+    saveBuddies();
     updateUrlHash();
     syncClearTracksButton();
     loadTrack(address);
@@ -5725,6 +5780,13 @@ try {
   else if (savedAlertsCollapsed === '1') alertsCollapsed = true;
 } catch (e) {}
 
+let buddiesCollapsed = true;
+try {
+  const savedBuddiesCollapsed = localStorage.getItem('ogn_buddies_collapsed');
+  if (savedBuddiesCollapsed === '0') buddiesCollapsed = false;
+  else if (savedBuddiesCollapsed === '1') buddiesCollapsed = true;
+} catch (e) {}
+
 function render24hAlertsSummary(nowMs) {
   const box = $('alerts24hSummary');
   const head = $('alertsSectionHead');
@@ -5753,6 +5815,55 @@ function render24hAlertsSummary(nowMs) {
   if (countEl) countEl.textContent = String(allItems.length);
   box.hidden = alertsCollapsed;
   box.innerHTML = `<div class="aircraft-list alerts-list" role="listbox" aria-label="Emergency alerts">${allItems.map(it => buildAlertRowHtml(it, nowMs)).join('')}</div>`;
+}
+
+function buildBuddyRowHtml(address, entry, nowMs) {
+  const live = findAircraftByAddress(address);
+  const name = live ? displayName(live) : (buddyNames.get(address) || address.toUpperCase());
+  const color = /^#[0-9a-f]{6}$/i.test(String(entry.color || '')) ? String(entry.color) : THEME.accent;
+  const statusText = live ? getDisplayStatus(live) : '';
+  const statusHtml = statusText ? `<br><span style="color:var(--accent);font-weight:600">${esc(statusText)}</span>` : '';
+  const meta = live
+    ? esc([displayRegistration(live), displayModel(live), typeName(live)].filter(Boolean).join(' · '))
+    : esc(buddyNames.get(address) ? 'Saved buddy · not live in current view' : address.toUpperCase());
+  const ageSec = live ? Math.max(0, Math.floor((nowMs - live.receivedAtMs) / 1000)) : null;
+  const alt = live && Number.isFinite(live.altitude) ? fmtAlt(live.altitude) : '—';
+  const age = ageSec == null ? 'saved' : fmtAge(ageSec);
+  return `<div class="aircraft selected focused buddy" data-buddy-addr="${esc(address)}" data-key="${esc(address)}" tabindex="0" role="option" aria-selected="true" aria-label="${esc(name)}">
+    <div class="stripe" style="background:${color}" title="Buddy"></div>
+    <div><div class="callsign"><span class="track-dot" style="background:${color}" title="Buddy track"></span>${esc(name)}</div>
+      <div class="meta">${meta}${statusHtml}</div></div>
+    <div class="alt buddy-alt"><span>${esc(alt)}</span><div class="age-row"><span class="age">${esc(age)}</span></div><button type="button" class="buddy-remove" data-remove-buddy="${esc(address)}" title="Remove ${esc(name)} from Buddies" aria-label="Remove ${esc(name)} from Buddies">×</button></div>
+  </div>`;
+}
+
+function renderBuddiesSummary(nowMs) {
+  const box = $('buddiesSummary');
+  const head = $('buddiesSectionHead');
+  const toggle = $('buddiesToggle');
+  const countEl = $('buddiesCount');
+  if (!box) return;
+  if (syncBuddyNames()) saveBuddies();
+
+  if (!selectedTracks.size) {
+    box.hidden = true;
+    box.innerHTML = '';
+    if (head) head.hidden = true;
+    if (countEl) countEl.textContent = '0';
+    return;
+  }
+
+  if (head) {
+    head.hidden = false;
+    head.classList.toggle('collapsed', buddiesCollapsed);
+  }
+  if (toggle) toggle.setAttribute('aria-expanded', String(!buddiesCollapsed));
+  if (countEl) countEl.textContent = String(selectedTracks.size);
+  box.hidden = buddiesCollapsed;
+  const rows = [...selectedTracks.entries()]
+    .map(([address, entry]) => ({ address, entry, name: buddyNames.get(address) || address.toUpperCase() }))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
+  box.innerHTML = `<div class="aircraft-list alerts-list buddies-list" role="listbox" aria-label="Buddies">${rows.map(r => buildBuddyRowHtml(r.address, r.entry, nowMs)).join('')}</div>`;
 }
 
 function formatWeatherHtml(wx, compact = false) {
@@ -6792,8 +6903,9 @@ function buildRowHtml(a, now) {
   }
   if (rType !== 15) {
     const isFollowed = followedAddress === a.address;
+    const isBuddy = selectedTracks.has(a.address);
     const name = esc(displayName(a));
-    rightColHtml += `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
+    rightColHtml += `<div class="row-actions"><button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button><button type="button" class="buddy-btn${isBuddy ? ' active' : ''}" data-buddy="${esc(a.address)}" title="${isBuddy ? 'Remove' : 'Add'} ${name} ${isBuddy ? 'from' : 'to'} Buddies" aria-pressed="${isBuddy ? 'true' : 'false'}">Buddies</button></div>`;
   }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
@@ -7163,6 +7275,7 @@ function render() {
   const now = serverNow();
 
   render24hAlertsSummary(now);
+  renderBuddiesSummary(now);
   updateListHint(visible, bounds, aircraft);
   renderEmergencyBanner(visible);
 
@@ -7193,6 +7306,45 @@ $('alerts24hSummary').addEventListener('click', e => {
   if (addr) jumpToAlertAddress(addr);
 });
 
+$('buddiesToggle').addEventListener('click', () => {
+  buddiesCollapsed = !buddiesCollapsed;
+  try { localStorage.setItem('ogn_buddies_collapsed', buddiesCollapsed ? '1' : '0'); } catch (e) {}
+  renderBuddiesSummary(serverNow());
+});
+
+function openBuddyFromSummary(address) {
+  if (!address) return;
+  const live = findAircraftByAddress(address);
+  if (!live) {
+    showToast('Buddy saved; not live in the current view.', 2600);
+    return;
+  }
+  revealMapForListAction();
+  openAircraftOnMap(address, live);
+}
+
+$('buddiesSummary').addEventListener('click', e => {
+  const remove = e.target.closest('[data-remove-buddy]');
+  if (remove) {
+    e.stopPropagation();
+    removeTrack(remove.dataset.removeBuddy);
+    render();
+    return;
+  }
+  const row = e.target.closest('[data-buddy-addr]');
+  if (row) openBuddyFromSummary(row.dataset.buddyAddr);
+});
+
+$('buddiesSummary').addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const remove = e.target.closest('[data-remove-buddy]');
+  if (remove) return; // native button click handles it
+  const row = e.target.closest('[data-buddy-addr]');
+  if (!row) return;
+  e.preventDefault();
+  openBuddyFromSummary(row.dataset.buddyAddr);
+});
+
 $('aircraftList').addEventListener('click', e => {
   const emptyAct = e.target.closest('[data-empty-act]');
   if (emptyAct) {
@@ -7214,6 +7366,12 @@ $('aircraftList').addEventListener('click', e => {
   if (followBtn) {
     e.stopPropagation();
     toggleFollowFromList(followBtn.dataset.follow);
+    return;
+  }
+  const buddyBtn = e.target.closest('.buddy-btn');
+  if (buddyBtn) {
+    e.stopPropagation();
+    toggleSelection(buddyBtn.dataset.buddy, false);
     return;
   }
   const row = e.target.closest('.aircraft');
@@ -7239,6 +7397,12 @@ $('aircraftList').addEventListener('keydown', e => {
       toggleFollowFromList(followBtn.dataset.follow);
       return;
     }
+    const buddyBtn = e.target.closest('.buddy-btn');
+    if (buddyBtn) {
+      e.preventDefault();
+      toggleSelection(buddyBtn.dataset.buddy, false);
+      return;
+    }
     e.preventDefault();
     if ($('search').value.trim()) oneTimeSearchBypass.add(row.dataset.key);
     toggleSelection(row.dataset.key, true);
@@ -7253,6 +7417,10 @@ $('aircraftList').addEventListener('keydown', e => {
     e.preventDefault();
     e.stopPropagation();
     toggleFollowFromList(row.dataset.key);
+  } else if (row.contains(e.target) && (e.key === 'b' || e.key === 'B')) {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleSelection(row.dataset.key, false);
   } else if (row.contains(e.target) && (e.key === 'c' || e.key === 'C')) {
     e.preventDefault();
     e.stopPropagation();
@@ -8979,13 +9147,8 @@ $('type').addEventListener('change', e => {
     if (allBox && !boxes.some(b => b.value !== 'all' && b.checked)) allBox.checked = true;
   }
   saveMenuPrefs();
-  // Keep tracks for aircraft still visible under the new type selection.
-  const visible = new Set(filtered().map(a => a.address));
-  for (const addr of [...selectedTracks.keys()]) {
-    if (!visible.has(addr) && !oneTimeSearchBypass.has(addr)) {
-      removeTrack(addr);
-    }
-  }
+  // Buddies stay selected until they are manually removed, so changing the
+  // type filter must not drop their tracks or remove them from the Buddy list.
   render();
 });
 
@@ -9029,7 +9192,9 @@ $('unitClimbBtn').addEventListener('click', () => {
 
 $('markerWindow').addEventListener('change', () => {
   saveMenuPrefs();
-  clearAllTracks();
+  // Buddies persist across display-window changes; refresh their tracks instead
+  // of clearing the Buddy list.
+  for (const addr of selectedTracks.keys()) loadTrack(addr);
   needMeta = true;
   fetchLive(true);
 });
@@ -10008,6 +10173,8 @@ $('locate').addEventListener('click', () => {
 });
 
 render24hAlertsSummary(serverNow());
+renderBuddiesSummary(serverNow());
+for (const addr of selectedTracks.keys()) loadTrack(addr);
 syncUnitButtons();
 updateSearchUi();
 renderBookmarks();
@@ -10025,6 +10192,7 @@ setInterval(() => {
     if (ts) el.textContent = fmtAge(Math.max(0, Math.floor((now - ts) / 1000)));
   });
   if (!$('alerts24hSummary').hidden) render24hAlertsSummary(now);
+  if (!$('buddiesSummary').hidden) renderBuddiesSummary(now);
   updateStatusUpdated();
   renderFeedStatusBanner();
   maybeRefreshSounding();
