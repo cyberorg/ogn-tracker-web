@@ -796,6 +796,10 @@ const s3dTerrainElevationCache = new Map();
 const s3dGroundElevationCache = new Map();
 
 function s3dInvalidateTerrainCaches() {
+  if (s3dTerrainRefreshTimer !== null) {
+    clearTimeout(s3dTerrainRefreshTimer);
+    s3dTerrainRefreshTimer = null;
+  }
   s3dTerrainVersion++;
   s3dTerrainElevationCache.clear();
   s3dGroundElevationCache.clear();
@@ -946,6 +950,18 @@ function s3dScheduleTerrainRefresh() {
       positionMeasure3D();
     }
   });
+}
+
+// DEM tiles arrive in bursts. Debounce the sourcedata-driven refresh so one
+// burst clears the elevation caches and rebuilds tracks only once.
+const S3D_TERRAIN_REFRESH_DEBOUNCE_MS = 200;
+let s3dTerrainRefreshTimer = null;
+function s3dScheduleTerrainRefreshDebounced() {
+  if (s3dTerrainRefreshTimer !== null) clearTimeout(s3dTerrainRefreshTimer);
+  s3dTerrainRefreshTimer = setTimeout(() => {
+    s3dTerrainRefreshTimer = null;
+    s3dScheduleTerrainRefresh();
+  }, S3D_TERRAIN_REFRESH_DEBOUNCE_MS);
 }
 
 // A null DEM sample used to stay cached forever. Expire retryable misses in the
@@ -1841,6 +1857,7 @@ function s3dCreatePopupController(key) {
   });
   const controller = {
     el,
+    htmlSig: null,
     isOpen: () => el.isConnected,
     getElement: () => el,
     addTo: () => {
@@ -1848,14 +1865,18 @@ function s3dCreatePopupController(key) {
       s3dPositionPopup(el);
       return controller;
     },
-    setHTML: html => {
+    // A matching signature skips the DOM teardown/rebuild. Callers without a
+    // signature (e.g. the Track action replacing the popup body) always write.
+    setHTML: (html, sig = null) => {
+      if (sig !== null && sig === controller.htmlSig && el.isConnected) return false;
       const st = map3dDomPopupState.get(key);
       const detailsEl = el.querySelector('[data-popup-details]');
       if (detailsEl && st) st.detailsOpen = detailsEl.open;
       if (st) s3dUnbindPopupDetails(st);
       contentEl.innerHTML = html;
+      controller.htmlSig = sig;
       s3dPositionPopup(el);
-      return controller;
+      return true;
     },
     remove: () => {
       const st = map3dDomPopupState.get(key);
@@ -1877,7 +1898,9 @@ function s3dOpenPopupForKey(key, dataObj) {
   }
   let st = map3dDomPopupState.get(key) || { popup: null, detailsOpen: false };
   if (!st.popup) st.popup = s3dCreatePopupController(key);
-  st.popup.setHTML(popup(dataObj)).addTo(map3d);
+  const html = popup(dataObj);
+  st.popup.setHTML(html, html);
+  st.popup.addTo(map3d);
   map3dDomPopupState.set(key, st);
   requestAnimationFrame(() => {
     s3dBind2DPopupHandlers(st.popup.getElement(), key, dataObj.address);
@@ -2227,11 +2250,16 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
   s3dUpdateDomMarkerPosition(item);
   const st = map3dDomPopupState.get(key);
   if (st && st.popup && st.popup.isOpen() && popupData) {
-    st.popup.setHTML(popup(popupData));
-    requestAnimationFrame(() => {
-      s3dBind2DPopupHandlers(st.popup.getElement(), key, popupData.address);
-      s3dPositionPopup(st.popup.getElement());
-    });
+    const html = popup(popupData);
+    // Live ticks usually produce identical popup HTML; only tear down and
+    // rebind the popup DOM when its content actually changed.
+    if (st.popup.setHTML(html, html)) {
+      requestAnimationFrame(() => {
+        if (!st.popup?.isOpen()) return;
+        s3dBind2DPopupHandlers(st.popup.getElement(), key, popupData.address);
+        s3dPositionPopup(st.popup.getElement());
+      });
+    }
   }
 }
 
@@ -2393,6 +2421,16 @@ function s3dScheduleLabelUpdate() {
   s3dScheduleDeferredLabelSync();
 }
 
+// Only promote DOM markers to their own compositing layers while the camera is
+// actually moving; static markers otherwise pay for hundreds of layers.
+function s3dSetCameraMoving(moving) {
+  const el = $('map3d');
+  if (!el) return;
+  const on = !!moving;
+  if (el.classList.contains('ogn-3d-camera-moving') === on) return;
+  el.classList.toggle('ogn-3d-camera-moving', on);
+}
+
 function setup3DLayers() {
   // The initial load handler and a base-style swap can both finish after the
   // first 3D activation; add the custom sources only once per style.
@@ -2537,12 +2575,18 @@ function ensure3DMap() {
   });
   // Always flush label/collision work at the end of a camera move, including
   // expected sync moves that the handler above deliberately ignores.
-  map3d.on('moveend', s3dRunDeferredLabelSync);
-  map3d.on('move', s3dScheduleLabelUpdate);
+  map3d.on('moveend', () => {
+    s3dSetCameraMoving(false);
+    s3dRunDeferredLabelSync();
+  });
+  map3d.on('move', () => {
+    s3dSetCameraMoving(true);
+    s3dScheduleLabelUpdate();
+  });
   map3d.on('sourcedata', e => {
     if (e.sourceId !== S3D_DEM) return;
     if (e.isSourceLoaded) s3dMarkTerrainRecovered();
-    s3dScheduleTerrainRefresh();
+    s3dScheduleTerrainRefreshDebounced();
   });
   map3d.on('error', e => {
     if (s3dIsDemErrorEvent(e)) s3dMarkTerrainDegraded();
@@ -2607,6 +2651,7 @@ function set3DMapPaused(paused) {
   map3dPaused = paused;
   if (paused) {
     stop3DFollowAlign();
+    s3dSetCameraMoving(false);
     if (s3dDeferredSyncTimer !== null) {
       clearTimeout(s3dDeferredSyncTimer);
       s3dDeferredSyncTimer = null;
@@ -4853,11 +4898,18 @@ function syncMarkerPopupHandlersForMeasure() {
 
 function positionMeasure3D() {
   if (!measure3dLayer || !map3dActive || !map3d) return;
+  if (!measurePoints.length) {
+    if (!measure3dLayer.hidden) measure3dLayer.hidden = true;
+    return;
+  }
   measure3dLayer.hidden = false;
   const width = map3d.transform?.width || map3d.getContainer?.()?.clientWidth || 0;
   const height = map3d.transform?.height || map3d.getContainer?.()?.clientHeight || 0;
   const svg = measure3dLayer.querySelector('svg');
-  if (svg && width && height) svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  if (svg && width && height) {
+    const viewBox = `0 0 ${width} ${height}`;
+    if (svg.getAttribute('viewBox') !== viewBox) svg.setAttribute('viewBox', viewBox);
+  }
   const projected = [];
   measurePoints.forEach(([lat, lon], index) => {
     const point = s3dProjectGroundPoint(lon, lat);
@@ -4865,18 +4917,29 @@ function positionMeasure3D() {
     const el = measure3dDots[index];
     if (!el) return;
     if (!point) {
-      el.style.display = 'none';
+      if (el._s3dDisplay !== 'none') {
+        el.style.display = 'none';
+        el._s3dDisplay = 'none';
+      }
       return;
     }
-    el.style.display = '';
-    el.style.transform = `translate(-50%, -50%) translate(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px)`;
+    if (el._s3dDisplay !== '') {
+      el.style.display = '';
+      el._s3dDisplay = '';
+    }
+    const transform = `translate(-50%, -50%) translate(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px)`;
+    if (el._s3dTransform !== transform) {
+      el.style.transform = transform;
+      el._s3dTransform = transform;
+    }
   });
   if (measure3dLine) {
     const ready = projected.length >= 2 && projected.every(Boolean);
-    measure3dLine.setAttribute(
-      'points',
-      ready ? projected.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ') : ''
-    );
+    const points = ready ? projected.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ') : '';
+    if (measure3dLine._s3dPoints !== points) {
+      measure3dLine.setAttribute('points', points);
+      measure3dLine._s3dPoints = points;
+    }
   }
 }
 
@@ -6479,9 +6542,12 @@ function render() {
     if ($('emergencyBannerText').textContent !== msg) $('emergencyBannerText').textContent = msg;
     $('emergencyJump').dataset.addr = first.address;
     $('emergencyBanner').dataset.sig = sig;
-    $('emergencyBanner').classList.toggle('show', !emergencyBannerDismissedSig);
+    const showBanner = !emergencyBannerDismissedSig;
+    $('emergencyBanner').classList.toggle('show', showBanner);
+    $('mapWrap').classList.toggle('has-emergency', showBanner);
   } else {
     $('emergencyBanner').classList.remove('show');
+    $('mapWrap').classList.remove('has-emergency');
     emergencyBannerDismissedSig = null;
   }
 
@@ -7046,6 +7112,7 @@ function setSoundingOpen(open) {
   if (!panel) return;
   if (open && mapFilterPanel && !mapFilterPanel.hidden) closeFilterPanel(false);
   panel.hidden = !open;
+  $('mapWrap').classList.toggle('sounding-open', open);
   if (open) bringToFront(panel);
   if (!open) hideSoundingTip();
   const btn = $('btnSounding');
@@ -8336,6 +8403,7 @@ function setReplayMode(on, opts = {}) {
   $('btnReplay').classList.toggle('active', on);
   $('btnReplay').setAttribute('aria-pressed', String(on));
   $('replayBar').classList.toggle('show', on);
+  $('mapWrap').classList.toggle('replay-open', on);
   if (on) bringToFront($('replayBar'));
   syncBottomBarOffset();
   if (on) {

@@ -219,7 +219,8 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .map-wrap .map-attribution.maplibregl-compact-show .maplibregl-ctrl-attrib-inner{max-height:min(38vh,260px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .map-wrap .map-attribution[open]{touch-action:none}
 .map-wrap.has-bottom-bar .map-attribution{bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px))}
-.ogn-3d-dom-marker{position:absolute;left:0;top:0;z-index:5;cursor:pointer;overflow:visible;user-select:none;will-change:transform}
+.ogn-3d-dom-marker{position:absolute;left:0;top:0;z-index:5;cursor:pointer;overflow:visible;user-select:none}
+.ogn-3d-camera-moving .ogn-3d-dom-marker{will-change:transform}
 .ogn-3d-dom-marker.focused{z-index:20!important}
 .ogn-3d-dom-marker .glider-wrap{background:transparent!important;border:0!important;box-shadow:none!important}
 .ogn-3d-dom-marker .glider-wrap>svg{display:none!important}
@@ -370,7 +371,7 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .sounding-count{grid-column:1 / -1;color:var(--muted);font-size:10px}
 .sounding-empty{padding:8px;color:var(--muted);line-height:1.45}
 .sounding-note{color:var(--muted-dim);font-size:10px;line-height:1.35}
-.map-wrap:has(.emerg-banner.show) .sounding-panel{top:96px}
+.map-wrap.has-emergency .sounding-panel{top:96px}
 .measure-readout{position:absolute;top:52px;left:50%;transform:translateX(-50%);z-index:var(--overlay-z);display:flex;align-items:center;gap:7px;padding:5px 8px;border:1px solid var(--focus);border-radius:999px;background:var(--control-bg);color:var(--text);font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 3px 12px #000a;pointer-events:auto}
 .measure-readout[hidden]{display:none}
 .measure-dot{display:grid;place-items:center;border:0;background:var(--control-bg)}
@@ -382,7 +383,7 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .measure-3d-svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
 .measure-3d-line{fill:none;stroke:#38bdf8;stroke-width:2;stroke-dasharray:6 4;pointer-events:none}
 .measure-3d-dot{position:absolute;left:0;top:0;width:18px;height:18px;background:transparent!important;pointer-events:auto}
-.map-wrap:has(.emerg-banner.show) .measure-readout{top:88px}
+.map-wrap.has-emergency .measure-readout{top:88px}
 @media(max-width:800px){
   .shortcuts-modal{position:fixed;top:54px;left:auto;right:var(--edge-gutter);width:min(258px,calc(100vw - 16px))}
   .toolbar-menu-panel,.map-filter-panel{padding:7px}
@@ -391,17 +392,17 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
   .toolbar-menu-control{top:var(--edge-gutter);left:38px}
   .map-filter-panel{left:0;width:min(248px,calc(100vw - 16px));max-height:calc(82dvh - 56px)}
   .sounding-panel{top:52px;right:var(--edge-gutter);max-height:calc(82dvh - 190px)}
-  .map-wrap:has(.emerg-banner.show) .sounding-panel{top:96px;max-height:calc(82dvh - 230px)}
+  .map-wrap.has-emergency .sounding-panel{top:96px;max-height:calc(82dvh - 230px)}
   .measure-readout{top:52px;max-width:calc(100% - 20px);font-size:10px}
-  .map-wrap:has(.emerg-banner.show) .measure-readout{top:88px}
+  .map-wrap.has-emergency .measure-readout{top:88px}
   /* With Wind Aloft open, park the readout low-left and shorten the panel so
      the two overlays cannot cover each other on narrow screens. */
-  .map-wrap:has(.sounding-panel:not([hidden])) .measure-readout{top:auto;bottom:140px;left:8px;transform:none;max-width:calc(100% - 16px)}
-  .map-wrap:has(.sounding-panel:not([hidden])):has(.replay-bar.show) .measure-readout{bottom:210px}
-  .map-wrap:has(.sounding-panel:not([hidden])):not(:has(.emerg-banner.show)) .sounding-panel{max-height:calc(82dvh - 230px)}
-  .map-wrap:has(.sounding-panel:not([hidden])):not(:has(.emerg-banner.show)):has(.replay-bar.show) .sounding-panel{max-height:calc(82dvh - 300px)}
-  .map-wrap:has(.sounding-panel:not([hidden])):has(.emerg-banner.show) .sounding-panel{max-height:calc(82dvh - 280px)}
-  .map-wrap:has(.sounding-panel:not([hidden])):has(.emerg-banner.show):has(.replay-bar.show) .sounding-panel{max-height:calc(82dvh - 350px)}
+  .map-wrap.sounding-open .measure-readout{top:auto;bottom:140px;left:8px;transform:none;max-width:calc(100% - 16px)}
+  .map-wrap.sounding-open.replay-open .measure-readout{bottom:210px}
+  .map-wrap.sounding-open:not(.has-emergency) .sounding-panel{max-height:calc(82dvh - 230px)}
+  .map-wrap.sounding-open.replay-open:not(.has-emergency) .sounding-panel{max-height:calc(82dvh - 300px)}
+  .map-wrap.sounding-open.has-emergency .sounding-panel{max-height:calc(82dvh - 280px)}
+  .map-wrap.sounding-open.has-emergency.replay-open .sounding-panel{max-height:calc(82dvh - 350px)}
   .map-filter-panel select{height:28px;font-size:12px}
   .scroll-to-list-btn{display:grid}
   .scroll-list-top-btn{position:fixed;right:16px;bottom:18px;z-index:950}
