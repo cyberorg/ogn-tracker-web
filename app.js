@@ -7748,20 +7748,16 @@ function syncReplayTrackUi() {
   const count = replayTrackSegments.length;
   const hasTracks = !!replayFollowAddress && count > 0;
   const label = `${currentReplayTrackIndex() + 1}/${count}`;
-  for (const [id, icon, word] of [['replayPrevTrack', '⏮', 'Previous'], ['replayNextTrack', '⏭', 'Next']]) {
-    const btn = $(id);
-    if (!btn) continue;
-    btn.hidden = !hasTracks || count < 2;
-    if (!btn.hidden) {
-      btn.textContent = compactReplayUi() ? icon : `${icon} ${label}`;
-      btn.title = `${word} track (${label})`;
-      btn.setAttribute('aria-label', btn.title);
+  // One compact button cycles forward through tracks; jumpToReplayTrack wraps
+  // at the end, so every track stays reachable without two separate controls.
+  const cycleBtn = $('replayTrackCycle');
+  if (cycleBtn) {
+    cycleBtn.hidden = !hasTracks || count < 2;
+    if (!cycleBtn.hidden) {
+      cycleBtn.textContent = label;
+      cycleBtn.title = `Next track (${label} of ${count})`;
+      cycleBtn.setAttribute('aria-label', cycleBtn.title);
     }
-  }
-  const badge = $('replayTrackBadge');
-  if (badge) {
-    badge.hidden = !hasTracks || count < 2;
-    if (!badge.hidden) badge.textContent = label;
   }
   syncReplayTrackMarks();
   if (replayActive) {
@@ -9404,8 +9400,7 @@ $('replayRange').addEventListener('click', () => {
   syncReplayTrackUi();
   if (replayActive) { loadReplaySlice(); replayTrackPromise = loadReplayTrack(); }
 });
-$('replayPrevTrack').addEventListener('click', () => jumpToReplayTrack(-1));
-$('replayNextTrack').addEventListener('click', () => jumpToReplayTrack(1));
+$('replayTrackCycle').addEventListener('click', () => jumpToReplayTrack(1));
 $('replayClearFollow').addEventListener('click', () => {
   replayOnlyFocus = !replayOnlyFocus;
   syncReplayFollowLabel();

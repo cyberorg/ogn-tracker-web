@@ -85,12 +85,11 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .replay-bar .replay-speed-readout{min-width:34px;padding:0 4px;border:0;border-radius:5px;background:var(--control-bg);text-align:center;font-size:11px;font-weight:700;color:var(--accent);white-space:nowrap;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;touch-action:manipulation}
 .replay-bar .replay-speed-readout:hover{background:var(--hover);color:#fff}
 #replayRange{min-width:48px;text-align:center;font-weight:700}
-#replayPrevTrack,#replayNextTrack{padding:5px 5px;font-size:11px;min-width:44px;text-align:center;font-weight:700}
+#replayTrackCycle{padding:5px 7px;font-size:11px;min-width:36px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
 #replayReverse.active{background:#5c3a23;border-color:#f59e0b;color:#fff}
 .replay-bar .replay-time-toggle{display:flex;align-items:center;gap:5px;padding:4px 7px;min-width:0;border-color:transparent;background:var(--control-bg);font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums}
 .replay-bar .replay-time-toggle:hover{background:var(--hover);border-color:var(--accent);color:#fff}
 .replay-bar .replay-tz-tag{font-size:9px;font-weight:700;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:1px 5px;letter-spacing:.3px}
-.replay-bar .replay-track-badge{display:none}
 .replay-bar .replay-time-toggle.track-time .replay-tz-tag{color:var(--accent);border-color:var(--accent)}
 .replay-bar .replay-time-toggle:disabled{opacity:.45;cursor:not-allowed}
 .replay-bar .replay-time-toggle:disabled:hover{background:var(--control-bg);border-color:transparent;color:inherit}
@@ -431,10 +430,9 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
   .aircraft-list{display:grid;grid-template-columns:1fr 1fr;align-content:start;overflow:visible}
   .aircraft{padding:9px}.pin-btn{opacity:.85}
   /* Floating card: compact controls on row 1, time slider on row 2. */
-  .replay-bar{left:8px;right:8px;width:auto;max-width:none;transform:none;bottom:44px;flex-wrap:wrap;justify-content:center;padding:6px 30px 4px 8px;gap:5px}
+  .replay-bar{left:8px;right:8px;width:auto;max-width:none;transform:none;bottom:44px;flex-wrap:wrap;justify-content:center;padding:6px 30px 4px 8px;gap:4px}
   .replay-bar button{padding:5px 7px;font-size:11px;min-width:0;min-height:28px}
-  #replayPrevTrack,#replayNextTrack,#replayRange{min-width:0}
-  .replay-bar .replay-track-badge:not([hidden]){display:inline-block;padding:0 5px;border:1px solid var(--line);border-radius:999px;background:var(--control-bg);color:var(--muted-light);font-size:10px;font-weight:700;font-variant-numeric:tabular-nums;line-height:26px}
+  #replayTrackCycle,#replayRange{min-width:0}
   .replay-timeline{flex:1 1 100%;order:10;min-width:0}
   .replay-speed-arrow{width:24px;height:28px;font-size:14px}
   .replay-bar .replay-speed-readout{min-width:28px;font-size:10px}
