@@ -50,7 +50,7 @@ if (!$doGenerate) {
     http_response_code(503);
     ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzux46"></head><body>
+<link rel="stylesheet" href="style.css?v=20261128zzux47"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
@@ -131,10 +131,12 @@ function max_plausible_speed_kmh(int $type): float {
     return 1300.0;
 }
 
-/** Tracker deep link: #lat,lon,zoom,address (resolved relative to /ogn/). */
-function tracker_hash_url(?float $lat, ?float $lon, string $address): string {
-    if ($lat === null || $lon === null || $address === '') return '';
-    return './#' . number_format($lat, 4, '.', '') . ',' . number_format($lon, 4, '.', '') . ',12,' . rawurlencode($address);
+/** Tracker deep link: #lat,lon,zoom[,address] (resolved relative to /ogn/). */
+function tracker_hash_url(?float $lat, ?float $lon, string $address = ''): string {
+    if ($lat === null || $lon === null) return '';
+    $url = './#' . number_format($lat, 4, '.', '') . ',' . number_format($lon, 4, '.', '') . ',12';
+    if ($address !== '') $url .= ',' . rawurlencode($address);
+    return $url;
 }
 
 /** Keep the per-type record holder together with its winning aircraft id. */
@@ -695,7 +697,7 @@ $genDuration = microtime(true) - $generationStarted;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzux46">
+<link rel="stylesheet" href="style.css?v=20261128zzux47">
 <style>
   header{cursor:default}
   main{display:block!important}
@@ -974,7 +976,7 @@ $genDuration = microtime(true) - $generationStarted;
         $lat = (float)$c['la'];
         $lon = (float)$c['lo'];
         $label = number_format($lat, 1) . ', ' . number_format($lon, 1);
-        $mapUrl = 'https://www.google.com/maps/search/?api=1&query=' . rawurlencode((string)$lat) . ',' . rawurlencode((string)$lon);
+        $mapUrl = tracker_hash_url($lat, $lon);
         $rows[] = [
             '<a href="' . h($mapUrl) . '" target="_blank" rel="noopener">' . h($label) . '</a>',
             '<span class="num">' . n((int)$c['n']) . '</span>',

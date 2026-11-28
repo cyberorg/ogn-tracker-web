@@ -45,6 +45,8 @@ function prune_proxy_cache(string $cacheDir): void {
     $now = time();
     foreach (glob($cacheDir . '/*.json') ?: [] as $old) {
         $name = basename($old);
+        // Insights history/metadata must persist across the 4-hourly snapshot runs.
+        if (str_starts_with($name, 'insights_')) continue;
         if (str_starts_with($name, 'thm_')) {
             $ttl = PROXY_THERMAL_CACHE_TTL;
         } elseif (str_starts_with($name, 'snd_')) {
@@ -1375,13 +1377,12 @@ while (microtime(true) < $deadline && !feof($socket)) {
             } else {
                 $touchBatch[$id] = $now;
                 if ($alertStatus !== null) {
-                    $pos = $lastKnownPos[$id] ?? ['lat' => null, 'lon' => null, 'alt' => null];
+                    $pos = $lastKnownPos[$id] ?? ['lat' => null, 'lon' => null];
                     $alertBatch[$id . '|' . $alertStatus] = [
                         'id'     => $id,
                         'status' => $alertStatus,
                         'lat'    => $pos['lat'],
                         'lon'    => $pos['lon'],
-                        'alt'    => $pos['alt'] ?? null,
                         'raw'    => $line,
                         'ts'     => $now,
                     ];
