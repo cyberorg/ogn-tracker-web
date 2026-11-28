@@ -31,6 +31,8 @@ const THERMAL_CIRCLE_MAX_SPEED_KMH = 150.0; // Hard ceiling even for circling ai
 const POS_SEED_MAX_AGE     = 600;   // Seed continuity state from recent last-known positions
 const MIN_VALID_TEMP_C     = -50.0;
 const MAX_VALID_TEMP_C     = 55.0;
+const WX_FIELD_TTL_SECONDS = 1800; // Age out weather fields not refreshed for 30 minutes
+const WX_FIELDS            = ['dir', 'spdKmh', 'gustKmh', 'tempC', 'pressureHpa', 'humidityPct'];
 // ADS-B gateway traffic is mostly commercial aircraft and dominates the feed;
 // it is not useful for a glider/paraglider tracker.
 const DROP_PACKET_SOURCES  = ['OGADSB'];
@@ -481,45 +483,65 @@ function parse_aprs_weather_fields(string $line): ?array {
     $tempC    = null;
     $pressure = null;
     $humidity = null;
+    $seen     = [];
+    $humiditySeen = false;
 
-    if (preg_match('/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?(?:h(\d{2,3}))?(?:b(\d{4,5}))?/', $payload, $wm)) {
+    // APRS order is wind/gust/temp/r/p/humidity/pressure. The r and p rain
+    // fields were previously skipped, hiding humidity on FNT packets such as
+    // "...t023r000p016h50".
+    if (preg_match('/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?(?:r(\d{3}))?(?:p(\d{3}))?(?:h(\d{2,3}))?(?:b(\d{4,5}))?/', $payload, $wm)) {
         $dir    = (int)$wm[1];
         $spdKmh = (int)round((int)$wm[2] * 1.60934);
+        $seen[] = 'dir';
+        $seen[] = 'spdKmh';
         if (isset($wm[3]) && $wm[3] !== '') {
             $gustKmh = (int)round((int)$wm[3] * 1.60934);
+            $seen[] = 'gustKmh';
         }
         if (isset($wm[4]) && $wm[4] !== '') {
             $tempC = (int)round(((int)$wm[4] - 32) * 5.0 / 9.0);
+            $seen[] = 'tempC';
         }
-        if (isset($wm[5]) && $wm[5] !== '') {
-            $rawH = (int)$wm[5];
-            $humidity = ($rawH === 0) ? 100 : min(100, max(0, $rawH));
+        if (isset($wm[7]) && $wm[7] !== '') {
+            $humiditySeen = true;
+            $seen[] = 'humidityPct';
+            $rawH = (int)$wm[7];
+            // APRS formally encodes h00 as 100%, but these FNT sensors use it
+            // for "no humidity reading"; treat it as unavailable so stale
+            // values are cleared instead of being pinned at 100%.
+            $humidity = ($rawH === 0) ? null : min(100, max(0, $rawH));
         }
-        if (isset($wm[6]) && $wm[6] !== '') {
-            $pressure = round((int)$wm[6] / 10.0, 1);
+        if (isset($wm[8]) && $wm[8] !== '') {
+            $pressure = round((int)$wm[8] / 10.0, 1);
+            $seen[] = 'pressureHpa';
         }
     }
 
     if ($tempC === null && preg_match('/(?:^|[\s,(])([+-]?\d{1,2}(?:\.\d+)?)\s*°?C(?=$|[\s,;)\/])/u', $payload, $cm)) {
         $tempC = (int)round((float)$cm[1]);
+        $seen[] = 'tempC';
     }
 
-    if ($humidity === null && preg_match('/(?:^|[\s,(])(?:rh\s*[:=]?\s*|hum(?:idity)?\s*[:=]?\s*)?(\d{1,3})\s*%(?=$|[\s,;)\/])/i', $payload, $pm)) {
+    if (!$humiditySeen && preg_match('/(?:^|[\s,(])(?:rh\s*[:=]?\s*|hum(?:idity)?\s*[:=]?\s*)?(\d{1,3})\s*%(?=$|[\s,;)\/])/i', $payload, $pm)) {
         $rawPct = (int)$pm[1];
         if ($rawPct >= 0 && $rawPct <= 100) {
             $humidity = $rawPct;
+            $seen[] = 'humidityPct';
         }
     }
 
     if ($pressure === null) {
         if (preg_match('/(?:^|[\s,(])(\d{3,4}(?:\.\d+)?)\s*(?:hpa|mbar)(?=$|[\s,;)\/])/i', $payload, $hpm)) {
             $pressure = round((float)$hpm[1], 1);
+            $seen[] = 'pressureHpa';
         } elseif (!preg_match('/_\d{3}\/\d{3}/', $payload) && preg_match('/(?:^|[\s,(])b(\d{4,5})(?=$|[\s,;)\/])/', $payload, $bm)) {
             $pressure = round((int)$bm[1] / 10.0, 1);
+            $seen[] = 'pressureHpa';
         }
     }
 
-    return sanitize_weather_array([
+    $seen = array_values(array_unique($seen));
+    $clean = sanitize_weather_array([
         'dir'         => $dir,
         'spdKmh'      => $spdKmh,
         'gustKmh'     => $gustKmh,
@@ -527,6 +549,14 @@ function parse_aprs_weather_fields(string $line): ?array {
         'pressureHpa' => $pressure,
         'humidityPct' => $humidity,
     ]);
+    if ($clean === null) {
+        // An h00-only packet is still useful: it tells the merge layer to clear
+        // an old humidity reading even though there is no positive weather data.
+        $hasNonTempSeen = count(array_diff($seen, ['tempC'])) > 0;
+        return $hasNonTempSeen ? ['__seen' => $seen] : null;
+    }
+    $clean['__seen'] = $seen;
+    return $clean;
 }
 
 function register_station_alias(array &$stationAliases, string $a, string $b): void {
@@ -629,8 +659,15 @@ while ($wrow = $stmtLoadWx->fetch(PDO::FETCH_ASSOC)) {
     if (is_array($decoded)) {
         $clean = sanitize_weather_array($decoded);
         if ($clean !== null) {
+            $fieldTs = [];
+            foreach ($clean as $field => $value) {
+                if ($value !== null && in_array($field, WX_FIELDS, true)) {
+                    $fieldTs[$field] = (int)$wrow['updated'];
+                }
+            }
             $stationWeatherState[$wrow['id']] = [
                 'wx'      => $clean,
+                'fields'  => $fieldTs,
                 'updated' => (int)$wrow['updated'],
             ];
         }
@@ -825,22 +862,43 @@ $stmtMeta = $pdo->prepare('
 ');
 
 function record_station_weather(array &$stationWeatherState, array &$stationWxBatch, array $keys, array $incomingWx, int $ts): void {
+    // `__seen` distinguishes "the packet carried h00" from "the packet omitted
+    // humidity": the former must clear the old value, the latter only ages it.
+    $seen = [];
+    if (isset($incomingWx['__seen']) && is_array($incomingWx['__seen'])) {
+        foreach ($incomingWx['__seen'] as $field) {
+            if (is_string($field) && in_array($field, WX_FIELDS, true)) $seen[$field] = true;
+        }
+        unset($incomingWx['__seen']);
+    }
+
     foreach ($keys as $rawKey) {
         $k = strtolower(trim((string)$rawKey));
         if ($k === '') continue;
-        $existing = $stationWeatherState[$k]['wx'] ?? [];
-        $merged = $existing;
-        foreach ($incomingWx as $field => $val) {
-            if ($val !== null) {
-                $merged[$field] = $val;
+        $merged = $stationWeatherState[$k]['wx'] ?? [];
+        $fieldTs = $stationWeatherState[$k]['fields'] ?? [];
+
+        foreach ($fieldTs as $field => $fieldTsValue) {
+            if (($ts - (int)$fieldTsValue) > WX_FIELD_TTL_SECONDS) {
+                unset($fieldTs[$field]);
+                $merged[$field] = null;
             }
         }
+
+        foreach ($incomingWx as $field => $val) {
+            if (!in_array($field, WX_FIELDS, true)) continue;
+            if ($val !== null || isset($seen[$field])) {
+                $merged[$field] = $val;
+                $fieldTs[$field] = $ts;
+            }
+        }
+
         $clean = sanitize_weather_array($merged);
-        if ($clean === null) continue;
         $prevTs = $stationWeatherState[$k]['updated'] ?? 0;
         $updatedTs = max($ts, $prevTs);
-        $stationWeatherState[$k] = ['wx' => $clean, 'updated' => $updatedTs];
-        $stationWxBatch[$k] = ['wx' => $clean, 'updated' => $updatedTs];
+        $storedWx = $clean ?? [];
+        $stationWeatherState[$k] = ['wx' => $storedWx, 'fields' => $fieldTs, 'updated' => $updatedTs];
+        $stationWxBatch[$k] = ['wx' => $storedWx, 'updated' => $updatedTs];
     }
 }
 

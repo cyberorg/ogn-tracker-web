@@ -10,6 +10,8 @@ const AIRSPACE_STORAGE_KEY = 'ogn_custom_airspace_geojson';
 const BOOKMARKS_STORAGE_KEY = 'ogn_map_bookmarks';
 const NAME_CACHE_MAX = 1000;
 const WX_CACHE_TTL_MS = 30 * 60 * 1000;
+const WX_FIELD_TTL_MS = 30 * 60 * 1000;
+const WX_FIELDS = ['dir', 'spdKmh', 'gustKmh', 'tempC', 'pressureHpa', 'humidityPct'];
 const ALERT_24H_TTL_MS = 24 * 60 * 60 * 1000;
 const LAST_KNOWN_TTL_MS = 24 * 60 * 60 * 1000;
 const SOUNDING_NO_DATA_MSG = 'Not enough circling tracks in the last hour to reconstruct wind aloft.';
@@ -5748,47 +5750,106 @@ function sanitizeWeather(wx) {
   return { dir, spdKmh, gustKmh, tempC, pressureHpa, humidityPct };
 }
 
+// A weather object carries `__seen` to distinguish "the packet carried h00"
+// from "the packet omitted humidity". The former clears the old value; the
+// latter only lets it age out.
+function weatherSeenFields(wx) {
+  const seen = new Set();
+  if (!wx || typeof wx !== 'object') return seen;
+  if (Array.isArray(wx.__seen)) {
+    for (const field of wx.__seen) {
+      if (WX_FIELDS.includes(field)) seen.add(field);
+    }
+  }
+  for (const field of WX_FIELDS) {
+    const value = wx[field];
+    if (value != null && Number.isFinite(Number(value))) seen.add(field);
+  }
+  return seen;
+}
+
+function weatherWithSeen(wx, seen) {
+  const fields = [...seen];
+  if (!wx) return fields.length ? { __seen: fields } : null;
+  return fields.length ? { ...wx, __seen: fields } : wx;
+}
+
 function parseAprsWeather(line) {
   const colonIdx = line.indexOf(':');
   const payload = colonIdx !== -1 ? line.slice(colonIdx + 1) : line;
 
-  const wxMatch = payload.match(/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?(?:h(\d{2,3}))?(?:b(\d{4,5}))?/);
+  // APRS order is wind/gust/temp/r/p/humidity/pressure. Skipping the rain
+  // fields hid humidity on packets such as "...t023r000p016h50".
+  const wxMatch = payload.match(/_(\d{3})\/(\d{3})(?:g(\d{3}))?(?:t(-?\d{3}))?(?:r(\d{3}))?(?:p(\d{3}))?(?:h(\d{2,3}))?(?:b(\d{4,5}))?/);
 
   let dir = null, spdKmh = null, gustKmh = null, tempC = null, humidityPct = null, pressureHpa = null;
+  const seen = new Set();
+  let humiditySeen = false;
 
   if (wxMatch) {
     dir = parseInt(wxMatch[1], 10);
     spdKmh = Math.round(parseInt(wxMatch[2], 10) * 1.60934);
-    if (wxMatch[3] != null) gustKmh = Math.round(parseInt(wxMatch[3], 10) * 1.60934);
-    if (wxMatch[4] != null) tempC = Math.round((parseInt(wxMatch[4], 10) - 32) * 5 / 9);
-    if (wxMatch[5] != null) {
-      const rawH = parseInt(wxMatch[5], 10);
-      humidityPct = rawH === 0 ? 100 : Math.min(100, Math.max(0, rawH));
+    seen.add('dir');
+    seen.add('spdKmh');
+    if (wxMatch[3] != null) {
+      gustKmh = Math.round(parseInt(wxMatch[3], 10) * 1.60934);
+      seen.add('gustKmh');
     }
-    if (wxMatch[6] != null) pressureHpa = Number((parseInt(wxMatch[6], 10) / 10).toFixed(1));
+    if (wxMatch[4] != null) {
+      tempC = Math.round((parseInt(wxMatch[4], 10) - 32) * 5 / 9);
+      seen.add('tempC');
+    }
+    if (wxMatch[7] != null) {
+      humiditySeen = true;
+      seen.add('humidityPct');
+      const rawH = parseInt(wxMatch[7], 10);
+      // APRS formally encodes h00 as 100%, but these FNT sensors use it for
+      // "no humidity reading"; treat it as unavailable so old values clear.
+      humidityPct = rawH === 0 ? null : Math.min(100, Math.max(0, rawH));
+    }
+    if (wxMatch[8] != null) {
+      pressureHpa = Number((parseInt(wxMatch[8], 10) / 10).toFixed(1));
+      seen.add('pressureHpa');
+    }
   }
 
   if (tempC == null) {
     const cMatch = payload.match(/(?:^|[\s,(])([+-]?\d{1,2}(?:\.\d+)?)\s*°?C(?=$|[\s,;)/])/);
-    if (cMatch) tempC = Math.round(parseFloat(cMatch[1]));
+    if (cMatch) {
+      tempC = Math.round(parseFloat(cMatch[1]));
+      seen.add('tempC');
+    }
   }
 
-  if (humidityPct == null) {
+  if (!humiditySeen) {
     const pctMatch = payload.match(/(?:^|[\s,(])(?:rh\s*[:=]?\s*|hum(?:idity)?\s*[:=]?\s*)?(\d{1,3})\s*%(?=$|[\s,;)/])/i);
     if (pctMatch) {
       const rawPct = parseInt(pctMatch[1], 10);
-      if (rawPct >= 0 && rawPct <= 100) humidityPct = rawPct;
+      if (rawPct >= 0 && rawPct <= 100) {
+        humidityPct = rawPct;
+        seen.add('humidityPct');
+      }
     }
   }
 
   if (pressureHpa == null) {
     const hpaMatch = payload.match(/(?:^|[\s,(])(\d{3,4}(?:\.\d+)?)\s*(?:hpa|mbar)(?=$|[\s,;)/])/i);
     const bLooseMatch = !wxMatch ? payload.match(/(?:^|[\s,(])b(\d{4,5})(?=$|[\s,;)/])/) : null;
-    if (hpaMatch) pressureHpa = Number(parseFloat(hpaMatch[1]).toFixed(1));
-    else if (bLooseMatch) pressureHpa = Number((parseInt(bLooseMatch[1], 10) / 10).toFixed(1));
+    if (hpaMatch) {
+      pressureHpa = Number(parseFloat(hpaMatch[1]).toFixed(1));
+      seen.add('pressureHpa');
+    } else if (bLooseMatch) {
+      pressureHpa = Number((parseInt(bLooseMatch[1], 10) / 10).toFixed(1));
+      seen.add('pressureHpa');
+    }
   }
 
-  return sanitizeWeather({ dir, spdKmh, gustKmh, tempC, pressureHpa, humidityPct });
+  const clean = sanitizeWeather({ dir, spdKmh, gustKmh, tempC, pressureHpa, humidityPct });
+  if (clean) return weatherWithSeen(clean, seen);
+  // h00 alone has no positive value, but it still needs to reach the cache to
+  // clear an older humidity reading.
+  const hasNonTempSeen = [...seen].some(field => field !== 'tempC');
+  return hasNonTempSeen ? weatherWithSeen(null, seen) : null;
 }
 
 function parseAprsLineCached(line, timestampMs) {
@@ -6222,13 +6283,25 @@ function formatWeatherHtml(wx, compact = false) {
 function mergeWeather(existing, incoming) {
   const a = sanitizeWeather(existing);
   const b = sanitizeWeather(incoming);
-  if (!a) return b;
-  if (!b) return a;
-  const merged = { ...a };
-  for (const [k, v] of Object.entries(b)) {
-    if (v != null) merged[k] = v;
+  const existingSeen = weatherSeenFields(existing);
+  const incomingSeen = weatherSeenFields(incoming);
+  const seen = new Set([...existingSeen, ...incomingSeen]);
+  const merged = {};
+  for (const field of WX_FIELDS) {
+    if (!seen.has(field)) continue;
+    if (incomingSeen.has(field)) {
+      // Explicitly seen nulls (h00) clear older values; omitted fields age out
+      // through the per-field timestamps instead of being merged forever.
+      merged[field] = b && b[field] != null ? b[field] : null;
+    } else if (a && a[field] != null) {
+      merged[field] = a[field];
+    } else if (b && b[field] != null) {
+      merged[field] = b[field];
+    }
   }
-  return sanitizeWeather(merged);
+  const clean = sanitizeWeather(merged);
+  if (!clean) return seen.size ? weatherWithSeen(null, seen) : null;
+  return weatherWithSeen(clean, seen);
 }
 
 function playBeep() {
@@ -6272,17 +6345,74 @@ function getStationKeys(station) {
   return expanded;
 }
 
-function updateWeatherCache(keys, wx, tsMs) {
-  const clean = sanitizeWeather(wx);
-  if (!clean) return;
+function weatherSeenMap(entry) {
+  const map = new Map();
+  if (!entry || typeof entry !== 'object') return map;
+  if (entry.seen && typeof entry.seen === 'object') {
+    for (const [field, ts] of Object.entries(entry.seen)) {
+      if (WX_FIELDS.includes(field) && Number.isFinite(Number(ts))) map.set(field, Number(ts));
+    }
+  }
+  if (map.size === 0 && entry.wx && typeof entry.wx === 'object') {
+    const fallbackTs = Number(entry.ts) || 0;
+    for (const field of WX_FIELDS) {
+      const value = entry.wx[field];
+      if (value != null && Number.isFinite(Number(value))) map.set(field, fallbackTs);
+    }
+  }
+  return map;
+}
+
+function ageWeatherCacheEntry(entry, nowMs) {
+  const seenMap = weatherSeenMap(entry);
+  const values = entry && entry.wx && typeof entry.wx === 'object' ? { ...entry.wx } : {};
+  let changed = false;
+  for (const [field, fieldTs] of seenMap) {
+    if (!Number.isFinite(nowMs) || nowMs - fieldTs > WX_FIELD_TTL_MS) {
+      seenMap.delete(field);
+      values[field] = null;
+      changed = true;
+    }
+  }
+  const clean = sanitizeWeather(values);
+  return { wx: clean || {}, seen: seenMap, ts: Number(entry?.ts) || 0, changed };
+}
+
+function updateWeatherCache(keys, wx, tsMs, explicitSeen = null) {
+  const values = sanitizeWeather(wx) || {};
+  const seen = explicitSeen
+    ? new Set([...explicitSeen].filter(field => WX_FIELDS.includes(field)))
+    : weatherSeenFields(wx);
+  const nowTs = Number.isFinite(tsMs) ? tsMs : serverNow();
   for (const rawKey of keys) {
     const k = String(rawKey || '').trim().toLowerCase();
     if (!k) continue;
     const prev = wxCache.get(k);
-    const merged = mergeWeather(prev ? prev.wx : null, clean);
-    if (merged) {
-      wxCache.set(k, { wx: merged, ts: Math.max(tsMs || 0, prev ? prev.ts : 0) });
+    const seenMap = weatherSeenMap(prev);
+    const updatedValues = prev && prev.wx && typeof prev.wx === 'object' ? { ...prev.wx } : {};
+
+    for (const [field, fieldTs] of seenMap) {
+      if (nowTs - fieldTs > WX_FIELD_TTL_MS) {
+        seenMap.delete(field);
+        updatedValues[field] = null;
+      }
     }
+    for (const field of seen) {
+      seenMap.set(field, nowTs);
+      updatedValues[field] = values[field] != null ? values[field] : null;
+    }
+    for (const field of WX_FIELDS) {
+      if (values[field] != null && !seen.has(field)) {
+        seenMap.set(field, nowTs);
+        updatedValues[field] = values[field];
+      }
+    }
+
+    wxCache.set(k, {
+      wx: sanitizeWeather(updatedValues) || {},
+      seen: Object.fromEntries(seenMap),
+      ts: Math.max(nowTs, prev ? Number(prev.ts) || 0 : 0),
+    });
   }
 }
 
@@ -6297,12 +6427,15 @@ function readCachedWeather(keys, nowMs, ttlMs) {
       wxCache.delete(k);
       continue;
     }
-    const cleanEntryWx = sanitizeWeather(entry.wx);
-    if (!cleanEntryWx) {
+    const aged = ageWeatherCacheEntry(entry, nowMs);
+    if (aged.changed) {
+      wxCache.set(k, { wx: aged.wx, seen: Object.fromEntries(aged.seen), ts: aged.ts });
+    }
+    if (Object.keys(aged.wx).length === 0 && aged.seen.size === 0) {
       wxCache.delete(k);
       continue;
     }
-    combined = mergeWeather(combined, cleanEntryWx);
+    combined = mergeWeather(combined, weatherWithSeen(aged.wx, new Set(aged.seen.keys())));
   }
   return combined;
 }
@@ -8446,7 +8579,9 @@ async function fetchLive(force = false) {
     for (const [id, entry] of Object.entries(incomingWx)) {
       if (entry && entry.wx && typeof entry.wx === 'object') {
         const tsMs = (Number(entry.timestamp) || Math.floor(Date.now() / 1000)) * 1000;
-        updateWeatherCache([id], entry.wx, tsMs);
+        // The server snapshot includes null fields too; treat every key it
+        // carries as authoritative so local stale values are cleared.
+        updateWeatherCache([id], entry.wx, tsMs, Object.keys(entry.wx));
       }
     }
 
