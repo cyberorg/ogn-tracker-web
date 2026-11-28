@@ -1674,10 +1674,12 @@ function s3dCreateArrowLayer() {
         if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
         seen.add(key);
         const elevation = s3dRenderAltitude(item.lon, item.lat, item.alt);
+        let projectedPt = null;
         if (Mc && transform && typeof transform.coordinatePoint === 'function' && pixelMatrix) {
           try {
             const pt = transform.coordinatePoint(
               Mc.fromLngLat([item.lon, item.lat]), elevation, pixelMatrix);
+            projectedPt = pt;
             s3dSetCachedScreenProjection(item, pt, pixelMatrix, projectionFrame);
           } catch (err) {}
         }
@@ -1719,6 +1721,9 @@ function s3dCreateArrowLayer() {
           .multiply(this._scratchRotation.makeRotationZ(rot));
         model.matrixAutoUpdate = false;
         model.matrix.copy(m);
+        if (item.haloed) {
+          s3dUpdateHaloScale(item, projectedPt, elevation, pixelMatrix, mc, metersPerPixel, unit, markerPx);
+        }
       }
       for (const [key, model] of this.models) {
         if (seen.has(key)) continue;
@@ -2167,6 +2172,36 @@ function s3dSetCachedScreenProjection(item, pt, matrix, frame) {
   item.s3dProjMatrix = matrix;
 }
 
+// Scale the CSS halo from the same 3D projection used by the WebGL marker. A
+// second east/north sample measures how many screen pixels the marker's nominal
+// 30px world span covers at this position, pitch and altitude. Only haloed
+// markers pay for the extra projections, and the result is quantised so a
+// stable camera does not keep rewriting styles.
+function s3dUpdateHaloScale(item, centerPt, elevation, matrix, mercator, metersPerPixel, unit, markerPx) {
+  if (!item || !item.haloed || !centerPt || !matrix || !mercator ||
+      !Number.isFinite(elevation) || !Number.isFinite(metersPerPixel) ||
+      !Number.isFinite(unit) || !Number.isFinite(markerPx) || markerPx <= 0) return;
+  const transform = map3d?.transform;
+  if (!transform || typeof transform.coordinatePoint !== 'function') return;
+  const span = unit * metersPerPixel * markerPx;
+  if (!Number.isFinite(span) || span <= 0) return;
+  let eastPt, northPt;
+  try {
+    eastPt = transform.coordinatePoint({ x: mercator.x + span, y: mercator.y, z: 0 }, elevation, matrix);
+    northPt = transform.coordinatePoint({ x: mercator.x, y: mercator.y - span, z: 0 }, elevation, matrix);
+  } catch (err) {
+    return;
+  }
+  const eastPx = Math.hypot(eastPt?.x - centerPt.x, eastPt?.y - centerPt.y);
+  const northPx = Math.hypot(northPt?.x - centerPt.x, northPt?.y - centerPt.y);
+  const apparentPx = Math.max(eastPx, northPx);
+  if (!Number.isFinite(apparentPx) || apparentPx <= 0) return;
+  const scale = Math.max(1, Math.min(4, Math.round((apparentPx / markerPx) * 20) / 20));
+  if (item._haloScale === scale) return;
+  item._haloScale = scale;
+  item.el?.style?.setProperty('--halo-scale', String(scale));
+}
+
 /** Inverse of s3dProject3DPoint for one fixed rendered altitude. */
 function s3dUnprojectAtElevation(px, py, elevation) {
   if (!map3d) return null;
@@ -2459,7 +2494,8 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
     });
     item = {
       el, lat, lon, alt, html: iconHtml || '', _iconSig: opts.iconSig || '',
-      popupData, onClick: opts.onClick, s3dShowName: false
+      popupData, onClick: opts.onClick, s3dShowName: false,
+      haloed: !!(opts.selected || opts.focused), _haloScale: 1
     };
     map3dDomMarkers.set(key, item);
   } else {
@@ -2481,6 +2517,7 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
     }
     if (opts.focused != null) item.el.classList.toggle('focused', !!opts.focused);
     if (opts.selected != null) item.el.classList.toggle('selected', !!opts.selected);
+    item.haloed = item.el.classList.contains('selected') || item.el.classList.contains('focused');
   }
   item.lat = lat;
   item.lon = lon;
