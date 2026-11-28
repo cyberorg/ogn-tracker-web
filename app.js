@@ -6905,7 +6905,7 @@ function buildRowHtml(a, now) {
     const isFollowed = followedAddress === a.address;
     const isBuddy = selectedTracks.has(a.address);
     const name = esc(displayName(a));
-    rightColHtml += `<div class="row-actions"><button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button><button type="button" class="buddy-btn${isBuddy ? ' active' : ''}" data-buddy="${esc(a.address)}" title="${isBuddy ? 'Remove' : 'Add'} ${name} ${isBuddy ? 'from' : 'to'} Buddies" aria-pressed="${isBuddy ? 'true' : 'false'}">Buddies</button></div>`;
+    rightColHtml += `<div class="row-actions"><button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button><button type="button" class="buddy-btn${isBuddy ? ' active' : ''}" data-buddy="${esc(a.address)}" title="${isBuddy ? 'Remove' : 'Add'} ${name} ${isBuddy ? 'from' : 'to'} Buddies" aria-pressed="${isBuddy ? 'true' : 'false'}">+ Buddies</button></div>`;
   }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
