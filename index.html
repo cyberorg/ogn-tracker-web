@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="style.css?v=20261128zzux9">
+<link rel="stylesheet" href="style.css?v=20261128zzux10">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -210,7 +210,7 @@
       <div class="section-head">
         <div class="section-title-wrap">
           <h2>Aircrafts/Stations</h2>
-          <button type="button" id="listFilterPill" class="list-filter-pill" aria-controls="listHint" aria-expanded="false" title="Show filter details" hidden>Filtered</button>
+          <button type="button" id="listFilterPill" class="list-filter-pill" aria-controls="listHint listFilterPanel" aria-expanded="false" title="Show filters" hidden>Filtered</button>
         </div>
         <div class="list-head-actions">
           <label class="sr-only" for="listSort">Sort aircraft list</label>
@@ -224,6 +224,7 @@
         </div>
       </div>
       <div id="listHint" class="list-hint" aria-live="polite" hidden></div>
+      <div id="listFilterPanel" class="list-filter-panel" hidden></div>
     </div>
     <div class="list-back-to-map-row"><button type="button" id="listBackToMap" class="list-back-to-map" aria-label="Return to map" title="Return to map">↑</button></div>
     <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
@@ -238,7 +239,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="tz-lookup.js?v=20261128zzux9"></script>
-<script src="app.js?v=20261128zzux9"></script>
+<script src="tz-lookup.js?v=20261128zzux10"></script>
+<script src="app.js?v=20261128zzux10"></script>
 </body>
 </html>

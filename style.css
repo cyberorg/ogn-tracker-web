@@ -119,6 +119,8 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .section-head.collapsed .section-caret{transform:rotate(-90deg)}
 .list-hint{padding:0 14px 8px;color:var(--muted-soft);font-size:11px;min-height:0}
 .list-hint[hidden],.list-hint:empty{display:none}
+.list-filter-panel{padding:0 14px 8px}
+.list-filter-panel[hidden]{display:none}
 .alerts-panel{margin:0 0 4px;padding:0;border:0;background:transparent;caret-color:transparent;user-select:none}
 .alerts-panel[hidden]{display:none}
 .alerts-list{max-height:none;overflow:visible;border-top:1px solid var(--alert-line);border-bottom:1px solid var(--alert-line);flex:0 0 auto}

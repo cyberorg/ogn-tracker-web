@@ -6546,16 +6546,57 @@ function isUserInteractingWithList() {
   return !!(ae && $('aircraftList').contains(ae));
 }
 
+function syncListTypePanel() {
+  const panel = $('listFilterPanel');
+  const source = $('type');
+  if (!panel || !source) return;
+  const sourceBoxes = [...source.querySelectorAll('input[type="checkbox"]')];
+  const mirrorBoxes = [...panel.querySelectorAll('input[data-list-type]')];
+  mirrorBoxes.forEach(cb => {
+    const src = sourceBoxes.find(b => b.value === cb.value);
+    cb.checked = !!(src && src.checked);
+  });
+}
+
+function buildListTypePanel() {
+  const source = $('type');
+  const panel = $('listFilterPanel');
+  if (!source || !panel || panel.childElementCount) return;
+  const group = document.createElement('div');
+  group.className = 'type-checklist';
+  group.setAttribute('role', 'group');
+  group.setAttribute('aria-label', 'Aircraft filter');
+  [...source.querySelectorAll('input[type="checkbox"]')].forEach(src => {
+    const label = document.createElement('label');
+    label.className = src.closest('label')?.classList.contains('type-all') ? 'type-option type-all' : 'type-option';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = src.value;
+    cb.dataset.listType = src.value;
+    const span = document.createElement('span');
+    span.textContent = src.closest('label')?.querySelector('span')?.textContent || src.value;
+    label.append(cb, span);
+    group.append(label);
+  });
+  panel.append(group);
+  syncListTypePanel();
+}
+
 function syncListFilterPill() {
   const pill = $('listFilterPill');
   const hint = $('listHint');
+  const panel = $('listFilterPanel');
   if (!pill || !hint) return;
   const hasText = !!hint.textContent.trim();
   pill.hidden = !hasText;
   const expanded = hasText && listHintExpanded;
   pill.setAttribute('aria-expanded', String(expanded));
-  pill.title = expanded ? 'Hide filter details' : 'Show filter details';
+  pill.title = expanded ? 'Hide filters' : 'Show filters';
   hint.hidden = !expanded;
+  if (panel) {
+    panel.hidden = !expanded;
+    if (expanded) syncListTypePanel();
+  }
 }
 
 function clearListHint() {
@@ -8655,6 +8696,22 @@ $('listFilterPill').addEventListener('click', e => {
   listHintExpanded = !listHintExpanded;
   syncListFilterPill();
 });
+$('listFilterPanel').addEventListener('change', e => {
+  const cb = e.target.closest('input[data-list-type]');
+  if (!cb) return;
+  const source = $('type');
+  const panel = $('listFilterPanel');
+  if (!source || !panel) return;
+  const sourceBoxes = [...source.querySelectorAll('input[type="checkbox"]')];
+  const mirrorBoxes = [...panel.querySelectorAll('input[data-list-type]')];
+  sourceBoxes.forEach(b => {
+    const mirror = mirrorBoxes.find(m => m.value === b.value);
+    if (mirror) b.checked = mirror.checked;
+  });
+  const changed = sourceBoxes.find(b => b.value === cb.value);
+  if (changed) changed.dispatchEvent(new Event('change', { bubbles: true }));
+  syncListTypePanel();
+});
 $('listSort').addEventListener('change', () => {
   listSort = $('listSort').value;
   saveMenuPrefs();
@@ -8685,6 +8742,7 @@ $('type').addEventListener('change', e => {
       removeTrack(addr);
     }
   }
+  syncListTypePanel();
   render();
 });
 
@@ -8692,6 +8750,8 @@ applySavedLayers();
 updateMapAttribution();
 bringToFront($('mapFilterControl'));
 applySavedMenuPrefs();
+buildListTypePanel();
+syncListFilterPill();
 syncUnitButtons();
 
 $('presetMetricBtn').addEventListener('click', () => applyUnitPreset('metric'));
