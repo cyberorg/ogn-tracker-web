@@ -118,6 +118,7 @@ let hashMessagePopup = null;
 let bookmarks = [];
 let listHintExpanded = false;
 let measureMode = false;
+let tracksVisible = true;
 let measurePoints = [];
 let selectedMeasureIndex = -1;
 let measureLine = null;
@@ -518,6 +519,16 @@ const ResetCameraControl = L.Control.extend({
 });
 new ResetCameraControl().addTo(map);
 
+const HIDE_TRACKS_ICON =
+  '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
+  '<path d="M2.5 17.5c3-8 6.5 3 9.5-4 2-4.5 4-2 6-6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+  '<path d="M15.5 15.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+  '</svg>';
+const SHOW_TRACKS_ICON =
+  '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
+  '<path d="M2.5 17.5c3-8 6.5 3 9.5-4 2-4.5 4-2 6-6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
+  '</svg>';
+
 const FULLSCREEN_ICON =
   '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
   '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" ' +
@@ -539,14 +550,9 @@ const FullscreenControl = L.Control.extend({
 
     const clearTracksButton = L.DomUtil.create('button', 'leaflet-control-clear-tracks-btn', container);
     clearTracksButton.type = 'button';
-    clearTracksButton.hidden = true;
-    clearTracksButton.innerHTML =
-      '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">' +
-      '<path d="M2.5 17.5c3-8 6.5 3 9.5-4 2-4.5 4-2 6-6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
-      '<path d="M15.5 15.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' +
-      '</svg>';
-    clearTracksButton.setAttribute('aria-label', 'Clear all tracks');
-    clearTracksButton.title = 'Clear all tracks';
+    clearTracksButton.innerHTML = HIDE_TRACKS_ICON;
+    clearTracksButton.setAttribute('aria-label', 'Hide tracks');
+    clearTracksButton.title = 'Hide tracks';
     L.DomEvent.disableClickPropagation(container);
     L.DomEvent.on(button, 'click', event => {
       L.DomEvent.preventDefault(event);
@@ -554,8 +560,7 @@ const FullscreenControl = L.Control.extend({
     });
     L.DomEvent.on(clearTracksButton, 'click', event => {
       L.DomEvent.preventDefault(event);
-      clearAllTracks();
-      render();
+      toggleTrackVisibility();
     });
     this._button = button;
     this._clearTracksButton = clearTracksButton;
@@ -604,8 +609,45 @@ function syncMapFullscreenUi() {
 
 function syncClearTracksButton() {
   const button = mapFullscreenControl?._clearTracksButton;
-  if (!button) return;
-  button.hidden = selectedTracks.size === 0;
+  if (button) {
+    button.hidden = false;
+    button.classList.toggle('off', !tracksVisible);
+    button.innerHTML = tracksVisible ? HIDE_TRACKS_ICON : SHOW_TRACKS_ICON;
+    const label = tracksVisible ? 'Hide tracks' : 'Show tracks';
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-pressed', String(tracksVisible));
+    button.title = label;
+  }
+  const unselectAllButton = $('unselectAllBtn');
+  if (unselectAllButton) unselectAllButton.hidden = selectedTracks.size === 0;
+}
+
+function addTrackLayerIfVisible(entry) {
+  if (entry?.layer && tracksVisible && !map.hasLayer(entry.layer)) entry.layer.addTo(map);
+}
+
+function syncTrackLayersOnMap() {
+  for (const entry of selectedTracks.values()) {
+    if (!entry.layer) continue;
+    if (tracksVisible) {
+      if (!map.hasLayer(entry.layer)) entry.layer.addTo(map);
+    } else if (map.hasLayer(entry.layer)) {
+      map.removeLayer(entry.layer);
+    }
+  }
+  if (replayActive) {
+    if (tracksVisible && !map.hasLayer(replayTrackGroup)) replayTrackGroup.addTo(map);
+    if (!tracksVisible && map.hasLayer(replayTrackGroup)) map.removeLayer(replayTrackGroup);
+  }
+}
+
+function toggleTrackVisibility() {
+  tracksVisible = !tracksVisible;
+  syncTrackLayersOnMap();
+  syncClearTracksButton();
+  sync3DTracks();
+  if (replayActive) updateReplayTrackLine();
+  syncVarioLegend();
 }
 
 const mapFullscreenControl = new FullscreenControl().addTo(map);
@@ -1832,6 +1874,12 @@ function s3dReplaceThreeLines(group, segments) {
 
 function s3dSyncThreeLines() {
   if (!s3dArrowLayer?.lines) return;
+  if (!tracksVisible) {
+    s3dReplaceThreeLines(s3dArrowLayer.lines.tracks, []);
+    s3dReplaceThreeLines(s3dArrowLayer.lines.replay, []);
+    s3dReplaceThreeLines(s3dArrowLayer.lines.progress, []);
+    return;
+  }
   if (!replayActive) {
     const liveSegments = [];
     for (const entry of selectedTracks.values()) {
@@ -1854,6 +1902,10 @@ function s3dSyncThreeLines() {
 
 function s3dSyncThreeProgress(perSegment) {
   if (!s3dArrowLayer?.lines) return;
+  if (!tracksVisible) {
+    s3dReplaceThreeLines(s3dArrowLayer.lines.progress, []);
+    return;
+  }
   const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
   s3dReplaceThreeLines(s3dArrowLayer.lines.progress,
     (perSegment || []).map(pts => ({ points: pts, color, opacity: 1, widthPx: S3D_PROGRESS_PX })));
@@ -2382,7 +2434,7 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
   let item = map3dDomMarkers.get(key);
   if (!item) {
     const el = document.createElement('div');
-    el.className = `ogn-3d-dom-marker${opts.focused ? ' focused' : ''}`;
+    el.className = `ogn-3d-dom-marker${opts.focused ? ' focused' : ''}${opts.selected ? ' selected' : ''}`;
     el.innerHTML = iconHtml;
     // Positioned directly from MapLibre's 3D projection each render. Using a
     // normal MapLibre Marker would clamp the icon to the terrain surface, not
@@ -2428,6 +2480,7 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
       item.el.innerHTML = iconHtml;
     }
     if (opts.focused != null) item.el.classList.toggle('focused', !!opts.focused);
+    if (opts.selected != null) item.el.classList.toggle('selected', !!opts.selected);
   }
   item.lat = lat;
   item.lon = lon;
@@ -2894,6 +2947,7 @@ function sync3DLive(aircraftList) {
     const key = `live:${a.address}`;
     seen.add(key);
     const focused = isLiveHudActive(a.address);
+    const selected = selectedTracks.has(a.address) || buddies.has(a.address);
     const iconSig = liveMarkerIconSig(a, focused);
     const existing = map3dDomMarkers.get(key);
     // markerIcon() serializes SVG + label + HUD. Only rebuild it when the
@@ -2904,6 +2958,7 @@ function sync3DLive(aircraftList) {
       : markerIcon(a).options.html;
     s3dUpsertDomMarker(key, a.lat, a.lon, a.altitude, iconHtml, a, {
       focused,
+      selected,
       iconSig,
       onClick: () => {
         if (!selectedTracks.has(a.address)) toggleSelection(a.address, false);
@@ -2922,6 +2977,11 @@ function sync3DLive(aircraftList) {
 function sync3DTracks() {
   if (map3dPaused || !map3dReady) return;
   s3dSyncThreeLines();
+  if (!tracksVisible) {
+    s3dSetData(S3D_TRACKS, S3D_EMPTY_FC);
+    s3dSetData(S3D_CURTAINS, S3D_EMPTY_FC);
+    return;
+  }
   const features = [];
   if (!s3dArrowLayer) {
     // Fallback for browsers without three.js.
@@ -3034,6 +3094,11 @@ function sync3DReplayFocus(pos) {
 function sync3DReplayTrack() {
   if (map3dPaused || !map3dReady) return;
   s3dSyncThreeLines();
+  if (!tracksVisible) {
+    s3dSetData(S3D_REPLAY_TRACK, S3D_EMPTY_FC);
+    s3dSetData(S3D_CURTAINS, S3D_EMPTY_FC);
+    return;
+  }
   const features = [];
   const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
   if (!s3dArrowLayer) {
@@ -3048,6 +3113,10 @@ function sync3DReplayTrack() {
 function sync3DReplayProgress(perSegment) {
   if (map3dPaused || !map3dReady) return;
   s3dSyncThreeProgress(perSegment);
+  if (!tracksVisible) {
+    s3dSetData(S3D_REPLAY_PROGRESS, S3D_EMPTY_FC);
+    return;
+  }
   const features = [];
   if (!s3dArrowLayer) {
     const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
@@ -4170,7 +4239,7 @@ function redrawAllTracks() {
   for (const [addr, entry] of selectedTracks.entries()) {
     if (entry.layer) map.removeLayer(entry.layer);
     entry.layer = buildTrackLayer(entry.points, entry.color);
-    if (entry.layer) entry.layer.addTo(map);
+    addTrackLayerIfVisible(entry);
   }
   updateReplayTrackLine();
   sync3DTracks();
@@ -4178,6 +4247,7 @@ function redrawAllTracks() {
 }
 
 function isTrackVisible() {
+  if (!tracksVisible) return false;
   if (replayActive && (replayTrackBaseGroup.getLayers().length || replayProgressGroup.getLayers().length)) return true;
   for (const entry of selectedTracks.values()) {
     if (entry.layer) return true;
@@ -4703,7 +4773,7 @@ async function loadTrack(address) {
 
     current.points = Array.isArray(data.points) ? data.points : [];
     current.layer = buildTrackLayer(current.points, current.color);
-    if (current.layer) current.layer.addTo(map);
+    addTrackLayerIfVisible(current);
     sync3DTracks();
     syncVarioLegend();
     refreshMarkerPopup(address);
@@ -5455,6 +5525,7 @@ map.on('click', e => {
 map.on('dragstart', () => { pauseFollowCentering(); });
 map.on('move zoom resize', () => { syncRecenterButton(); });
 $('recenterBtn').addEventListener('click', () => { centerOnFollowed(true); });
+$('unselectAllBtn')?.addEventListener('click', () => { clearAllTracks(); render(); });
 
 function sanitizeWeather(wx) {
   if (!wx || typeof wx !== 'object') return null;
@@ -6332,8 +6403,9 @@ function markerColorStyle(color) {
 // this in one place lets both renderers skip HTML rebuilds when nothing that
 // affects the marker image changed.
 function liveMarkerIconSig(a, focused = false) {
-  const trackColor = selectedTracks.get(a.address)?.color || '';
-  const base = `${getResolvedType(a)}_${a.course ?? ''}_${isEmergency(a) ? 1 : 0}_${trackColor}_${displayName(a)}`;
+  const trackColor = selectedTracks.get(a.address)?.color || buddies.get(a.address)?.color || '';
+  const selected = selectedTracks.has(a.address) || buddies.has(a.address) ? 1 : 0;
+  const base = `${getResolvedType(a)}_${a.course ?? ''}_${isEmergency(a) ? 1 : 0}_${trackColor}_${selected}_${displayName(a)}`;
   return focused ? `${base}_focus_${liveFocusHudText(a)}` : base;
 }
 
@@ -6342,7 +6414,8 @@ function markerIcon(a) {
   const angle = (a.course == null || type === 15) ? 0 : a.course;
   const emergClass = isEmergency(a) ? ' emergency' : '';
   const focused = isLiveHudActive(a.address);
-  const trackColor = selectedTracks.get(a.address)?.color || THEME.accent;
+  const selected = selectedTracks.has(a.address) || buddies.has(a.address);
+  const trackColor = selectedTracks.get(a.address)?.color || buddies.get(a.address)?.color || THEME.accent;
   const name = esc(displayName(a));
   let svgPath = ICONS.default;
   switch(type) {
@@ -6355,8 +6428,8 @@ function markerIcon(a) {
     case 15: svgPath = ICONS.tower; break;
   }
   return L.divIcon({
-    className: `glider-icon${focused ? ' focused' : ''}`, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
-    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}" style="${markerColorStyle(trackColor)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div>${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
+    className: `glider-icon${focused ? ' focused' : ''}${selected ? ' selected' : ''}`, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
+    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}${selected ? ' selected' : ''}" style="${markerColorStyle(trackColor)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div>${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
   });
 }
 
@@ -7157,7 +7230,7 @@ function syncLiveMarkers(visible, keep, now) {
           }
           if (trackEntry.layer) map.removeLayer(trackEntry.layer);
           trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
-          if (trackEntry.layer) trackEntry.layer.addTo(map);
+          addTrackLayerIfVisible(trackEntry);
           tracksChanged = true;
         }
       }
@@ -9047,7 +9120,7 @@ function setReplayMode(on, opts = {}) {
     syncReplayRangeButton();
     map.removeLayer(clusterGroup); map.removeLayer(emergencyGroup);
     replayTrackGroup.addLayer(replayTrackBaseGroup).addLayer(replayProgressGroup);
-    replayTrackGroup.addTo(map);
+    if (tracksVisible) replayTrackGroup.addTo(map);
     replayGroup.addTo(map);
     replayFocusGroup.addTo(map);
     replayTsMs = replayTsFromSlider();
@@ -9502,9 +9575,8 @@ function revealMapForListAction() {
 /** Following from the list opens the map; unfollowing stays in the list. */
 function toggleFollowFromList(address) {
   const wasFollowing = followedAddress === address;
-  // The list's Unfollow button is also its unselect action: drop the track it
-  // added when follow started. Other manually selected tracks stay untouched.
-  if (wasFollowing && selectedTracks.has(address)) removeTrack(address);
+  // Unfollowing only stops camera tracking. Selection is independent and is
+  // cleared only by an explicit unselect action.
   toggleFollow(address);
   if (!wasFollowing) revealMapForListAction();
 }

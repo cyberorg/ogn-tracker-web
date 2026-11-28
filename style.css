@@ -113,8 +113,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .section-head-toggle{padding:0}
 .section-toggle-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px 7px;background:var(--control-bg);border:0;color:var(--text);cursor:pointer;font:inherit;text-align:left;caret-color:transparent;user-select:none}
 .section-toggle-btn:hover{background:#1b2835}
-.section-title{font-size:13px;font-weight:700;color:var(--text)}
-.alert-title{color:var(--red)}
 .section-meta{display:inline-flex;align-items:center;gap:8px}
 .section-caret{color:var(--muted);font-size:11px;transition:transform .15s ease;line-height:1}
 .section-head.collapsed .section-caret{transform:rotate(-90deg)}
@@ -208,10 +206,12 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .replay-hud{left:50%;top:calc(100% + 24px);transform:translateX(-50%);z-index:2}
 /* Selected/followed aircraft: halo in the marker/track colour + always-on name and metric HUD. */
 .glider-wrap.focused{border-color:var(--marker-color);background:#2a1530e8;box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow),0 2px 8px #0008}
+.glider-wrap.selected{border-color:var(--marker-color);box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow),0 2px 8px #0008}
 .glider-wrap.focused svg{fill:var(--marker-color)}
 .leaflet-marker-icon.glider-icon.focused,.leaflet-marker-icon.replay-icon.focused{z-index:9999!important}
 .glider-icon.focused .glider-label,.ogn-3d-dom-marker.focused .glider-label{opacity:1;visibility:visible}
 .ogn-3d-dom-marker.focused .glider-wrap{border:1px solid var(--marker-color)!important;box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow)!important}
+.ogn-3d-dom-marker.selected .glider-wrap{border:1px solid var(--marker-color)!important;box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow)!important}
 .focus-hud .hud-line{font-variant-numeric:tabular-nums}
 .glider-wrap.emergency{background:#3d1118ee;border:2px solid var(--red);animation:emergency-pulse 1.4s ease-out infinite}
 .glider-wrap.emergency svg{fill:#ff6b6b;stroke:#ffe0e0}
@@ -275,6 +275,7 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .leaflet-control-clear-tracks-btn{width:30px;height:30px;padding:0;display:grid;place-items:center;background:var(--control-bg);border:0;border-right:1px solid var(--line);border-radius:7px 0 0 7px;color:var(--red);cursor:pointer}
 .leaflet-control-clear-tracks-btn[hidden]{display:none}
 .leaflet-control-clear-tracks-btn:hover{background:var(--hover);color:#fff}
+.leaflet-control-clear-tracks-btn.off{color:var(--accent)}
 .leaflet-control-fullscreen:has(.leaflet-control-clear-tracks-btn:not([hidden])) .leaflet-control-fullscreen-btn{border-radius:0 7px 7px 0}
 .leaflet-control-zoom{border:1px solid var(--line)!important;border-radius:8px!important;background:var(--control-bg);overflow:hidden}
 .leaflet-control-zoom:hover{border-color:var(--accent)!important}
@@ -322,6 +323,9 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .recenter-btn{position:absolute;top:52px;left:50%;transform:translateX(-50%);z-index:900;padding:6px 12px;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--yellow);font-size:12px;font-weight:700;box-shadow:0 1px 5px #0009}
 .recenter-btn:hover{background:var(--hover);border-color:var(--line);color:var(--accent)}
 .recenter-btn[hidden]{display:none}
+.unselect-all-btn{position:absolute;right:var(--edge-gutter);bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px) + 34px);z-index:900;padding:6px 10px;border-radius:999px;background:var(--control-bg);border:1px solid var(--line);color:var(--red);font-size:11px;font-weight:700;box-shadow:0 1px 5px #0009}
+.unselect-all-btn:hover{background:var(--hover);border-color:var(--red);color:#fff}
+.unselect-all-btn[hidden]{display:none}
 .scroll-to-list-btn{display:none;position:absolute;bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px));left:50%;transform:translateX(-50%);z-index:900;width:44px;height:32px;padding:0;place-items:center;border-radius:7px;background:var(--control-bg);border:1px solid var(--line);color:var(--accent);font-size:22px;line-height:1;box-shadow:0 1px 5px #0009}
 .scroll-to-list-btn:hover{background:var(--hover);border-color:var(--line)}
 /* Mirror of the down arrow that opens the list: same 44x32 pill, centred above it. */

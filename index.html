@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="style.css?v=20261128zzux32">
+<link rel="stylesheet" href="style.css?v=20261128zzux33">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -146,6 +146,7 @@
       <span id="varioLegendHigh" class="vario-legend-label"></span>
     </div>
     <button id="recenterBtn" class="recenter-btn" type="button" aria-label="Center map on followed aircraft" title="Center map on followed aircraft" hidden>◎ Recenter</button>
+    <button id="unselectAllBtn" class="unselect-all-btn" type="button" aria-label="Unselect all aircraft" title="Unselect all aircraft" hidden>Unselect all</button>
     <button id="scrollToListBtn" class="scroll-to-list-btn" type="button" aria-label="Scroll to aircraft list" title="Scroll to aircraft list">↓</button>
     <div id="emergencyBanner" class="emerg-banner" role="status" aria-live="assertive" aria-atomic="true">
       <span id="emergencyBannerText">Emergency Alert</span>
@@ -189,14 +190,14 @@
       </div>
       <div class="section-head section-head-toggle" id="alertsSectionHead" hidden>
         <button type="button" class="section-toggle-btn" id="alertsToggle" aria-expanded="true" aria-controls="alerts24hSummary">
-          <span class="section-title alert-title">Emergency/Alerts</span>
+          <span>Emergency/Alerts</span>
           <span class="section-meta"><span class="muted" id="alertsCount">0</span><span class="section-caret" aria-hidden="true">▾</span></span>
         </button>
       </div>
       <div id="alerts24hSummary" class="alerts-panel" aria-label="Emergency alerts in the last 24 hours" hidden></div>
       <div class="section-head section-head-toggle" id="buddiesSectionHead" hidden>
         <button type="button" class="section-toggle-btn" id="buddiesToggle" aria-expanded="true" aria-controls="buddiesSummary">
-          <span class="section-title">Buddies</span>
+          <span>Buddies</span>
           <span class="section-meta"><span class="muted" id="buddiesCount">0</span><span class="section-caret" aria-hidden="true">▾</span></span>
         </button>
       </div>
@@ -243,7 +244,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="tz-lookup.js?v=20261128zzux32"></script>
-<script src="app.js?v=20261128zzux32"></script>
+<script src="tz-lookup.js?v=20261128zzux33"></script>
+<script src="app.js?v=20261128zzux33"></script>
 </body>
 </html>
