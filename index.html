@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="style.css?v=20261128zzux8">
+<link rel="stylesheet" href="style.css?v=20261128zzux9">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -208,7 +208,10 @@
       </div>
       <div id="alerts24hSummary" class="alerts-panel" aria-label="Emergency alerts in the last 24 hours" hidden></div>
       <div class="section-head">
-        <h2>Aircrafts/Stations</h2>
+        <div class="section-title-wrap">
+          <h2>Aircrafts/Stations</h2>
+          <button type="button" id="listFilterPill" class="list-filter-pill" aria-controls="listHint" aria-expanded="false" title="Show filter details" hidden>Filtered</button>
+        </div>
         <div class="list-head-actions">
           <label class="sr-only" for="listSort">Sort aircraft list</label>
           <select id="listSort" aria-label="Sort aircraft list" title="Sort aircraft list">
@@ -220,7 +223,7 @@
           <span class="muted" id="listCount">0</span>
         </div>
       </div>
-      <div id="listHint" class="list-hint" aria-live="polite"></div>
+      <div id="listHint" class="list-hint" aria-live="polite" hidden></div>
     </div>
     <div class="list-back-to-map-row"><button type="button" id="listBackToMap" class="list-back-to-map" aria-label="Return to map" title="Return to map">↑</button></div>
     <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
@@ -235,7 +238,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="tz-lookup.js?v=20261128zzux8"></script>
-<script src="app.js?v=20261128zzux8"></script>
+<script src="tz-lookup.js?v=20261128zzux9"></script>
+<script src="app.js?v=20261128zzux9"></script>
 </body>
 </html>

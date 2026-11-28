@@ -115,6 +115,7 @@ let lastStatusText = 'Connecting…';
 let hashLookupMessageUntilMs = 0;
 let hashMessagePopup = null;
 let bookmarks = [];
+let listHintExpanded = false;
 let measureMode = false;
 let measurePoints = [];
 let selectedMeasureIndex = -1;
@@ -273,7 +274,7 @@ function resetFilters() {
   redrawAllTracks();
   saveMenuPrefs();
   syncUnitButtons();
-  $('listHint').textContent = '';
+  clearListHint();
   needMeta = true;
   render();
   fetchLive(true);
@@ -6545,6 +6546,25 @@ function isUserInteractingWithList() {
   return !!(ae && $('aircraftList').contains(ae));
 }
 
+function syncListFilterPill() {
+  const pill = $('listFilterPill');
+  const hint = $('listHint');
+  if (!pill || !hint) return;
+  const hasText = !!hint.textContent.trim();
+  pill.hidden = !hasText;
+  const expanded = hasText && listHintExpanded;
+  pill.setAttribute('aria-expanded', String(expanded));
+  pill.title = expanded ? 'Hide filter details' : 'Show filter details';
+  hint.hidden = !expanded;
+}
+
+function clearListHint() {
+  const hint = $('listHint');
+  if (hint) hint.textContent = '';
+  listHintExpanded = false;
+  syncListFilterPill();
+}
+
 function updateListHint(visible = null, bounds = null, candidates = null) {
   const hint = $('listHint');
   const q = $('search').value.trim();
@@ -6576,6 +6596,7 @@ function updateListHint(visible = null, bounds = null, candidates = null) {
     parts.push('Followed aircraft is currently outside current filter/view.');
   }
   hint.textContent = parts.join(' ');
+  syncListFilterPill();
 }
 
 function render() {
@@ -8625,9 +8646,14 @@ $('btnClearSearch').addEventListener('click', () => {
   clearHashSelectionBypass();
   updateSearchUi();
   clearSearch24h();
-  $('listHint').textContent = '';
+  clearListHint();
   render();
   $('search').focus();
+});
+$('listFilterPill').addEventListener('click', e => {
+  e.stopPropagation();
+  listHintExpanded = !listHintExpanded;
+  syncListFilterPill();
 });
 $('listSort').addEventListener('change', () => {
   listSort = $('listSort').value;
