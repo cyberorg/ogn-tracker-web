@@ -782,12 +782,27 @@ const S3D_LABEL_DEFER_MS = 120;
 let s3dTerrainRefreshRaf = null;
 let s3dMarkerGeoJsonSig = '';
 let s3dArrowLayer = null;
+let s3dTerrainVersion = 0;
 const S3D_TERRAIN_NULL_TTL_MS = 15000;
+const S3D_GROUND_CACHE_MAX = 2000;
 let s3dTerrainDegraded = false;
 let s3dTerrainErrorNotifiedAtMs = 0;
 let s3dTerrainRetryTimer = null;
 // key -> { value, at }. A null value is a retryable miss, not a permanent result.
 const s3dTerrainElevationCache = new Map();
+// key -> { value, at } for the five-sample ground footprint under a marker.
+// Keyed by terrain version and zoom bucket so DEM arrivals and zoom changes
+// invalidate it without clearing unrelated sample results.
+const s3dGroundElevationCache = new Map();
+
+function s3dInvalidateTerrainCaches() {
+  s3dTerrainVersion++;
+  s3dTerrainElevationCache.clear();
+  s3dGroundElevationCache.clear();
+  s3dMarkerGeoJsonSig = '';
+  s3dReplayCenterSig = '';
+}
+
 const map3dDomMarkers = new Map();       // key -> { el, lat, lon, alt, html, isFocus, isReplay }
 const map3dDomPopupState = new Map();    // key -> { popup, detailsOpen }
 
@@ -855,18 +870,32 @@ function s3dWrapLon(lon) {
   return ((lon + 180) % 360 + 360) % 360 - 180;
 }
 
+// Half-zoom buckets keep the sampled footprint stable enough to cache while
+// still matching the visible marker size as the camera zooms.
+function s3dTerrainZoomBucket() {
+  const zoom = Number.isFinite(map3d?.getZoom?.()) ? map3d.getZoom() : 14;
+  return Math.round(zoom * 2) / 2;
+}
+
 // The aircraft model is a fixed screen-space size, so its ground footprint grows as
 // the map zooms out. Cap the sample radius to keep low-zoom markers reasonable.
 function s3dTerrainSampleRadiusM(lat) {
-  const zoom = Number.isFinite(map3d?.getZoom?.()) ? map3d.getZoom() : 14;
   const metersPerPixel = 40075016.686 * Math.cos(lat * Math.PI / 180) /
-    (512 * Math.pow(2, zoom));
+    (512 * Math.pow(2, s3dTerrainZoomBucket()));
   return Math.min(S3D_TERRAIN_SAMPLE_MAX_M,
     Math.max(S3D_TERRAIN_SAMPLE_MIN_M, metersPerPixel * S3D_ARROW_PX * 0.5));
 }
 
 // Highest DEM sample under the marker footprint, including nearby slope.
+// The five samples are expensive, so cache the result per coordinate, zoom
+// bucket and terrain version; null stays retryable for the null TTL window.
 function s3dTerrainMaxM(lng, lat) {
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}|${s3dTerrainZoomBucket()}|${s3dTerrainVersion}`;
+  const now = Date.now();
+  const cached = s3dGroundElevationCache.get(key);
+  if (cached && (cached.value != null || now - cached.at < S3D_TERRAIN_NULL_TTL_MS)) {
+    return cached.value;
+  }
   const radius = s3dTerrainSampleRadiusM(lat);
   const dLat = radius / 111320;
   const dLon = radius / (111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
@@ -884,6 +913,15 @@ function s3dTerrainMaxM(lng, lat) {
     if (value == null || !Number.isFinite(value)) continue;
     max = max == null ? value : Math.max(max, value);
   }
+  if (s3dGroundElevationCache.size > S3D_GROUND_CACHE_MAX) {
+    for (const [k, entry] of s3dGroundElevationCache) {
+      if (entry.value == null && now - entry.at >= S3D_TERRAIN_NULL_TTL_MS) {
+        s3dGroundElevationCache.delete(k);
+      }
+    }
+    if (s3dGroundElevationCache.size > S3D_GROUND_CACHE_MAX) s3dGroundElevationCache.clear();
+  }
+  s3dGroundElevationCache.set(key, { value: max, at: now });
   return max;
 }
 
@@ -901,8 +939,7 @@ function s3dScheduleTerrainRefresh() {
   if (s3dTerrainRefreshRaf !== null) return;
   s3dTerrainRefreshRaf = requestAnimationFrame(() => {
     s3dTerrainRefreshRaf = null;
-    s3dTerrainElevationCache.clear();
-    s3dReplayCenterSig = '';
+    s3dInvalidateTerrainCaches();
     s3dScheduleLabelUpdate();
     if (map3dActive && !map3dPaused) {
       sync3DTracks();
@@ -1529,16 +1566,44 @@ function s3dApplyVarioVertexColors(geom, curve, steps, colors, fallbackColor, TH
   return true;
 }
 
+// Tube geometry depends on the simplified points, styling, zoom bucket and the
+// DEM generation. Including the version prevents a stale tube from surviving a
+// terrain refresh (A3.2); the index keeps duplicate segments in separate slots.
+function s3dThreeSegmentSignature(seg, index, zoomBucket) {
+  const points = s3dSimplifyPoints(seg?.points, 160);
+  const color = s3dResolveColor(seg?.color, THEME.accent);
+  const width = seg?.widthPx ?? S3D_TRACK_PX;
+  const opacity = seg?.opacity ?? 0.95;
+  let hash = 2166136261;
+  const feed = text => {
+    for (let i = 0; i < text.length; i++) {
+      hash = Math.imul(hash ^ text.charCodeAt(i), 16777619) >>> 0;
+    }
+  };
+  feed(`${index}|${points.length}|${color}|${width}|${opacity}|${zoomBucket}|${s3dTerrainVersion}|${varioTrackMode ? 1 : 0}|`);
+  for (const p of points) feed(`${p[0]},${p[1]},${p[2] ?? ''},${p[3] ?? ''};`);
+  return hash.toString(36);
+}
+
 function s3dReplaceThreeLines(group, segments) {
   const THREE = s3dThree();
   if (!group || !THREE || map3dPaused) return;
   const lineOrder = s3dArrowLayer?.lines?.tracks === group ? -3
     : s3dArrowLayer?.lines?.replay === group ? -2 : -1;
-  for (const child of [...group.children]) {
-    group.remove(child);
-    s3dDisposeObject(child);
+  const zoomBucket = s3dTerrainZoomBucket();
+  const cache = group.userData.tubeCache || (group.userData.tubeCache = new Map());
+  const desired = (segments || []).map((seg, index) => ({
+    seg, sig: s3dThreeSegmentSignature(seg, index, zoomBucket)
+  }));
+  const wanted = new Set(desired.map(d => d.sig));
+  for (const [sig, tube] of cache) {
+    if (wanted.has(sig)) continue;
+    group.remove(tube);
+    s3dDisposeObject(tube);
+    cache.delete(sig);
   }
-  for (const seg of segments || []) {
+  for (const { seg, sig } of desired) {
+    if (cache.has(sig)) continue;
     const curve = s3dCurveFromPoints(seg.points);
     if (!curve) continue;
     const radius = s3dLineRadius(seg.points, seg.widthPx ?? S3D_TRACK_PX);
@@ -1575,8 +1640,10 @@ function s3dReplaceThreeLines(group, segments) {
       baseZoom: map3d?.getZoom() ?? 14,
       ringStride: (geom.parameters.radialSegments + 1) * 3
     };
+    tube.userData.tubeSig = sig;
     tube.frustumCulled = false;
     group.add(tube);
+    cache.set(sig, tube);
   }
   const zoomNow = map3d?.getZoom?.();
   if (s3dArrowLayer && Number.isFinite(zoomNow)) s3dArrowLayer.lastLineZoom = zoomNow;
@@ -2330,7 +2397,7 @@ function setup3DLayers() {
   // The initial load handler and a base-style swap can both finish after the
   // first 3D activation; add the custom sources only once per style.
   try { map3d.setSky?.(S3D_SKY); } catch (err) {}
-  s3dTerrainElevationCache.clear();
+  s3dInvalidateTerrainCaches();
   if (s3dTerrainRetryTimer !== null) {
     clearTimeout(s3dTerrainRetryTimer);
     s3dTerrainRetryTimer = null;
