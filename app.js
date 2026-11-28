@@ -5019,25 +5019,28 @@ function focusAircraftOnMap(address, fallbackAircraft = null) {
 
 function toggleSelection(address, openOnMap = false) {
   const target = findAircraftByAddress(address);
-  // A second list click on the same aircraft clears focus instead of re-focusing.
+  const hadTrack = selectedTracks.has(address);
   const wasFocused = openOnMap && !replayActive && activeMapFocusAddress() === address;
+  // Track and list focus are one toggle: an active row turns both off, an
+  // inactive row selects its track and focuses it. This avoids cycling between
+  // focus-without-track and unfocused-with-track on repeated list taps.
+  const isActive = hadTrack || wasFocused;
   // A searched aircraft gets one render free of the type preference filters.
   if (target?.search24h) oneTimeSearchBypass.add(address);
-  if (selectedTracks.has(address)) {
-    removeTrack(address);
-    if (openOnMap && !wasFocused) focusAircraftOnMap(address, target);
+  if (isActive) {
+    if (hadTrack) removeTrack(address);
+    if (wasFocused) clearMapFocus(address);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
     activeTrackAddress = address;
     updateUrlHash();
     syncClearTracksButton();
     loadTrack(address);
-    if (openOnMap && !wasFocused) {
+    if (openOnMap) {
       if (window.innerWidth <= 800) revealMapForListAction();
       focusAircraftOnMap(address, target);
     }
   }
-  if (wasFocused) clearMapFocus(address);
   updateListHint();
   render();
   requestAnimationFrame(() => focusListRow(address));
