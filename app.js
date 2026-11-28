@@ -1198,6 +1198,20 @@ const S3D_TRACK_PX = 2;                      // slim continuous track line (2 px
 const S3D_PROGRESS_PX = S3D_TRACK_PX * 1.25; // replay progress is only slightly heavier
 const S3D_MARKER_CULL_MARGIN_PX = 80;        // hide DOM/WebGL markers once fully outside the map
 const S3D_TRACK_SPLINE_MAX_DEVIATION_M = 20; // reject smooth curves that knot back through themselves
+const S3D_TRACK_CORNER_TRIM_PX = 10;         // visible corner rounding at any zoom
+const S3D_TRACK_CORNER_TRIM_MIN_M = 5;
+const S3D_TRACK_CORNER_TRIM_MAX_M = 400;
+
+function trackMetersPerPixel(lat, zoom) {
+  return 40075016.686 * Math.cos((Number.isFinite(lat) ? lat : 0) * Math.PI / 180) /
+    (512 * Math.pow(2, Number.isFinite(zoom) ? zoom : 12));
+}
+
+function trackCornerTrimMeters(lat, zoom, trimPx = S3D_TRACK_CORNER_TRIM_PX) {
+  const meters = trackMetersPerPixel(lat, zoom) * trimPx;
+  return Math.max(S3D_TRACK_CORNER_TRIM_MIN_M,
+    Math.min(S3D_TRACK_CORNER_TRIM_MAX_M, meters));
+}
 
 function s3dThree() {
   return window.THREE || null;
@@ -1516,7 +1530,7 @@ function s3dPointSegmentDistance(p, a, b) {
 // A smooth curve is only safe while it stays near the fixes it came from.
 // Stationary/repeated points and tight reversals can make even a centripetal
 // spline loop back through itself, which looks like a knot in 3D.
-function s3dCurveDeviationM(curve, vecs, metersPerUnit) {
+function s3dCurveDeviationM(curve, vecs, metersPerUnit, limitM = S3D_TRACK_SPLINE_MAX_DEVIATION_M) {
   const THREE = s3dThree();
   if (!THREE || vecs.length < 3 || !curve?.getPoint) return 0;
   const samples = Math.min(1200, Math.max(32, vecs.length * 8));
@@ -1532,9 +1546,7 @@ function s3dCurveDeviationM(curve, vecs, metersPerUnit) {
     }
     if (!Number.isFinite(nearest)) continue;
     worst = Math.max(worst, nearest);
-    if (worst * metersPerUnit > S3D_TRACK_SPLINE_MAX_DEVIATION_M) {
-      return worst * metersPerUnit;
-    }
+    if (worst * metersPerUnit > limitM) return worst * metersPerUnit;
   }
   return worst * metersPerUnit;
 }
@@ -1559,9 +1571,10 @@ function s3dPolylineCurve(vecs) {
 
 // Bounded corner fillet used when a full spline would overshoot the fixes.
 // Straight legs are untouched; each usable corner is replaced by a short
-// quadratic Bézier clipped to 20 m and at most a quarter of either leg, so the
-// rounded path stays inside the original polyline and cannot knot back on itself.
-function s3dRoundedCornerCurve(vecs, metersPerUnit) {
+// quadratic Bézier clipped to trimMeters and at most a quarter of either leg,
+// so the rounded path stays near the original polyline and cannot knot back on
+// itself. The default keeps older callers at the conservative 20 m cap.
+function s3dRoundedCornerCurve(vecs, metersPerUnit, trimMeters = S3D_TRACK_SPLINE_MAX_DEVIATION_M) {
   const THREE = s3dThree();
   if (!THREE || !vecs || vecs.length < 2) return null;
   const points = [vecs[0].clone()];
@@ -1577,7 +1590,7 @@ function s3dRoundedCornerCurve(vecs, metersPerUnit) {
     outDir.divideScalar(outLen);
     const theta = Math.acos(Math.max(-1, Math.min(1, inDir.dot(outDir))));
     if (theta < 0.12 || theta > 2.4) { points.push(cur.clone()); continue; }
-    const trim = Math.min(S3D_TRACK_SPLINE_MAX_DEVIATION_M / metersPerUnit, inLen * 0.25, outLen * 0.25);
+    const trim = Math.min(trimMeters / metersPerUnit, inLen * 0.25, outLen * 0.25);
     if (!(trim > 0)) { points.push(cur.clone()); continue; }
     const p0 = cur.clone().addScaledVector(inDir, -trim);
     const p2 = cur.clone().addScaledVector(outDir, trim);
@@ -1593,7 +1606,7 @@ function s3dRoundedCornerCurve(vecs, metersPerUnit) {
   }
   points.push(vecs[vecs.length - 1].clone());
   const curve = s3dPolylineCurve(points);
-  curve.userData = { rounded: true, roundedCorners };
+  curve.userData = { rounded: true, roundedCorners, trimMeters };
   return curve;
 }
 
@@ -1613,12 +1626,15 @@ function s3dCurveFromPoints(points) {
   if (!Number.isFinite(unitsPerMeter) || unitsPerMeter <= 0) return smooth;
   const deviationM = s3dCurveDeviationM(smooth, vecs, 1 / unitsPerMeter);
   if (deviationM <= S3D_TRACK_SPLINE_MAX_DEVIATION_M) return smooth;
-  const rounded = s3dRoundedCornerCurve(vecs, 1 / unitsPerMeter);
+  const trimMeters = trackCornerTrimMeters(valid[0][0], map3d?.getZoom?.());
+  const rounded = s3dRoundedCornerCurve(vecs, 1 / unitsPerMeter, trimMeters);
   if (rounded) {
-    const roundedDeviationM = s3dCurveDeviationM(rounded, vecs, 1 / unitsPerMeter);
-    if (roundedDeviationM <= S3D_TRACK_SPLINE_MAX_DEVIATION_M) {
+    const roundedBudgetM = Math.max(S3D_TRACK_SPLINE_MAX_DEVIATION_M, trimMeters);
+    const roundedDeviationM = s3dCurveDeviationM(rounded, vecs, 1 / unitsPerMeter, roundedBudgetM);
+    if (roundedDeviationM <= roundedBudgetM) {
       rounded.userData.roundedFromDeviationM = deviationM;
       rounded.userData.roundedDeviationM = roundedDeviationM;
+      rounded.userData.roundedBudgetM = roundedBudgetM;
       return rounded;
     }
   }
@@ -4280,6 +4296,67 @@ function varioSegmentColor(p0, p1) {
   return varioColor(climb);
 }
 
+// Round 2D Leaflet track corners with the same bounded fillet recipe used for
+// 3D. The trim is chosen in screen pixels, then converted to metres at the
+// current zoom, so the curve is visible without cutting across long legs.
+function roundedTrackPoints(points, trimPx = S3D_TRACK_CORNER_TRIM_PX) {
+  if (!Array.isArray(points) || points.length < 3) return points || [];
+  const lat = Number.isFinite(points[0][0]) ? points[0][0] : 0;
+  const zoom = typeof map !== 'undefined' && map && typeof map.getZoom === 'function' ? map.getZoom() : 12;
+  const trimM = trackCornerTrimMeters(lat, zoom, trimPx);
+  const mPerLat = 111320;
+  const mPerLon = 111320 * Math.cos(lat * Math.PI / 180);
+  if (!(mPerLon > 0)) return points;
+  const xy = p => [
+    (Number.isFinite(p[1]) ? p[1] : 0) * mPerLon,
+    (Number.isFinite(p[0]) ? p[0] : 0) * mPerLat
+  ];
+  const mix = (a, b, f) => [
+    a[0] + (b[0] - a[0]) * f,
+    a[1] + (b[1] - a[1]) * f,
+    Number.isFinite(a[2]) && Number.isFinite(b[2]) ? a[2] + (b[2] - a[2]) * f :
+      (Number.isFinite(b[2]) ? b[2] : (Number.isFinite(a[2]) ? a[2] : null)),
+    Number.isFinite(a[3]) && Number.isFinite(b[3]) ? a[3] + (b[3] - a[3]) * f :
+      (Number.isFinite(b[3]) ? b[3] : (Number.isFinite(a[3]) ? a[3] : null))
+  ];
+  const out = [points[0].slice()];
+  let roundedCorners = 0;
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = xy(points[i - 1]), cur = xy(points[i]), next = xy(points[i + 1]);
+    const inV = [cur[0] - prev[0], cur[1] - prev[1]];
+    const outV = [next[0] - cur[0], next[1] - cur[1]];
+    const inLen = Math.hypot(inV[0], inV[1]);
+    const outLen = Math.hypot(outV[0], outV[1]);
+    if (!(inLen > 0) || !(outLen > 0)) { out.push(points[i].slice()); continue; }
+    const inDir = [inV[0] / inLen, inV[1] / inLen];
+    const outDir = [outV[0] / outLen, outV[1] / outLen];
+    const theta = Math.acos(Math.max(-1, Math.min(1,
+      inDir[0] * outDir[0] + inDir[1] * outDir[1])));
+    if (theta < 0.12 || theta > 2.4) { out.push(points[i].slice()); continue; }
+    const trim = Math.min(trimM, inLen * 0.25, outLen * 0.25);
+    if (!(trim > 0)) { out.push(points[i].slice()); continue; }
+    const p0 = mix(points[i - 1], points[i], 1 - trim / inLen);
+    const p2 = mix(points[i], points[i + 1], trim / outLen);
+    const p0xy = [cur[0] - inDir[0] * trim, cur[1] - inDir[1] * trim];
+    const steps = Math.max(2, Math.min(4, Math.ceil(theta / (Math.PI / 12))));
+    for (let s = 0; s <= steps; s++) {
+      if (s === 0) { out.push(p0.slice()); continue; }
+      const t = s / steps, u = 1 - t;
+      const p = mix(p0, p2, t);
+      p[0] = (u * u * p0xy[0] + 2 * u * t * cur[0] +
+        t * t * (cur[0] + outDir[0] * trim)) / mPerLat;
+      p[1] = (u * u * p0xy[1] + 2 * u * t * cur[1] +
+        t * t * (cur[1] + outDir[1] * trim)) / mPerLon;
+      out.push(p);
+    }
+    roundedCorners++;
+  }
+  if (!roundedCorners) return points;
+  out.push(points[points.length - 1].slice());
+  out.roundedCorners = roundedCorners;
+  return out;
+}
+
 // Consecutive segments with the same Vario color become a single polyline.
 // Runs share their boundary point, so the drawn path is unchanged while the
 // number of Leaflet SVG paths drops substantially on long tracks.
@@ -4305,11 +4382,12 @@ function varioPolylineRuns(points, style) {
 
 function buildTrackLayer(points, flatColor) {
   if (!points || points.length < 2) return null;
+  const smooth = roundedTrackPoints(points);
   const pane = trackPaneName();
-  const segments = splitTrackSegments(points);
+  const segments = splitTrackSegments(smooth);
   if (!varioTrackMode) {
     if (segments.length <= 1) {
-      return L.polyline(points.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 });
+      return L.polyline(smooth.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 });
     }
     const grp = L.layerGroup();
     for (const segment of segments) {
@@ -4318,7 +4396,7 @@ function buildTrackLayer(points, flatColor) {
     return grp;
   }
   const grp = L.layerGroup();
-  for (const layer of varioPolylineRuns(points, { pane, weight: 3.5, opacity: 0.92 })) layer.addTo(grp);
+  for (const layer of varioPolylineRuns(smooth, { pane, weight: 3.5, opacity: 0.92 })) layer.addTo(grp);
   return grp;
 }
 
@@ -8981,12 +9059,13 @@ function startReplayPlayback() {
 
 function replayTrackLayers(points, weight, opacity, dashed = false) {
   if (points.length < 2) return [];
+  const smooth = roundedTrackPoints(points);
   const pane = trackPaneName();
   if (!varioTrackMode) {
     const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
-    return [L.polyline(points.map(p => [p[0], p[1]]), { pane, color, weight, opacity, dashArray: dashed ? '3 6' : null })];
+    return [L.polyline(smooth.map(p => [p[0], p[1]]), { pane, color, weight, opacity, dashArray: dashed ? '3 6' : null })];
   }
-  return varioPolylineRuns(points, {
+  return varioPolylineRuns(smooth, {
     pane, weight, opacity, dashArray: dashed ? '3 6' : null
   });
 }
@@ -9008,8 +9087,10 @@ function replayTrackLineSignature() {
   const pts = replayTrackPoints;
   const first = pts.length ? pts[0][3] : '';
   const last = pts.length ? pts[pts.length - 1][3] : '';
+  const zoom = typeof map !== 'undefined' && map && typeof map.getZoom === 'function' ?
+    Math.round(map.getZoom() * 2) / 2 : 12;
   return `${varioTrackMode ? 1 : 0}|${color}|${pts.length}|${replayTrackSegments.length}|` +
-    `${replayRenderSegments.length}|${first}|${last}`;
+    `${replayRenderSegments.length}|${zoom}|${first}|${last}`;
 }
 
 function clearReplayTrackLayers() {
