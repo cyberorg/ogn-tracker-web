@@ -50,7 +50,7 @@ if (!$doGenerate) {
     http_response_code(503);
     ?><!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzux7"></head><body>
+<link rel="stylesheet" href="style.css?v=20261128zzux8"></head><body>
 <div class="app"><header><div class="brand"><div class="logo">✈</div><div>
 <h1>OGN Tracker — Insights</h1><div class="sub">Waiting for the scheduled refresh</div>
 </div></div></header><main><div class="ins-page">
@@ -695,7 +695,7 @@ $genDuration = microtime(true) - $generationStarted;
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Cache-Control" content="no-store">
 <title>OGN Tracker — Insights</title>
-<link rel="stylesheet" href="style.css?v=20261128zzux7">
+<link rel="stylesheet" href="style.css?v=20261128zzux8">
 <style>
   header{cursor:default}
   main{display:block!important}
@@ -751,7 +751,7 @@ $genDuration = microtime(true) - $generationStarted;
   .ins-note{font-size:11px;color:var(--muted);margin:10px 0 0;line-height:1.5}
   .ins-note--spaced{margin-top:16px}
   .ins-scroll-hint{display:inline-block;font-size:11px;color:var(--accent);background:var(--card-head);border:1px solid var(--line);border-radius:999px;padding:3px 9px;margin-top:8px}
-  .ins-scroll-chart{overflow-x:auto;overflow-y:hidden;margin-top:6px;padding-bottom:3px;scrollbar-color:var(--line) var(--panel);scrollbar-width:thin}
+  .ins-scroll-chart{overflow-x:auto;overflow-y:hidden;margin-top:6px;padding-bottom:3px;scrollbar-color:var(--line) var(--panel);scrollbar-width:thin;touch-action:pan-x pan-y;overscroll-behavior-x:contain}
   .ins-scroll-chart::-webkit-scrollbar{height:8px}
   .ins-scroll-chart::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px}
   .ins-chart-cols{display:flex;gap:3px;width:max-content;align-items:flex-end}

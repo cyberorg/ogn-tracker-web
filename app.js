@@ -948,6 +948,7 @@ function s3dScheduleTerrainRefresh() {
     if (map3dActive && !map3dPaused) {
       sync3DTracks();
       positionMeasure3D();
+      updateMeasureReadout();
     }
   });
 }
@@ -4831,7 +4832,7 @@ function toggleSelection(address, openOnMap = false) {
 }
 
 const MEASURE_CLEAR_HTML =
-  `<button type="button" class="measure-clear icon-close" data-measure-clear title="Clear measurement" aria-label="Clear measurement">×</button>`;
+  `<button type="button" class="measure-clear icon-close" data-measure-clear title="Clear measurement and exit" aria-label="Clear measurement and exit">×</button>`;
 
 function measureIcon() {
   return L.divIcon({
@@ -5018,8 +5019,7 @@ function clearMeasure() {
   measureMarkers = [];
   measureLayer.clearLayers();
   syncMeasure3DDots();
-  const readout = $('measureReadout');
-  if (readout) readout.hidden = true;
+  updateMeasureReadout();
 }
 
 function syncMeasureSelection() {
@@ -5041,12 +5041,34 @@ function selectMeasurePoint(index) {
   updateMeasureReadout();
 }
 
+// DEM elevations are only meaningful in 3D. A missing/null sample must never
+// produce a displayed delta, so both endpoints are required.
+function measureElevationAt(point) {
+  if (!map3dActive || !Array.isArray(point)) return null;
+  const value = s3dQueryTerrainElevation(point[1], point[0]);
+  return Number.isFinite(value) ? Math.round(value) : null;
+}
+
+function measureAltitudeDelta(p1, p2) {
+  const from = measureElevationAt(p1);
+  const to = measureElevationAt(p2);
+  if (from == null || to == null) return '';
+  const delta = to - from;
+  return ` · Δ Alt ${delta > 0 ? '+' : ''}${fmtAltValue(delta)}`;
+}
+
 function updateMeasureReadout() {
   const readout = $('measureReadout');
   if (!readout) return;
   const wasHidden = readout.hidden;
   if (!measurePoints.length) {
-    readout.hidden = true;
+    if (!measureMode) {
+      readout.hidden = true;
+      return;
+    }
+    readout.innerHTML = `<span>Tap start point on map</span>${MEASURE_CLEAR_HTML}`;
+    if (wasHidden) bringToFront(readout);
+    readout.hidden = false;
     return;
   }
   if (measurePoints.length === 1) {
@@ -5059,7 +5081,7 @@ function updateMeasureReadout() {
   const km = haversineKm(p1[0], p1[1], p2[0], p2[1]);
   const brg = bearingDeg(p1[0], p1[1], p2[0], p2[1]);
   readout.innerHTML =
-    `<span>${esc(fmtDistanceKm(km))} · ${Math.round(brg)}°</span>${MEASURE_CLEAR_HTML}`;
+    `<span>${esc(fmtDistanceKm(km))} · ${Math.round(brg)}°${esc(measureAltitudeDelta(p1, p2))}</span>${MEASURE_CLEAR_HTML}`;
   if (wasHidden) bringToFront(readout);
   readout.hidden = false;
 }
@@ -5153,8 +5175,9 @@ function setMeasureMode(on) {
   }
   syncMeasureCursor();
   syncMarkerPopupHandlersForMeasure();
-  // The measurement stays visible after exiting so it can still be inspected
-  // and edited; the readout's × button is the explicit clear action.
+  // With no points yet the readout gives an immediate hint. After exiting, an
+  // existing measurement stays visible; the readout's × clears it and exits.
+  updateMeasureReadout();
 }
 
 map.on('click', e => {
@@ -6226,6 +6249,42 @@ function getSelectedTypes() {
   return chosen.size > 0 ? chosen : null;
 }
 
+function selectedTypeLabels() {
+  const selected = getSelectedTypes();
+  if (!selected) return [];
+  return [...$('type').querySelectorAll('input[type="checkbox"]')]
+    .filter(b => b.value !== 'all' && b.checked)
+    .map(b => {
+      const text = b.closest('label')?.querySelector('span')?.textContent || b.value;
+      return String(text).trim();
+    })
+    .filter(Boolean);
+}
+
+// Count aircraft that are search-eligible and in the viewport but excluded by
+// the type checkboxes. Search already bypasses type filters, so do not blame a
+// type filter when a search term is hiding traffic.
+function typeHiddenViewportCount(candidates = aircraft, bounds = null) {
+  const selectedTypes = getSelectedTypes();
+  if (!selectedTypes || $('search').value.trim()) return 0;
+  const b = bounds || currentBounds();
+  return (candidates || []).reduce((n, a) => {
+    if (isEmergency(a) || !isInCurrentViewport(a.lat, a.lon, b, a.altitude)) return n;
+    return matchesSelectedTypes(a, selectedTypes) ? n : n + 1;
+  }, 0);
+}
+
+function showAllTypes() {
+  const boxes = [...$('type').querySelectorAll('input[type="checkbox"]')];
+  boxes.forEach(b => { b.checked = b.value === 'all'; });
+  savedTypes = ['all'];
+  saveMenuPrefs();
+  redrawAllTracks();
+  needMeta = true;
+  render();
+  showToast('Showing all aircraft types');
+}
+
 function matchesSelectedTypes(a, selectedTypes) {
   if (!selectedTypes) return true;
   const rType = getResolvedType(a);
@@ -6486,7 +6545,7 @@ function isUserInteractingWithList() {
   return !!(ae && $('aircraftList').contains(ae));
 }
 
-function updateListHint(visible = null, bounds = null) {
+function updateListHint(visible = null, bounds = null, candidates = null) {
   const hint = $('listHint');
   const q = $('search').value.trim();
   const rows = visible || filtered();
@@ -6495,6 +6554,11 @@ function updateListHint(visible = null, bounds = null) {
   const hiddenTracks = [...selectedTracks.keys()].filter(k => !visibleKeys.has(k));
   const outsideCount = rows.reduce((n, a) => n + (isInCurrentViewport(a.lat, a.lon, b, a.altitude) ? 0 : 1), 0);
   const parts = [];
+  const hiddenByTypes = typeHiddenViewportCount(candidates || aircraft, b);
+  if (hiddenByTypes) {
+    const labels = selectedTypeLabels().join(' & ');
+    parts.push(`Showing ${labels} only — ${hiddenByTypes} in view hidden by type filters; open ⚙ Filter for Gliders/All.`);
+  }
   if (q) parts.push(`Filtering by "${q}". Tracks are kept; hidden tracks may not be in list.`);
   const search24hCount = q ? effectiveSearch24hResults().length : 0;
   if (q && !hasViewportSearchMatches(rows, b) && search24hCount) {
@@ -6531,7 +6595,7 @@ function render() {
   let tracksChanged = false;
 
   render24hAlertsSummary(now);
-  updateListHint(visible, bounds);
+  updateListHint(visible, bounds, aircraft);
 
   const emergencies = visible.filter(isEmergency);
   if (emergencies.length > 0) {
@@ -6716,8 +6780,11 @@ function render() {
       actions = `<button type="button" data-empty-act="refresh">Refresh now</button>`;
     } else if (q || selectedTypes) {
       title = 'No matches for current filters/search.';
-      detail = 'Clear search or reset filters to see aircraft in the current map view.';
-      actions = `<button type="button" data-empty-act="clear-search">Clear search</button><button type="button" data-empty-act="reset">Reset filters</button>`;
+      detail = 'Clear search, show all types, or reset filters to see aircraft in the current map view.';
+      actions =
+        (q ? `<button type="button" data-empty-act="clear-search">Clear search</button>` : '') +
+        (selectedTypes ? `<button type="button" data-empty-act="show-all">Show all types</button>` : '') +
+        `<button type="button" data-empty-act="reset">Reset filters</button>`;
     } else if (aircraft.length === 0) {
       title = lastFetchOkAtMs ? 'No live traffic in this area right now.' : 'Waiting for live data…';
       detail = lastFetchOkAtMs ? 'Data source is connected, but nothing is in the current view/window.' : 'Connecting to the live feed. This may take a few seconds.';
@@ -6806,6 +6873,7 @@ $('aircraftList').addEventListener('click', e => {
     const act = emptyAct.dataset.emptyAct;
     if (act === 'reset') resetFilters();
     else if (act === 'clear-search') { $('search').value = ''; updateSearchUi(); clearSearch24h(); render(); }
+    else if (act === 'show-all') showAllTypes();
     else if (act === 'fit') fitToResults();
     else if (act === 'refresh') fetchLive(true);
     return;
@@ -9173,7 +9241,9 @@ function renderBookmarks() {
   list.innerHTML = bookmarkItems().map(b =>
     `<span class="bookmark-item">` +
     `<button type="button" class="bookmark-pill" data-bookmark="${esc(b.id)}" title="Go to ${esc(b.name)}">${esc(b.name)}</button>` +
-    (b.builtin ? '' : `<button type="button" class="bookmark-delete icon-close" data-bookmark-delete="${esc(b.id)}" title="Delete ${esc(b.name)}" aria-label="Delete ${esc(b.name)}">×</button>`) +
+    (b.builtin ? '' :
+      `<button type="button" class="bookmark-update" data-bookmark-update="${esc(b.id)}" title="Update ${esc(b.name)} to current view" aria-label="Update ${esc(b.name)} to current view">↻</button>` +
+      `<button type="button" class="bookmark-delete icon-close" data-bookmark-delete="${esc(b.id)}" title="Delete ${esc(b.name)}" aria-label="Delete ${esc(b.name)}">×</button>`) +
     `</span>`
   ).join('');
 }
@@ -9185,6 +9255,20 @@ $('bookmarkList').addEventListener('click', e => {
     bookmarks = bookmarks.filter(b => b.id !== del.dataset.bookmarkDelete);
     saveBookmarks();
     renderBookmarks();
+    return;
+  }
+  const update = e.target.closest('[data-bookmark-update]');
+  if (update) {
+    e.stopPropagation();
+    const b = bookmarks.find(x => x.id === update.dataset.bookmarkUpdate);
+    if (!b) return;
+    const center = map.getCenter();
+    b.lat = center.lat;
+    b.lon = center.lng;
+    b.zoom = map.getZoom();
+    saveBookmarks();
+    renderBookmarks();
+    showToast(`Updated "${b.name}"`);
     return;
   }
   const pill = e.target.closest('[data-bookmark]');
@@ -9327,6 +9411,7 @@ $('measureReadout').addEventListener('click', e => {
   if (!e.target.closest('[data-measure-clear]')) return;
   e.stopPropagation();
   clearMeasure();
+  if (measureMode) setMeasureMode(false);
 });
 function handleReplayScrub() {
   const slider = $('replaySlider');
