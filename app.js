@@ -8826,10 +8826,11 @@ function enterListMode() {
   if (listForTopBtn) listForTopBtn.scrollTop = 0;
   syncStickyTop();
   syncScrollListTopBtn();
-  // Paint the offset state once, then slide the list into its settled position.
-  requestAnimationFrame(() => requestAnimationFrame(() => {
-    if (listMode) rootEl.classList.remove('list-enter');
-  }));
+  // Register the offscreen translateY(100%) start state in this task, then
+  // remove list-enter immediately. Entry and exit then begin in the same JS
+  // task, with the same 240 ms transition and easing — no extra frame on entry.
+  void sidebar.offsetWidth;
+  rootEl.classList.remove('list-enter');
 }
 
 function exitListMode(returnToMap) {
