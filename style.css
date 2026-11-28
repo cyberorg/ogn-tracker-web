@@ -307,6 +307,13 @@ a.leaflet-control-layers-toggle{display:flex;align-items:center;justify-content:
 .leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass:hover,
 .leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass:active{background:var(--hover);border-color:var(--accent);color:var(--accent)}
 .leaflet-control-compass3d .maplibregl-ctrl-group button.maplibregl-ctrl-compass .maplibregl-ctrl-icon{background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='29' height='29' viewBox='0 0 29 29'%3E%3Cpath fill='%23edf4f8' d='m10.5 14 4-8 4 8z'/%3E%3Cpath fill='%239aabba' d='m10.5 16 4 8 4-8z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:center}
+.leaflet-control-unselect-all{margin-top:6px}
+.leaflet-control-unselect-all[hidden]{display:none!important}
+.leaflet-control-unselect-all:has(button:focus-visible){outline:2px solid var(--focus);outline-offset:2px}
+.leaflet-control-unselect-all-btn{width:30px;height:30px;padding:0;display:grid;place-items:center;background:var(--control-bg);border:1px solid var(--line);border-radius:7px;box-shadow:0 1px 5px #0009;color:var(--text);cursor:pointer}
+.leaflet-control-unselect-all-btn:hover,.leaflet-control-unselect-all-btn:active{background:var(--hover);border-color:var(--accent);color:var(--accent)}
+.leaflet-control-unselect-all-btn[hidden]{display:none}
+.leaflet-control-unselect-all-btn svg{display:block;width:16px;height:16px}
 .map-wrap:fullscreen,.map-wrap.map-fullscreen{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;z-index:2000;background:var(--bg)}
 .map-wrap:fullscreen #map,.map-wrap.map-fullscreen #map{width:100%;height:100%}
 .map-wrap:fullscreen #map3d,.map-wrap.map-fullscreen #map3d{width:100%;height:100%}

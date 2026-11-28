@@ -537,6 +537,11 @@ const RESTORE_FULLSCREEN_ICON =
   '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">' +
   '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" fill="none" stroke="currentColor" ' +
   'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const UNSELECT_ALL_ICON =
+  '<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
+  '<rect x="1.5" y="1.5" width="13" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+  '<path d="M4.5 4.5l7 7m0-7l-7 7" fill="none" stroke="currentColor" ' +
+  'stroke-width="1.5" stroke-linecap="round"/></svg>';
 
 const FullscreenControl = L.Control.extend({
   options: { position: 'topright' },
@@ -620,6 +625,13 @@ function syncClearTracksButton() {
   }
   const unselectAllButton = $('unselectAllBtn');
   if (unselectAllButton) unselectAllButton.hidden = selectedTracks.size === 0;
+  const mapUnselectAllButton = $('mapUnselectAllBtn');
+  if (mapUnselectAllButton) {
+    const show = selectedTracks.size > 0;
+    mapUnselectAllButton.hidden = !show;
+    const container = mapUnselectAllButton.parentElement;
+    if (container) container.hidden = !show;
+  }
 }
 
 function addTrackLayerIfVisible(entry) {
@@ -3410,6 +3422,28 @@ const Compass3DControl = L.Control.extend({
 });
 const compass3DControl = new Compass3DControl().addTo(map);
 
+// Unselect-all lives in the same top-right stack as the compass, directly
+// below it, and is only shown while at least one aircraft is selected.
+const MapUnselectAllControl = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd: function () {
+    const container = L.DomUtil.create('div', 'leaflet-control-unselect-all');
+    const button = L.DomUtil.create('button', 'leaflet-control-unselect-all-btn', container);
+    button.type = 'button';
+    button.id = 'mapUnselectAllBtn';
+    button.hidden = true;
+    button.innerHTML = UNSELECT_ALL_ICON;
+    button.setAttribute('aria-label', 'Unselect all aircraft');
+    button.title = 'Unselect all aircraft';
+    container.hidden = true;
+    L.DomEvent.disableClickPropagation(container);
+    this._button = button;
+    this._container = container;
+    return container;
+  }
+});
+const mapUnselectAllControl = new MapUnselectAllControl().addTo(map);
+
 function syncViewModeControl() {
   const button = view3DModeControl?._button;
   if (!button) return;
@@ -5691,6 +5725,7 @@ map.on('dragstart', () => { pauseFollowCentering(); });
 map.on('move zoom resize', () => { syncRecenterButton(); });
 $('recenterBtn').addEventListener('click', () => { centerOnFollowed(true); });
 $('unselectAllBtn')?.addEventListener('click', () => { clearAllTracks(); render(); });
+$('mapUnselectAllBtn')?.addEventListener('click', () => { clearAllTracks(); render(); });
 
 function sanitizeWeather(wx) {
   if (!wx || typeof wx !== 'object') return null;
