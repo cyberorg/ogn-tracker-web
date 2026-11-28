@@ -661,6 +661,10 @@ mapAttributionEl.addEventListener('touchmove', event => {
 let s3dStyleSwapSeq = 0;
 let ignoreLeaflet3DSyncUntil = 0;
 let ignoreMap3DSyncUntil = 0;
+let s3dReplayCenterSig = '';
+let s3dReplayCenterRatio = null;
+let s3dReplaySmoothSig = '';
+let s3dReplaySmoothAlt = null;
 let s3dDomMarkerSyncRaf = null;
 let s3dTerrainRefreshRaf = null;
 let s3dMarkerGeoJsonSig = '';
@@ -747,6 +751,7 @@ function s3dScheduleTerrainRefresh() {
   s3dTerrainRefreshRaf = requestAnimationFrame(() => {
     s3dTerrainRefreshRaf = null;
     s3dTerrainElevationCache.clear();
+    s3dReplayCenterSig = '';
     s3dScheduleLabelUpdate();
     if (map3dActive) sync3DTracks();
   });
@@ -1570,6 +1575,93 @@ function s3dProject3DPoint(lng, lat, altMSL) {
   return map3d.project?.([lng, lat]) || null;
 }
 
+// MapLibre's map center is the ground point under the middle of the viewport.
+// A pitched camera puts an elevated aircraft above that point, so following the
+// ground coordinate alone leaves the marker off-centre. Return the ground
+// coordinate that places the aircraft's rendered altitude at the viewport
+// centre; callers in 2D keep using the plain lat/lon.
+function s3dCameraCenterForPoint(lng, lat, altMSL = null) {
+  if (!map3dReady || !map3d || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  const Mc = window.maplibregl?.MercatorCoordinate;
+  const transform = map3d.transform;
+  const m = transform?._pixelMatrix3D;
+  const worldSize = transform?.worldSize;
+  const centerPoint = transform?.centerPoint;
+  if (!Mc || !m || m.length < 16 || !worldSize || !centerPoint) return null;
+  try {
+    // Invert the *3D* pixel matrix at the aircraft's rendered elevation. The
+    // 2D screenPointToMercatorCoordinateAtZ() helper takes a normalised
+    // mercator z, while coordinatePoint() with _pixelMatrix3D takes metres, so
+    // it cannot be used for this correction.
+    const elevation = s3dRenderAltitude(lng, lat, altMSL);
+    const cx = centerPoint.x, cy = centerPoint.y;
+    const a11 = m[0] - cx * m[3];
+    const a12 = m[4] - cx * m[7];
+    const a21 = m[1] - cy * m[3];
+    const a22 = m[5] - cy * m[7];
+    const b1 = cx * (m[11] * elevation + m[15]) - (m[8] * elevation + m[12]);
+    const b2 = cy * (m[11] * elevation + m[15]) - (m[9] * elevation + m[13]);
+    const det = a11 * a22 - a12 * a21;
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return null;
+    const underX = (b1 * a22 - a12 * b2) / det / worldSize;
+    const underY = (a11 * b2 - b1 * a21) / det / worldSize;
+    const c = map3d.getCenter();
+    const current = Mc.fromLngLat([c.lng, c.lat]);
+    const aircraft = Mc.fromLngLat([lng, lat]);
+    if (![current, aircraft].every(v => v && Number.isFinite(v.x) && Number.isFinite(v.y))) return null;
+    const ll = new Mc(
+      current.x + aircraft.x - underX,
+      current.y + aircraft.y - underY,
+      0
+    ).toLngLat();
+    if (ll && Number.isFinite(ll.lat) && Number.isFinite(ll.lng)) return L.latLng(ll.lat, ll.lng);
+  } catch (err) {
+    // Fall through to the plain ground centre if MapLibre internals change.
+  }
+  return null;
+}
+
+// Replay updates the camera several times per second. Calling the matrix-based
+// correction on each update while MapLibre is still easing makes the target move
+// with the animation and the view shakes. Cache the altitude-to-ground offset
+// while the camera orientation is stable, then apply it to the smoothly
+// interpolated replay position instead.
+function s3dReplayCameraCenter(lng, lat, altMSL) {
+  const ground = L.latLng(lat, lng);
+  if (!map3dReady || !map3d || !Number.isFinite(lng) || !Number.isFinite(lat)) return ground;
+  const renderAlt = s3dRenderAltitude(lng, lat, altMSL);
+  if (!(renderAlt > 0)) return s3dCameraCenterForPoint(lng, lat, altMSL) || ground;
+  const sig = [
+    replayFollowAddress || '',
+    map3d.getZoom?.(),
+    map3d.getPitch?.(),
+    map3d.getBearing?.()
+  ].map(v => typeof v === 'string' ? v : Math.round((Number(v) || 0) * 100)).join(':');
+  if (s3dReplayCenterSig !== sig || !s3dReplayCenterRatio) {
+    const corrected = s3dCameraCenterForPoint(lng, lat, altMSL);
+    if (!corrected || !Number.isFinite(corrected.lat) || !Number.isFinite(corrected.lng)) return ground;
+    const metersPerLng = 111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180));
+    s3dReplayCenterRatio = {
+      northPerM: (corrected.lat - lat) * 111320 / renderAlt,
+      eastPerM: (corrected.lng - lng) * metersPerLng / renderAlt
+    };
+    s3dReplayCenterSig = sig;
+  }
+  // A DEM tile can finish loading mid-replay and change the rendered altitude
+  // by tens of metres. Ease the correction instead of snapping the camera.
+  if (s3dReplaySmoothSig !== sig || s3dReplaySmoothAlt == null) {
+    s3dReplaySmoothAlt = renderAlt;
+    s3dReplaySmoothSig = sig;
+  } else {
+    s3dReplaySmoothAlt += (renderAlt - s3dReplaySmoothAlt) * 0.25;
+  }
+  const metersPerLng = 111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180));
+  return L.latLng(
+    lat + s3dReplayCenterRatio.northPerM * s3dReplaySmoothAlt / 111320,
+    s3dWrapLon(lng + s3dReplayCenterRatio.eastPerM * s3dReplaySmoothAlt / metersPerLng)
+  );
+}
+
 function s3dUpdateDomMarkerPosition(item) {
   if (!item || !item.el || !map3d) return;
   const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
@@ -1907,12 +1999,14 @@ function ensure3DMap() {
   });
   map3d.on('render', s3dScheduleLabelUpdate);
   map3d.on('dragstart', () => { pauseFollowCentering(); });
-  // Replay playback normally keeps the camera on the followed aircraft. Pause
-  // that as soon as the user touches or scrolls the 3D map, before MapLibre's
-  // drag threshold, so panning/zooming stays possible while replay runs.
-  const pause3DFollow = () => { if (replayActive) pauseFollowCentering(); };
-  map3d.getCanvasContainer().addEventListener('pointerdown', pause3DFollow, { passive: true });
-  map3d.getCanvasContainer().addEventListener('wheel', pause3DFollow, { passive: true });
+  // User input must win over follow centering. Stop the 3D alignment loop in
+  // the capture phase, before MapLibre starts its own drag/zoom handlers;
+  // otherwise a queued panBy() can cancel the pointer and the map feels dead.
+  const pause3DFollow = () => { pauseFollowCentering(); };
+  const map3dContainer = map3d.getContainer();
+  for (const type of ['pointerdown', 'touchstart', 'wheel']) {
+    map3dContainer.addEventListener(type, pause3DFollow, { capture: true, passive: true });
+  }
   return true;
 }
 
@@ -3066,6 +3160,7 @@ function setBaroEnabled(on) {
 
 function toggleFollow(address) {
   if (!address) return;
+  stop3DFollowAlign();
   followedAddress = (followedAddress === address) ? null : address;
   // Follow and list-click selection share one focused marker/HUD.
   mapFocusAddress = followedAddress;
@@ -3132,13 +3227,17 @@ function focusNearMapEdge() {
   if (map3dReady && map3dActive) {
     const key = replayActive ? 'rfocus:active' : `live:${addr}`;
     const item = map3dDomMarkers.get(key);
-    const markerRect = item?.el?.getBoundingClientRect();
-    const mapRect = $('map3d')?.getBoundingClientRect();
-    if (markerRect && mapRect && markerRect.width && mapRect.width && mapRect.height) {
-      const x = markerRect.left + markerRect.width / 2 - mapRect.left;
-      const y = markerRect.top + markerRect.height / 2 - mapRect.top;
-      return x < mapRect.width * 0.2 || x > mapRect.width * 0.8 ||
-             y < mapRect.height * 0.2 || y > mapRect.height * 0.8;
+    const canvas = map3d.getCanvas?.();
+    const width = map3d.transform?.width || canvas?.clientWidth || 0;
+    const height = map3d.transform?.height || canvas?.clientHeight || 0;
+    if (item && Number.isFinite(item.lon) && Number.isFinite(item.lat) && width && height) {
+      // Use the projected point rather than the DOM box: the marker element is
+      // hidden once it leaves the viewport, but Recenter must still appear.
+      const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
+      if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
+        return pt.x < width * 0.2 || pt.x > width * 0.8 ||
+               pt.y < height * 0.2 || pt.y > height * 0.8;
+      }
     }
   }
   const ll = focusLatLng();
@@ -3170,7 +3269,72 @@ function syncRecenterButton() {
 function pauseFollowCentering() {
   if (!activeFollowAddress() || followCenteringPaused) return;
   followCenteringPaused = true;
+  stop3DFollowAlign();
   syncRecenterButton();
+}
+
+// Terrain elevation under the MapLibre camera changes as the followed marker
+// moves across DEM tiles. That shifts the pitched projection after the initial
+// jump, so nudge the 3D camera until the rendered marker actually lands at the
+// viewport centre. The loop follows the current marker position each tick and
+// stops as soon as a user pan pauses following.
+let follow3DAlignTimer = null;
+let follow3DAlignAddress = null;
+let follow3DAlignSteps = 0;
+
+function stop3DFollowAlign() {
+  if (follow3DAlignTimer !== null) clearTimeout(follow3DAlignTimer);
+  follow3DAlignTimer = null;
+  follow3DAlignAddress = null;
+  follow3DAlignSteps = 0;
+}
+
+function align3DFollowedMarker(address) {
+  follow3DAlignTimer = null;
+  if (!map3dReady || !map3dActive || activeFollowAddress() !== address || followCenteringPaused) {
+    if (follow3DAlignAddress === address) stop3DFollowAlign();
+    return;
+  }
+  const key = replayActive ? 'rfocus:active' : `live:${address}`;
+  const item = map3dDomMarkers.get(key);
+  if (!item || !Number.isFinite(item.lon) || !Number.isFinite(item.lat)) {
+    stop3DFollowAlign();
+    return;
+  }
+  const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
+  const canvas = map3d.getCanvas?.();
+  const width = map3d.transform?.width || canvas?.clientWidth || 0;
+  const height = map3d.transform?.height || canvas?.clientHeight || 0;
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y) || !width || !height) {
+    stop3DFollowAlign();
+    return;
+  }
+  const dx = pt.x - width / 2;
+  const dy = pt.y - height / 2;
+  // Damped corrections with a small dead zone: a full pan on every tick can
+  // oscillate by a few pixels as MapLibre recalculates terrain elevation, which
+  // is visible as camera shake during replay.
+  if (Math.abs(dx) <= 4 && Math.abs(dy) <= 4) {
+    stop3DFollowAlign();
+    syncLeafletFrom3D();
+    return;
+  }
+  ignoreMap3DSyncUntil = performance.now() + 250;
+  map3d.panBy([dx * 0.65, dy * 0.65], { duration: 0 });
+  if (++follow3DAlignSteps >= 16) {
+    stop3DFollowAlign();
+    syncLeafletFrom3D();
+    return;
+  }
+  follow3DAlignTimer = setTimeout(() => align3DFollowedMarker(address), 100);
+}
+
+function start3DFollowAlign(address, delay = 0) {
+  if (!map3dReady || !map3dActive || !address) return;
+  if (follow3DAlignAddress === address && follow3DAlignTimer !== null) return;
+  stop3DFollowAlign();
+  follow3DAlignAddress = address;
+  follow3DAlignTimer = setTimeout(() => align3DFollowedMarker(address), delay);
 }
 
 function unclusterFollowedMarker(address) {
@@ -3202,36 +3366,67 @@ function focusFollowedOnMap(address) {
   // Zoom without animation so markercluster has settled before unclustering.
   map.setView([a.lat, a.lon], FOLLOW_CENTER_MIN_ZOOM, { animate: false });
   unclusterFollowedMarker(address);
+  // In 3D this also corrects the camera for the aircraft's rendered altitude.
+  centerOnFollowed(true, false, 0);
   return true;
 }
 
-function centerOnFollowed(force = false, animate = true, panDuration = 0.2) {
+function centerOnFollowed(force = false, animate = true, panDuration = 0.2, align3D = true) {
   const addr = activeFollowAddress();
-  if (!addr) return false;
+  if (!addr) {
+    stop3DFollowAlign();
+    return false;
+  }
   if (!force && (followCenteringPaused || map.getZoom() < FOLLOW_CENTER_MIN_ZOOM)) {
+    stop3DFollowAlign();
     syncRecenterButton();
     return false;
   }
-  let lat, lon;
+  let lat, lon, alt = null;
   if (replayActive) {
     const p = replayPoints.find(x => x.id === addr);
     if (!p) return false;
-    lat = p.lat; lon = p.lon;
+    lat = p.lat; lon = p.lon; alt = p.alt ?? null;
   } else {
     const a = aircraft.find(x => x.address === addr);
     if (!a) return false;
-    lat = a.lat; lon = a.lon;
+    lat = a.lat; lon = a.lon; alt = a.altitude ?? null;
   }
   followCenteringPaused = false;
   syncRecenterButton();
-  const dest = L.latLng(lat, lon);
-  if (map.getCenter().distanceTo(dest) > 1) {
-    map.setView(dest, map.getZoom(), { animate, duration: panDuration });
+  const use3D = map3dReady && map3dActive;
+  if (use3D && force) {
+    s3dReplayCenterSig = '';
+    s3dReplayCenterRatio = null;
+    s3dReplaySmoothSig = '';
+    s3dReplaySmoothAlt = null;
   }
-  if (map3dReady && map3dActive) {
-    ignoreMap3DSyncUntil = performance.now() + 250;
-    if (animate) map3d.easeTo({ center: [lon, lat], duration: Math.round(panDuration * 1000) });
-    else map3d.jumpTo({ center: [lon, lat] });
+  const ground = L.latLng(lat, lon);
+  const dest = use3D
+    ? ((replayActive && !force
+        ? s3dReplayCameraCenter(lon, lat, alt)
+        : s3dCameraCenterForPoint(lon, lat, alt)) || ground)
+    : ground;
+  if (use3D) {
+    const guardMs = Math.round(panDuration * 1000) + 250;
+    ignoreMap3DSyncUntil = performance.now() + guardMs;
+    // Leaflet is hidden in 3D mode. Move its state instantly and keep its
+    // moveend from syncing back into MapLibre while MapLibre is animating;
+    // otherwise the two maps ping-pong and replay visibly shakes.
+    ignoreLeaflet3DSyncUntil = performance.now() + guardMs;
+  }
+  if (map.getCenter().distanceTo(dest) > 1) {
+    map.setView(dest, map.getZoom(), { animate: use3D ? false : animate, duration: panDuration });
+  }
+  if (use3D) {
+    // Deliberate jumps and replay use short eases; automatic live fixes jump
+    // straight to the target. Replay's ease finishes before the next 200 ms
+    // update so an in-flight animation cannot complete against stale terrain.
+    const ease3D = animate && (force || replayActive);
+    const duration3D = force ? Math.round(panDuration * 1000) : Math.round(panDuration * 600);
+    if (ease3D) map3d.easeTo({ center: [dest.lng, dest.lat], duration: duration3D });
+    else map3d.jumpTo({ center: [dest.lng, dest.lat] });
+    if (align3D) start3DFollowAlign(addr, ease3D ? Math.round(panDuration * 1000) + 60 : 60);
   }
   return true;
 }
@@ -3663,9 +3858,9 @@ function focusListRow(address) {
   if (row) row.focus({ preventScroll: true });
 }
 
-function showSearchResultPopup(a, recenterOnClose = false) {
+function showSearchResultPopup(a, recenterOnClose = false, center = null, zoom = null) {
   if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
-  map.setView([a.lat, a.lon], Math.max(map.getZoom(), 12));
+  map.setView(center || [a.lat, a.lon], zoom ?? Math.max(map.getZoom(), 12));
   const m = ensureSearchResultMarker(a);
   if (m) {
     if (recenterOnClose) m._recenterOnClose = true;
@@ -3690,7 +3885,15 @@ function recenterFocusedMarkerOnClose(m) {
       if (otherPopupOpen) return;
       const a = m._data;
       if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
-      map.setView([a.lat, a.lon], map.getZoom(), { animate: false });
+      const ground = L.latLng(a.lat, a.lon);
+      const dest = (map3dReady && map3dActive)
+        ? (s3dCameraCenterForPoint(a.lon, a.lat, a.altitude) || ground)
+        : ground;
+      if (map3dReady && map3dActive) {
+        ignoreMap3DSyncUntil = performance.now() + 250;
+        map3d.jumpTo({ center: [dest.lng, dest.lat] });
+      }
+      map.setView(dest, map.getZoom(), { animate: false });
     };
     if (mapMoving) map.once('moveend', recenter);
     else requestAnimationFrame(recenter);
@@ -3700,6 +3903,8 @@ function recenterFocusedMarkerOnClose(m) {
 // Clear the one-shot list focus. When the same aircraft was also followed,
 // use toggleFollow() so the follow buttons and live centering state stay in sync.
 function clearMapFocus(address = null) {
+  const st3D = address ? map3dDomPopupState.get(`live:${address}`) : null;
+  if (st3D?.popup?.isOpen()) st3D.popup.remove();
   const m = address ? (markers.get(address) || searchResultMarkers.get(address)) : null;
   if (m) {
     // Do not let the popup-close handler recenter an aircraft we just unfocused.
@@ -3727,16 +3932,64 @@ function focusAircraftOnMap(address, fallbackAircraft = null) {
   const a = findAircraftByAddress(address) || fallbackAircraft;
   if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return false;
   const m = markers.get(address);
+  const use3D = map3dReady && map3dActive;
+  const key3D = `live:${address}`;
+  const has3DMarker = use3D && map3dDomMarkers.has(key3D);
+  const ground = L.latLng(a.lat, a.lon);
   const centerAndOpen = () => {
-    map.setView([a.lat, a.lon], map.getZoom(), { animate: false });
+    let dest = ground;
+    if (use3D) {
+      // Match MapLibre to the 2D zoom before computing the altitude correction,
+      // then center on the rendered aircraft rather than its ground shadow.
+      map3d.jumpTo({ zoom: Math.max(2, Math.min(16, map.getZoom() + 1)) });
+      dest = s3dCameraCenterForPoint(a.lon, a.lat, a.altitude) || ground;
+      ignoreMap3DSyncUntil = performance.now() + 500;
+      map.setView(dest, map.getZoom(), { animate: false });
+      map3d.jumpTo({ center: [dest.lng, dest.lat] });
+    } else {
+      map.setView(ground, map.getZoom(), { animate: false });
+    }
+    if (has3DMarker) {
+      // 3D popups are centered by s3dPositionPopup(), so open that popup
+      // directly instead of waiting for Leaflet's clustered 2D marker to
+      // uncluster and then nudging its popup into place.
+      const leafletMarker = m || searchResultMarkers.get(address);
+      if (leafletMarker) {
+        leafletMarker._recenterOnClose = false;
+        if (leafletMarker.isPopupOpen?.()) map.closePopup(leafletMarker.getPopup());
+      }
+      s3dOpenPopupForKey(key3D, a);
+      return;
+    }
     if (m) {
       m._recenterOnClose = true;
       m.openPopup();
     } else {
-      showSearchResultPopup(a, true);
+      showSearchResultPopup(a, true, use3D ? dest : null, use3D ? map.getZoom() : null);
+    }
+    if (use3D) {
+      // Search-only aircraft have no 3D marker; keep their 2D popup centered
+      // through the camera and cluster changes.
+      const focusMarker = markers.get(address) || searchResultMarkers.get(address);
+      const centerPopup = () => requestAnimationFrame(() => {
+        if (focusMarker?.isPopupOpen?.() && isFocusedMapMarker(focusMarker)) {
+          centerFocusedPopupInView(focusMarker);
+        }
+      });
+      let frames = 12;
+      const settlePopup = () => {
+        if (frames-- <= 0) return;
+        centerPopup();
+        requestAnimationFrame(settlePopup);
+      };
+      settlePopup();
+      map.once('moveend', centerPopup);
+      map3d.once('moveend', centerPopup);
     }
   };
-  if (m && clusterGroup.hasLayer(m)) clusterGroup.zoomToShowLayer(m, centerAndOpen);
+  // 3D markers are DOM overlays independent of Leaflet clustering, so there is
+  // no need to uncluster the hidden 2D marker before opening the 3D popup.
+  if (m && clusterGroup.hasLayer(m) && !has3DMarker) clusterGroup.zoomToShowLayer(m, centerAndOpen);
   else centerAndOpen();
   return true;
 }
@@ -4692,6 +4945,10 @@ function centerFocusedPopupInView(marker) {
   if (!marker?.isPopupOpen?.()) return;
   const popupEl = marker.getPopup()?.getElement?.();
   if (!popupEl) return;
+  const previousTranslate = popupEl.style.translate;
+  // Measure the Leaflet-placed position, then offset only enough to centre the
+  // popup. Keep any existing offset when the popup is already centred so a
+  // later correction cannot accidentally clear it.
   popupEl.style.translate = '';
   const mapRect = $('map').getBoundingClientRect();
   const popupRect = popupEl.getBoundingClientRect();
@@ -4702,7 +4959,10 @@ function centerFocusedPopupInView(marker) {
     : Math.max(popupRect.height / 2 + margin, Math.min(safeBottom / 2, safeBottom - popupRect.height / 2 - margin));
   const dx = popupRect.left + popupRect.width / 2 - (mapRect.left + targetX);
   const dy = popupRect.top + popupRect.height / 2 - (mapRect.top + targetY);
-  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+  if (Math.abs(dx) < 4 && Math.abs(dy) < 4) {
+    popupEl.style.translate = previousTranslate;
+    return;
+  }
   popupEl.style.translate = `${-dx}px ${-dy}px`;
 }
 
@@ -6825,7 +7085,10 @@ function startReplayPlayback() {
     // Short animated pans keep high-zoom follow smooth; the 200ms throttle
     // avoids a moveend storm on every animation frame.
     if (wallNow - replayLastPanAtMs >= 200) {
-      centerOnFollowed(false, true);
+      // Replay updates the focus marker every frame. Re-running the terrain
+      // alignment loop on every throttled camera update makes the view jitter,
+      // so automated replay pans use the already-corrected camera center only.
+      centerOnFollowed(false, true, 0.2, false);
       replayLastPanAtMs = wallNow;
     }
     syncReplayTrackUi();
