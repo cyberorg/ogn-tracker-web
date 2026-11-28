@@ -1557,6 +1557,46 @@ function s3dPolylineCurve(vecs) {
   return curve;
 }
 
+// Bounded corner fillet used when a full spline would overshoot the fixes.
+// Straight legs are untouched; each usable corner is replaced by a short
+// quadratic Bézier clipped to 20 m and at most a quarter of either leg, so the
+// rounded path stays inside the original polyline and cannot knot back on itself.
+function s3dRoundedCornerCurve(vecs, metersPerUnit) {
+  const THREE = s3dThree();
+  if (!THREE || !vecs || vecs.length < 2) return null;
+  const points = [vecs[0].clone()];
+  let roundedCorners = 0;
+  for (let i = 1; i < vecs.length - 1; i++) {
+    const prev = vecs[i - 1], cur = vecs[i], next = vecs[i + 1];
+    const inDir = cur.clone().sub(prev);
+    const outDir = next.clone().sub(cur);
+    const inLen = inDir.length();
+    const outLen = outDir.length();
+    if (!(inLen > 0) || !(outLen > 0)) { points.push(cur.clone()); continue; }
+    inDir.divideScalar(inLen);
+    outDir.divideScalar(outLen);
+    const theta = Math.acos(Math.max(-1, Math.min(1, inDir.dot(outDir))));
+    if (theta < 0.12 || theta > 2.4) { points.push(cur.clone()); continue; }
+    const trim = Math.min(S3D_TRACK_SPLINE_MAX_DEVIATION_M / metersPerUnit, inLen * 0.25, outLen * 0.25);
+    if (!(trim > 0)) { points.push(cur.clone()); continue; }
+    const p0 = cur.clone().addScaledVector(inDir, -trim);
+    const p2 = cur.clone().addScaledVector(outDir, trim);
+    const steps = Math.max(2, Math.min(6, Math.ceil(theta / (Math.PI / 18))));
+    for (let s = 0; s <= steps; s++) {
+      if (s === 0) { points.push(p0.clone()); continue; }
+      const t = s / steps, u = 1 - t;
+      points.push(p0.clone().multiplyScalar(u * u)
+        .addScaledVector(cur, 2 * u * t)
+        .addScaledVector(p2, t * t));
+    }
+    roundedCorners++;
+  }
+  points.push(vecs[vecs.length - 1].clone());
+  const curve = s3dPolylineCurve(points);
+  curve.userData = { rounded: true, roundedCorners };
+  return curve;
+}
+
 function s3dCurveFromPoints(points) {
   const THREE = s3dThree();
   if (!THREE || !window.maplibregl?.MercatorCoordinate) return null;
@@ -1573,6 +1613,15 @@ function s3dCurveFromPoints(points) {
   if (!Number.isFinite(unitsPerMeter) || unitsPerMeter <= 0) return smooth;
   const deviationM = s3dCurveDeviationM(smooth, vecs, 1 / unitsPerMeter);
   if (deviationM <= S3D_TRACK_SPLINE_MAX_DEVIATION_M) return smooth;
+  const rounded = s3dRoundedCornerCurve(vecs, 1 / unitsPerMeter);
+  if (rounded) {
+    const roundedDeviationM = s3dCurveDeviationM(rounded, vecs, 1 / unitsPerMeter);
+    if (roundedDeviationM <= S3D_TRACK_SPLINE_MAX_DEVIATION_M) {
+      rounded.userData.roundedFromDeviationM = deviationM;
+      rounded.userData.roundedDeviationM = roundedDeviationM;
+      return rounded;
+    }
+  }
   const linear = s3dPolylineCurve(vecs);
   linear.userData.linearizedFromDeviationM = deviationM;
   return linear;
