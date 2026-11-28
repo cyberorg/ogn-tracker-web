@@ -8677,9 +8677,11 @@ function syncHeaderUi() {
 }
 function syncStickyTop() {
   if (!siteHeader) return;
+  // The header is hidden in list mode; the fixed list must start at the top.
+  const hidden = document.documentElement.classList.contains('list-mode');
   document.documentElement.style.setProperty(
     '--header-h',
-    `${siteHeader.getBoundingClientRect().height}px`
+    hidden ? '0px' : `${siteHeader.getBoundingClientRect().height}px`
   );
 }
 function cancelHeaderAutoClose() {
@@ -8797,36 +8799,58 @@ const rootEl = document.documentElement;
 let listMode = false;
 let listModeDocTop = 0;
 let listModeExitGuard = false;
+const LIST_ANIM_MS = 180;
+let listModeAnimTimer = null;
+
+function clearListModeAnimTimer() {
+  if (listModeAnimTimer !== null) {
+    clearTimeout(listModeAnimTimer);
+    listModeAnimTimer = null;
+  }
+}
 
 function enterListMode() {
   if (listMode || !compactMenuQuery.matches) return;
   const sidebar = $('aircraftSidebar');
   if (!sidebar) return;
+  clearListModeAnimTimer();
   const scrollTop = window.scrollY || window.pageYOffset || 0;
   listModeDocTop = sidebar.getBoundingClientRect().top + scrollTop;
   listMode = true;
   window.scrollTo(0, listModeDocTop);
-  rootEl.classList.add('list-mode');
+  rootEl.classList.remove('list-exit');
+  rootEl.classList.add('list-mode', 'list-enter');
   sync3DMapVisibility();
   if (listForTopBtn) listForTopBtn.scrollTop = 0;
   syncStickyTop();
   syncScrollListTopBtn();
+  // Paint the offset state once, then slide the list into its settled position.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (listMode) rootEl.classList.remove('list-enter');
+  }));
 }
 
 function exitListMode(returnToMap) {
   if (!listMode) return;
   listMode = false;
-  rootEl.classList.remove('list-mode');
-  sync3DMapVisibility();
+  rootEl.classList.remove('list-enter');
+  rootEl.classList.add('list-exit');
+  clearListModeAnimTimer();
+  listModeAnimTimer = setTimeout(() => {
+    listModeAnimTimer = null;
+    rootEl.classList.remove('list-mode', 'list-exit');
+    syncStickyTop();
+    sync3DMapVisibility();
+    if (returnToMap) {
+      // Only scroll once the document is unlocked again, so smooth scroll works.
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        map.invalidateSize({ pan: false, animate: false });
+        resize3D();
+      });
+    }
+  }, LIST_ANIM_MS);
   listModeExitGuard = true;
-  if (returnToMap) {
-    // Scroll all the way up so the map sits below the header, not under it.
-    requestAnimationFrame(() => {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      map.invalidateSize({ pan: false, animate: false });
-      resize3D();
-    });
-  }
 }
 
 // Explicit mobile escape hatch; swipe-down remains available as a secondary path.
@@ -8944,9 +8968,11 @@ document.addEventListener('click', (e) => {
 
 // Returning to the map is deliberately limited to the pinned area. A downward
 // swipe inside the aircraft list only scrolls/bounces that list; it never
-// unlocks the page. Start the same gesture on the header or chrome to go back.
+// unlocks the page. In list mode the header is hidden, so the up-arrow row is
+// part of the pinned chrome alongside the sidebar chrome.
 function inPinnedChrome(el) {
-  return !!el && !!(el.closest('#siteHeader') || el.closest('.sidebar-chrome'));
+  return !!el && !!(el.closest('#siteHeader') || el.closest('.sidebar-chrome') ||
+    el.closest('.list-back-to-map-row'));
 }
 
 let chromeBackSwipe = null;
