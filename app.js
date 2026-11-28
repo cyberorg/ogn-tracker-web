@@ -6601,13 +6601,26 @@ function markerColorStyle(color) {
   return `--marker-color:${hex};--halo-ring:${hex}55;--halo-glow:${hex}aa`;
 }
 
+// Live label freshness: green under 3 minutes, red from 3 minutes onward.
+function liveSeenDotClass(a) {
+  const ts = Number(a?.receivedAtMs);
+  if (!Number.isFinite(ts) || ts <= 0) return 'stale';
+  return Math.max(0, serverNow() - ts) < 180000 ? 'fresh' : 'stale';
+}
+
+function liveSeenDotHtml(a) {
+  const cls = liveSeenDotClass(a);
+  const title = cls === 'fresh' ? 'Last seen under 3 minutes ago' : 'Last seen 3+ minutes ago';
+  return `<span class="seen-dot ${cls}" role="img" title="${title}" aria-label="${title}"></span>`;
+}
+
 // Shared signature for 2D icons, 3D DOM icons, and label scheduling. Keeping
 // this in one place lets both renderers skip HTML rebuilds when nothing that
 // affects the marker image changed.
 function liveMarkerIconSig(a, focused = false) {
   const trackColor = selectedTracks.get(a.address)?.color || buddies.get(a.address)?.color || '';
   const selected = selectedTracks.has(a.address) || buddies.has(a.address) ? 1 : 0;
-  const base = `${getResolvedType(a)}_${a.course ?? ''}_${isEmergency(a) ? 1 : 0}_${trackColor}_${selected}_${displayName(a)}`;
+  const base = `${getResolvedType(a)}_${a.course ?? ''}_${isEmergency(a) ? 1 : 0}_${trackColor}_${selected}_${displayName(a)}_${liveSeenDotClass(a)}`;
   return focused ? `${base}_focus_${liveFocusHudText(a)}` : base;
 }
 
@@ -6619,6 +6632,7 @@ function markerIcon(a) {
   const selected = selectedTracks.has(a.address) || buddies.has(a.address);
   const trackColor = selectedTracks.get(a.address)?.color || buddies.get(a.address)?.color || THEME.accent;
   const name = esc(displayName(a));
+  const nameHtml = `<div class="glider-label has-seen-dot" title="${name}"><span class="label-name">${name}</span>${liveSeenDotHtml(a)}</div>`;
   let svgPath = ICONS.default;
   switch(type) {
     case 2: case 5: case 8: case 9: case 16: svgPath = ICONS.airplane; break;
@@ -6631,7 +6645,7 @@ function markerIcon(a) {
   }
   return L.divIcon({
     className: `glider-icon${focused ? ' focused' : ''}${selected ? ' selected' : ''}`, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
-    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}${selected ? ' selected' : ''}" style="${markerColorStyle(trackColor)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div>${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
+    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}${selected ? ' selected' : ''}" style="${markerColorStyle(trackColor)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg>${nameHtml}${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
   });
 }
 

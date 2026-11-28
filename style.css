@@ -198,6 +198,11 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .glider-icon{background:transparent;border:0;overflow:visible}.glider-wrap{--marker-color:var(--accent);--halo-ring:#57d3b055;--halo-glow:#57d3b0aa;position:relative;width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid var(--marker-color);display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000);fill:var(--marker-color);stroke:#d9fff4;stroke-width:0.7}
 .glider-label,.replay-hud{position:absolute;padding:1px 5px;border:1px solid var(--line);border-radius:5px;background:#0c1620e6;color:var(--text);font:600 10px/1.2 system-ui,sans-serif;box-shadow:0 1px 5px #0009;white-space:nowrap;pointer-events:none}
 .glider-label{top:calc(100% + 5px);left:50%;transform:translateX(-50%);max-width:150px;overflow:hidden;text-overflow:ellipsis;opacity:0;visibility:hidden}
+.glider-label.has-seen-dot{display:flex;align-items:center;gap:4px}
+.glider-label.has-seen-dot .label-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seen-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%;box-shadow:0 0 0 1px #000a}
+.seen-dot.fresh{background:var(--accent)}
+.seen-dot.stale{background:var(--red)}
 .glider-icon.show-name .glider-label{opacity:1;visibility:visible}
 .replay-icon{background:transparent;border:0;overflow:visible;width:16px;height:16px}
 .replay-dot{width:12px;height:12px;margin:2px;border-radius:50%;background:var(--accent);border:2px solid var(--focus);box-shadow:0 1px 5px #0009}
