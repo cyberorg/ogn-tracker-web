@@ -412,6 +412,26 @@ const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
 
 const map = L.map('map', { zoomControl: false, closePopupOnClick: false, minZoom: 1, maxZoom: 16, layers: [terrainLayer] }).setView(initialCenter, initialZoom);
 
+// Dense marker fields are part of the map, so two fingers there must zoom the
+// map rather than the page. CSS touch-action handles modern browsers; the
+// legacy gesture/touch guards cover WebKit and targets such as DOM markers.
+function mapTouchTarget(event) {
+  const el = event.target && typeof event.target.closest === 'function' ? event.target : null;
+  return !!el && !!el.closest('#map, #map3d');
+}
+function preventMapPageZoomTouch(event) {
+  if (!mapTouchTarget(event) || event.touches.length < 2) return;
+  if (event.cancelable) event.preventDefault();
+}
+document.addEventListener('touchstart', preventMapPageZoomTouch, { passive: false, capture: true });
+document.addEventListener('touchmove', preventMapPageZoomTouch, { passive: false, capture: true });
+for (const gestureType of ['gesturestart', 'gesturechange', 'gestureend']) {
+  document.addEventListener(gestureType, event => {
+    if (!mapTouchTarget(event)) return;
+    if (event.cancelable) event.preventDefault();
+  }, { passive: false, capture: true });
+}
+
 // Locate lives on the map, stacked above the zoom control at bottom-left.
 const LocateControl = L.Control.extend({
   options: { position: 'bottomleft' },
