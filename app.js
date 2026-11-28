@@ -2493,8 +2493,8 @@ function s3dUpdateDomMarkerPositions() {
 }
 
 function s3dMarkerColor(item) {
-  // 3D markers use the same type colours as the aircraft-list stripes, not
-  // the per-track colour used by the flat 2D icons.
+  // 3D markers use the same type colours as the aircraft-list stripes and the
+  // 2D icons; the per-track colour is reserved for halo rings.
   const typeColor = item?.popupData ? typeStripeColor(item.popupData) : null;
   const inline = item?.el?.querySelector('.glider-wrap')?.style.getPropertyValue('--marker-color');
   return s3dResolveColor(typeColor, s3dResolveColor(inline, THEME.accent));
@@ -6727,11 +6727,18 @@ function signalBarsHtml(snr) {
   return `<span class="sig-bars ${cls}" title="Signal: ${snr.toFixed(1)} dB" aria-label="Signal ${snr.toFixed(1)} dB">${items}</span>`;
 }
 
-// Keep the focus halo derived from the marker/track colour so the ring around
-// a selected aircraft matches its list dot and track line.
-function markerColorStyle(color) {
+// CSS type-stripe values are var() references; resolve them to concrete hex
+// so the marker fill and translucent halo can be emitted as inline vars.
+function resolveCssColor(value, fallback = THEME.accent) {
+  return s3dResolveColor(value, fallback);
+}
+
+// The marker body follows the aircraft type stripe. The focus/selected halo
+// still follows the track colour so it matches the list dot and track line.
+function markerColorStyle(color, haloColor = color) {
   const hex = /^#[0-9a-f]{6}$/i.test(String(color)) ? String(color) : THEME.accent;
-  return `--marker-color:${hex};--halo-ring:${hex}55;--halo-glow:${hex}aa`;
+  const haloHex = /^#[0-9a-f]{6}$/i.test(String(haloColor)) ? String(haloColor) : hex;
+  return `--marker-color:${hex};--halo-ring:${haloHex}55;--halo-glow:${haloHex}aa`;
 }
 
 // Live label freshness: green under 3 minutes, red from 3 minutes onward.
@@ -6763,7 +6770,9 @@ function markerIcon(a) {
   const emergClass = isEmergency(a) ? ' emergency' : '';
   const focused = isLiveHudActive(a.address);
   const selected = selectedTracks.has(a.address) || buddies.has(a.address);
+  const markerColor = resolveCssColor(typeStripeColor(a), THEME.accent);
   const trackColor = selectedTracks.get(a.address)?.color || buddies.get(a.address)?.color || THEME.accent;
+  const trackColorHex = resolveCssColor(trackColor, THEME.accent);
   const name = esc(displayName(a));
   const nameHtml = `<div class="glider-label has-seen-dot" title="${name}"><span class="label-name">${name}</span>${liveSeenDotHtml(a)}</div>`;
   let svgPath = ICONS.default;
@@ -6778,7 +6787,7 @@ function markerIcon(a) {
   }
   return L.divIcon({
     className: `glider-icon${focused ? ' focused' : ''}${selected ? ' selected' : ''}`, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
-    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}${selected ? ' selected' : ''}" style="${markerColorStyle(trackColor)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg>${nameHtml}${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
+    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}${selected ? ' selected' : ''}" style="${markerColorStyle(markerColor, trackColorHex)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg>${nameHtml}${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
   });
 }
 
