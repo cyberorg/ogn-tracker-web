@@ -3714,10 +3714,10 @@ function togglePin(address) {
   requestAnimationFrame(() => focusListRow(address));
 }
 
-const buddyNames = new Map();
 const selectedTracks = new Map();
-// Selected aircraft are the Buddy list. Restore them before the first render so
-// their tracks, HUDs, halos and list rows all come back until manually removed.
+const buddies = new Map();
+// Buddies are saved only when the Buddy button is pressed. Restoring them also
+// selects their tracks so their HUDs, halos and list feedback come back on load.
 try {
   const savedBuddies = JSON.parse(localStorage.getItem(BUDDIES_STORAGE_KEY) || '[]');
   if (Array.isArray(savedBuddies)) {
@@ -3727,40 +3727,92 @@ try {
       if (!address || seen.has(address)) continue;
       seen.add(address);
       const color = /^#[0-9a-f]{6}$/i.test(String(item?.color || '')) ? String(item.color) : THEME.accent;
+      const name = typeof item?.name === 'string' && item.name.trim()
+        ? item.name.trim().slice(0, 64)
+        : address.toUpperCase();
+      buddies.set(address, { color, name });
       selectedTracks.set(address, { color, layer: null, points: [], reqId: 0 });
-      if (typeof item?.name === 'string' && item.name.trim()) {
-        buddyNames.set(address, item.name.trim().slice(0, 64));
-      }
     }
   }
 } catch (e) {}
 
+function normalizeBuddyAddress(address) {
+  const clean = typeof address === 'string' ? address.trim().toLowerCase() : '';
+  return clean || null;
+}
+
 function saveBuddies() {
-  const buddies = [];
-  for (const [address, entry] of selectedTracks) {
+  const list = [];
+  for (const [address, buddy] of buddies) {
     const live = findAircraftByAddress(address);
-    if (live) buddyNames.set(address, displayName(live));
-    buddies.push({
+    if (live) buddy.name = displayName(live);
+    list.push({
       address,
-      color: /^#[0-9a-f]{6}$/i.test(String(entry.color || '')) ? String(entry.color) : THEME.accent,
-      name: buddyNames.get(address) || address.toUpperCase()
+      color: /^#[0-9a-f]{6}$/i.test(String(buddy.color || '')) ? String(buddy.color) : THEME.accent,
+      name: buddy.name || address.toUpperCase()
     });
   }
-  try { localStorage.setItem(BUDDIES_STORAGE_KEY, JSON.stringify(buddies)); } catch (e) {}
+  try { localStorage.setItem(BUDDIES_STORAGE_KEY, JSON.stringify(list)); } catch (e) {}
 }
 
 function syncBuddyNames() {
   let changed = false;
-  for (const address of selectedTracks.keys()) {
+  for (const [address, buddy] of buddies) {
     const live = findAircraftByAddress(address);
     if (!live) continue;
     const name = displayName(live);
-    if (buddyNames.get(address) !== name) {
-      buddyNames.set(address, name);
+    if (buddy.name !== name) {
+      buddy.name = name;
       changed = true;
     }
   }
   return changed;
+}
+
+function addBuddy(address, color = null) {
+  const key = normalizeBuddyAddress(address);
+  if (!key) return false;
+  const target = findAircraftByAddress(key);
+  const track = selectedTracks.get(key);
+  const existing = buddies.get(key);
+  const savedColor = existing && /^#[0-9a-f]{6}$/i.test(String(existing.color || '')) ? String(existing.color) : null;
+  const chosen = /^#[0-9a-f]{6}$/i.test(String(color || ''))
+    ? String(color)
+    : savedColor || (/^#[0-9a-f]{6}$/i.test(String(track?.color || '')) ? String(track.color) : pickTrackColor());
+  if (!existing) {
+    buddies.set(key, { color: chosen, name: target ? displayName(target) : key.toUpperCase() });
+  } else if (!savedColor) {
+    existing.color = chosen;
+  }
+  if (!selectedTracks.has(key)) {
+    selectedTracks.set(key, { color: chosen, layer: null, points: [], reqId: 0 });
+    activeTrackAddress = key;
+    updateUrlHash();
+    syncClearTracksButton();
+    loadTrack(key);
+  }
+  saveBuddies();
+  updateListHint();
+  render();
+  requestAnimationFrame(() => focusListRow(key));
+  return true;
+}
+
+function removeBuddy(address) {
+  const key = normalizeBuddyAddress(address);
+  if (!key || !buddies.has(key)) return false;
+  buddies.delete(key);
+  saveBuddies();
+  removeTrack(key);
+  render();
+  requestAnimationFrame(() => focusListRow(key));
+  return true;
+}
+
+function toggleBuddy(address) {
+  const key = normalizeBuddyAddress(address);
+  if (!key) return false;
+  return buddies.has(key) ? removeBuddy(key) : addBuddy(key);
 }
 
 syncClearTracksButton();
@@ -4602,12 +4654,10 @@ function removeTrack(address) {
     if (entry.layer) map.removeLayer(entry.layer);
     selectedTracks.delete(address);
   }
-  buddyNames.delete(address);
   if (activeTrackAddress === address) {
     activeTrackAddress = [...selectedTracks.keys()].pop() || null;
     updateUrlHash();
   }
-  saveBuddies();
   updateListHint();
   syncClearTracksButton();
   sync3DTracks();
@@ -4619,9 +4669,7 @@ function clearAllTracks() {
     if (entry.layer) map.removeLayer(entry.layer);
   }
   selectedTracks.clear();
-  buddyNames.clear();
   activeTrackAddress = null;
-  saveBuddies();
   updateListHint();
   updateUrlHash();
   syncClearTracksButton();
@@ -5022,9 +5070,7 @@ function toggleSelection(address, openOnMap = false) {
     removeTrack(address);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
-    buddyNames.set(address, target ? displayName(target) : address.toUpperCase());
     activeTrackAddress = address;
-    saveBuddies();
     updateUrlHash();
     syncClearTracksButton();
     loadTrack(address);
@@ -5819,13 +5865,13 @@ function render24hAlertsSummary(nowMs) {
 
 function buildBuddyRowHtml(address, entry, nowMs) {
   const live = findAircraftByAddress(address);
-  const name = live ? displayName(live) : (buddyNames.get(address) || address.toUpperCase());
+  const name = live ? displayName(live) : (entry.name || address.toUpperCase());
   const color = /^#[0-9a-f]{6}$/i.test(String(entry.color || '')) ? String(entry.color) : THEME.accent;
   const statusText = live ? getDisplayStatus(live) : '';
   const statusHtml = statusText ? `<br><span style="color:var(--accent);font-weight:600">${esc(statusText)}</span>` : '';
   const meta = live
     ? esc([displayRegistration(live), displayModel(live), typeName(live)].filter(Boolean).join(' · '))
-    : esc(buddyNames.get(address) ? 'Saved buddy · not live in current view' : address.toUpperCase());
+    : esc(entry.name ? 'Saved buddy · not live in current view' : address.toUpperCase());
   const ageSec = live ? Math.max(0, Math.floor((nowMs - live.receivedAtMs) / 1000)) : null;
   const alt = live && Number.isFinite(live.altitude) ? fmtAlt(live.altitude) : '—';
   const age = ageSec == null ? 'saved' : fmtAge(ageSec);
@@ -5845,7 +5891,7 @@ function renderBuddiesSummary(nowMs) {
   if (!box) return;
   if (syncBuddyNames()) saveBuddies();
 
-  if (!selectedTracks.size) {
+  if (!buddies.size) {
     box.hidden = true;
     box.innerHTML = '';
     if (head) head.hidden = true;
@@ -5858,10 +5904,10 @@ function renderBuddiesSummary(nowMs) {
     head.classList.toggle('collapsed', buddiesCollapsed);
   }
   if (toggle) toggle.setAttribute('aria-expanded', String(!buddiesCollapsed));
-  if (countEl) countEl.textContent = String(selectedTracks.size);
+  if (countEl) countEl.textContent = String(buddies.size);
   box.hidden = buddiesCollapsed;
-  const rows = [...selectedTracks.entries()]
-    .map(([address, entry]) => ({ address, entry, name: buddyNames.get(address) || address.toUpperCase() }))
+  const rows = [...buddies.entries()]
+    .map(([address, entry]) => ({ address, entry, name: entry.name || address.toUpperCase() }))
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
   box.innerHTML = `<div class="aircraft-list alerts-list buddies-list" role="listbox" aria-label="Buddies">${rows.map(r => buildBuddyRowHtml(r.address, r.entry, nowMs)).join('')}</div>`;
 }
@@ -6863,6 +6909,7 @@ function rowSignature(a) {
     rType, isEmergency(a) ? 1 : 0, a.altitude ?? '', a.speed ?? '', a.climb ?? '', a.snr ?? '',
     statusText, statusColor(a, statusText),
     track ? track.color : '', pinnedAircraft.has(a.address) ? 1 : 0,
+    buddies.has(a.address) ? 1 : 0,
     followedAddress === a.address ? 1 : 0,
     isLiveHudActive(a.address) ? 1 : 0,
     rxStats ? rxStats.count : '',
@@ -6878,11 +6925,14 @@ function buildRowHtml(a, now) {
   const focusedClass = isLiveHudActive(a.address) ? ' focused' : '';
   const isPinned = pinnedAircraft.has(a.address);
   const pinnedClass = isPinned ? ' pinned' : '';
+  const isBuddy = buddies.has(a.address);
+  const buddyClass = isBuddy ? ' active' : '';
   const emergClass = isEmergency(a) ? ' emergency' : '';
   const rType = getResolvedType(a);
   const statusText = getDisplayStatus(a);
   const statusColorValue = statusColor(a, statusText);
   const stripeColor = typeStripeColor(a);
+  const nameText = esc(displayName(a));
 
   const wxCompactHtml = a.weather ? formatWeatherHtml(a.weather, true) : '';
   const metrics = rType === 15
@@ -6892,6 +6942,7 @@ function buildRowHtml(a, now) {
   const metricsHtml = metrics.length ? `<br>${metrics.join(' · ')}` : '';
   const statusHtml = statusText ? `<br><span style="color:${statusColorValue};font-weight:600">${esc(statusText)}</span>` : '';
   const trackDotHtml = trackEntry ? `<span class="track-dot" style="background:${trackEntry.color}" title="Track shown"></span>` : '';
+  const buddyBtnHtml = `<button type="button" class="buddy-btn${buddyClass}" data-buddy="${esc(a.address)}" title="${isBuddy ? 'Remove' : 'Add'} ${nameText} ${isBuddy ? 'from' : 'to'} Buddies" aria-label="${isBuddy ? 'Remove' : 'Add'} ${nameText} ${isBuddy ? 'from' : 'to'} Buddies" aria-pressed="${isBuddy ? 'true' : 'false'}">${isBuddy ? '★' : '☆'}</button>`;
 
   let rightColHtml = `${fmtAlt(a.altitude)}<div class="age-row">${signalBarsHtml(a.snr)}<span class="age" data-ts="${a.receivedAtMs}">${fmtAge(ageSec)}</span></div>`;
   let altClass = 'alt';
@@ -6903,14 +6954,12 @@ function buildRowHtml(a, now) {
   }
   if (rType !== 15) {
     const isFollowed = followedAddress === a.address;
-    const isBuddy = selectedTracks.has(a.address);
-    const name = esc(displayName(a));
-    rightColHtml += `<div class="row-actions"><button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${name}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button><button type="button" class="buddy-btn${isBuddy ? ' active' : ''}" data-buddy="${esc(a.address)}" title="${isBuddy ? 'Remove' : 'Add'} ${name} ${isBuddy ? 'from' : 'to'} Buddies" aria-pressed="${isBuddy ? 'true' : 'false'}">+ Buddies</button></div>`;
+    rightColHtml += `<button type="button" class="follow-btn${isFollowed ? ' active' : ''}" data-follow="${esc(a.address)}" title="${isFollowed ? 'Unfollow' : 'Follow'} ${nameText}" aria-pressed="${isFollowed}">${isFollowed ? '◎ Unfollow' : '◎ Follow'}</button>`;
   }
 
   const label = `${displayName(a)} ${statusText ? '- ' + statusText : ''}`.trim();
   return `<div class="aircraft${emergClass}${pinnedClass}${isSelected}${focusedClass}" data-key="${esc(a.address)}" tabindex="0" role="option" aria-selected="${trackEntry ? 'true' : 'false'}" aria-label="${esc(label)}">
-    <div class="stripe" style="background:${stripeColor}" title="${esc(typeName(a))}"></div><div><div class="callsign">${trackDotHtml}${esc(displayName(a))}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'} ${esc(displayName(a))}" aria-pressed="${isPinned ? 'true' : 'false'}">📌</button></div>
+    <div class="stripe" style="background:${stripeColor}" title="${esc(typeName(a))}"></div><div><div class="callsign">${trackDotHtml}${nameText}<button type="button" class="pin-btn${pinnedClass}" data-pin="${esc(a.address)}" title="${isPinned ? 'Unpin' : 'Pin to top'}" aria-label="${isPinned ? 'Unpin' : 'Pin to top'} ${nameText}" aria-pressed="${isPinned ? 'true' : 'false'}">📌</button>${buddyBtnHtml}</div>
     <div class="meta">${esc([displayRegistration(a), displayModel(a), typeName(a)].filter(Boolean).join(' · '))}${statusHtml}${metricsHtml}${wxListHtml}</div></div>
     <div class="${altClass}">${rightColHtml}</div>
   </div>`;
@@ -7327,8 +7376,7 @@ $('buddiesSummary').addEventListener('click', e => {
   const remove = e.target.closest('[data-remove-buddy]');
   if (remove) {
     e.stopPropagation();
-    removeTrack(remove.dataset.removeBuddy);
-    render();
+    removeBuddy(remove.dataset.removeBuddy);
     return;
   }
   const row = e.target.closest('[data-buddy-addr]');
@@ -7371,7 +7419,7 @@ $('aircraftList').addEventListener('click', e => {
   const buddyBtn = e.target.closest('.buddy-btn');
   if (buddyBtn) {
     e.stopPropagation();
-    toggleSelection(buddyBtn.dataset.buddy, false);
+    toggleBuddy(buddyBtn.dataset.buddy);
     return;
   }
   const row = e.target.closest('.aircraft');
@@ -7400,7 +7448,7 @@ $('aircraftList').addEventListener('keydown', e => {
     const buddyBtn = e.target.closest('.buddy-btn');
     if (buddyBtn) {
       e.preventDefault();
-      toggleSelection(buddyBtn.dataset.buddy, false);
+      toggleBuddy(buddyBtn.dataset.buddy);
       return;
     }
     e.preventDefault();
@@ -7420,7 +7468,7 @@ $('aircraftList').addEventListener('keydown', e => {
   } else if (row.contains(e.target) && (e.key === 'b' || e.key === 'B')) {
     e.preventDefault();
     e.stopPropagation();
-    toggleSelection(row.dataset.key, false);
+    toggleBuddy(row.dataset.key);
   } else if (row.contains(e.target) && (e.key === 'c' || e.key === 'C')) {
     e.preventDefault();
     e.stopPropagation();
