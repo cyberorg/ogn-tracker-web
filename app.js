@@ -2197,6 +2197,31 @@ function s3dCreatePopupController(key) {
   return controller;
 }
 
+// Refresh an already-open custom popup used in 3D mode. Unlike Leaflet
+// popups, these are not in `openPopups`, so track/bargo updates must call this
+// directly or the popup would wait for the next live poll to rebuild.
+function refresh3DPopup(key, data = null) {
+  const st = map3dDomPopupState.get(key);
+  if (!st?.popup?.isOpen()) return false;
+  const item = map3dDomMarkers.get(key);
+  const source = data || item?.popupData || findAircraftByAddress(key.startsWith('live:') ? key.slice(5) : key);
+  if (!source) return false;
+  const html = popup(source);
+  if (st.popup.setHTML(html, html)) {
+    requestAnimationFrame(() => {
+      if (!st.popup?.isOpen()) return;
+      s3dBind2DPopupHandlers(st.popup.getElement(), key, source.address || key);
+      s3dPositionPopup(st.popup.getElement());
+    });
+  }
+  return true;
+}
+
+function refresh3DPopupForAddress(address, data = null) {
+  const key = `live:${String(address || '').toLowerCase()}`;
+  return refresh3DPopup(key, data);
+}
+
 function s3dOpenPopupForKey(key, dataObj) {
   if (!map3d || !dataObj) return;
   for (const [otherKey, st] of map3dDomPopupState.entries()) {
@@ -2603,19 +2628,9 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
   item.alt = alt;
   s3dRefreshMarkerStyle(item);
   s3dUpdateDomMarkerPosition(item);
-  const st = map3dDomPopupState.get(key);
-  if (st && st.popup && st.popup.isOpen() && popupData) {
-    const html = popup(popupData);
-    // Live ticks usually produce identical popup HTML; only tear down and
-    // rebind the popup DOM when its content actually changed.
-    if (st.popup.setHTML(html, html)) {
-      requestAnimationFrame(() => {
-        if (!st.popup?.isOpen()) return;
-        s3dBind2DPopupHandlers(st.popup.getElement(), key, popupData.address);
-        s3dPositionPopup(st.popup.getElement());
-      });
-    }
-  }
+  // Live ticks usually produce identical popup HTML; refresh3DPopup() skips
+  // the DOM rebuild when the signature is unchanged.
+  refresh3DPopup(key, popupData);
 }
 
 function s3dClearDomMarkers(prefix = '') {
@@ -4508,6 +4523,9 @@ function setBaroEnabled(on) {
   for (const [address, marker] of markers) {
     if (marker.isPopupOpen()) refreshMarkerPopup(address);
   }
+  for (const key of map3dDomPopupState.keys()) {
+    refresh3DPopup(key);
+  }
 }
 
 function toggleFollow(address) {
@@ -4980,6 +4998,7 @@ async function loadTrack(address) {
     sync3DTracks();
     syncVarioLegend();
     refreshMarkerPopup(address);
+    refresh3DPopupForAddress(address);
     return true;
   } catch (err) {
     console.warn('Track fetch failed:', err);
@@ -7090,6 +7109,9 @@ function refreshOpenSoundingPopups() {
   for (const p of openPopups) {
     const address = p?._source?._data?.address;
     if (address && selectedTracks.has(address)) refreshOpenPopupForAddress(address);
+  }
+  for (const key of map3dDomPopupState.keys()) {
+    refresh3DPopup(key);
   }
 }
 
