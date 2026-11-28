@@ -417,10 +417,13 @@ html.list-mode .list-back-to-map-row{display:flex;justify-content:center;flex:0 
   header{position:sticky;top:0;z-index:1000;align-items:center;flex-wrap:wrap;gap:8px;padding:10px}
   .sidebar-chrome{position:sticky;top:var(--header-h);z-index:900;background:var(--panel);border-bottom:1px solid var(--line)}
   html.list-mode,html.list-mode body{overflow:hidden;overscroll-behavior:none}
-  html.list-mode:not(.list-exit) header{display:none}
+  /* Keep the header in layout while hidden; otherwise exit adds 44px and
+     shortens the slide, which makes the down direction feel different. */
+  html.list-mode header{visibility:hidden;pointer-events:none}
   html.list-mode .map-wrap{visibility:hidden;pointer-events:none;transition:visibility 0s linear 240ms}
-  html.list-mode .sidebar{position:fixed;top:var(--header-h);left:0;right:0;bottom:0;height:auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;z-index:800}
-  /* Bottom-sheet slide: the list rises over the map and drops back down. */
+  html.list-mode .sidebar{position:fixed;top:0;left:0;right:0;bottom:0;height:auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;z-index:800}
+  /* Bottom-sheet slide: the list rises over the map and drops back down.
+     The header stays hidden for the whole slide in both directions. */
   html.list-mode:is(.list-enter,.list-exit) .sidebar{transform:translateY(100%)}
   html.list-mode.list-exit .map-wrap{visibility:visible;transition:none}
   .list-snap .sidebar{transition:none}

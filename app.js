@@ -8677,13 +8677,11 @@ function syncHeaderUi() {
 }
 function syncStickyTop() {
   if (!siteHeader) return;
-  // The header is hidden in list mode; the fixed list must start at the top.
-  // On exit the header comes back before the slide, so reveal its height too.
-  const classes = document.documentElement.classList;
-  const hidden = classes.contains('list-mode') && !classes.contains('list-exit');
+  // The header remains in layout even while visually hidden in list mode, so
+  // --header-h must always reflect its real height. Keeping it constant avoids
+  // a 44px jump and makes both slide directions travel the same distance.
   document.documentElement.style.setProperty(
-    '--header-h',
-    hidden ? '0px' : `${siteHeader.getBoundingClientRect().height}px`
+    '--header-h', `${siteHeader.getBoundingClientRect().height}px`
   );
 }
 function cancelHeaderAutoClose() {
@@ -8819,7 +8817,8 @@ function enterListMode() {
   const scrollTop = window.scrollY || window.pageYOffset || 0;
   listModeDocTop = sidebar.getBoundingClientRect().top + scrollTop;
   listMode = true;
-  window.scrollTo(0, listModeDocTop);
+  // Leave the document where it is: the fixed sheet slides over the map that
+  // is already on screen, instead of jumping down to the list's flow position.
   rootEl.classList.remove('list-exit', 'list-snap');
   rootEl.classList.add('list-mode', 'list-enter');
   sync3DMapVisibility();
@@ -8838,7 +8837,6 @@ function exitListMode(returnToMap) {
   listMode = false;
   rootEl.classList.remove('list-enter');
   rootEl.classList.add('list-exit');
-  syncStickyTop();
   clearListModeAnimTimer();
   listModeAnimTimer = setTimeout(() => {
     listModeAnimTimer = null;
