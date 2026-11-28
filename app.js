@@ -49,6 +49,21 @@ const THEME = (() => {
   };
 })();
 
+function s3dRefreshThemeColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+  Object.assign(THEME, {
+    accent: v('--accent', THEME.accent),
+    yellow: v('--yellow', THEME.yellow),
+    red: v('--red', THEME.red),
+    text: v('--text', THEME.text),
+    bg: v('--bg', THEME.bg),
+    muted: v('--muted', THEME.muted)
+  });
+  s3dClearCssColorCache();
+  for (const item of map3dDomMarkers.values()) s3dRefreshMarkerStyle(item);
+}
+
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const cleanName = s => {
   const raw = String(s ?? '');
@@ -773,12 +788,32 @@ const s3dTerrainElevationCache = new Map();
 const map3dDomMarkers = new Map();       // key -> { el, lat, lon, alt, html, isFocus, isReplay }
 const map3dDomPopupState = new Map();    // key -> { popup, detailsOpen }
 
+// CSS custom properties are static for a theme, so resolve each var() once
+// instead of calling getComputedStyle() for every marker on every frame.
+const s3dCssVarCache = new Map();
+
+function s3dClearCssColorCache() {
+  s3dCssVarCache.clear();
+}
+
+const s3dColorSchemeQuery = window.matchMedia?.('(prefers-color-scheme: dark)');
+if (s3dColorSchemeQuery) {
+  const onColorSchemeChange = () => s3dRefreshThemeColors();
+  if (s3dColorSchemeQuery.addEventListener) s3dColorSchemeQuery.addEventListener('change', onColorSchemeChange);
+  else if (s3dColorSchemeQuery.addListener) s3dColorSchemeQuery.addListener(onColorSchemeChange);
+}
+
 function s3dResolveColor(value, fallback) {
   const raw = String(value ?? '').trim();
   if (!raw) return fallback;
   const varMatch = raw.match(/^var\(\s*(--[\w-]+)\s*\)$/);
   if (varMatch) {
-    return getComputedStyle(document.documentElement).getPropertyValue(varMatch[1]).trim() || fallback;
+    const name = varMatch[1];
+    if (!s3dCssVarCache.has(name)) {
+      s3dCssVarCache.set(name,
+        getComputedStyle(document.documentElement).getPropertyValue(name).trim());
+    }
+    return s3dCssVarCache.get(name) || fallback;
   }
   return raw;
 }
@@ -1300,6 +1335,10 @@ function s3dLineRadius(points, widthPx) {
 // the offset of each ring vertex from its centre point as the zoom changes.
 function s3dResizeThreeLines(zoom) {
   if (!s3dArrowLayer?.lines || !Number.isFinite(zoom)) return;
+  // Rebuilt tubes already bake in the current zoom. Skip the per-ring rescan
+  // unless the camera zoom actually changed since the last resize.
+  if (s3dArrowLayer.lastLineZoom === zoom) return;
+  s3dArrowLayer.lastLineZoom = zoom;
   for (const group of Object.values(s3dArrowLayer.lines)) {
     for (const tube of group.children || []) {
       const info = tube.userData.lineGeom;
@@ -1340,6 +1379,13 @@ function s3dCreateArrowLayer() {
     renderingMode: '3d',
     models: new Map(),
     lines,
+    // Reused every frame: MapLibre renders continuously, so allocating these
+    // per marker/frame is avoidable garbage collection pressure.
+    _scratchMatrix: new THREE.Matrix4(),
+    _scratchScale: new THREE.Vector3(),
+    _scratchRotation: new THREE.Matrix4(),
+    _seenKeys: new Set(),
+    lastLineZoom: null,
     onAdd(map, gl) {
       this.map = map;
       this.camera = new THREE.Camera();
@@ -1353,7 +1399,8 @@ function s3dCreateArrowLayer() {
       const matrix = args?.defaultProjectionData?.mainMatrix;
       if (!matrix || !this.renderer || !this.scene || !map3dDomMarkers) return;
       s3dResizeThreeLines(this.map.getZoom());
-      const seen = new Set();
+      const seen = this._seenKeys;
+      seen.clear();
       for (const [key, item] of map3dDomMarkers.entries()) {
         if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
         seen.add(key);
@@ -1362,9 +1409,10 @@ function s3dCreateArrowLayer() {
           if (hiddenModel) hiddenModel.visible = false;
           continue;
         }
-        const type = getResolvedType(item.popupData || {});
-        const color = s3dResolveColor(s3dMarkerColor(item), THEME.accent);
-        const templateKey = s3dTemplateKey(type, color);
+        // Refreshed once per marker upsert, not once per render frame.
+        const type = item.s3dType || getResolvedType(item.popupData || {});
+        const color = item.s3dColor || s3dResolveColor(s3dMarkerColor(item), THEME.accent);
+        const templateKey = item.s3dTemplateKey || s3dTemplateKey(type, color);
         let model = this.models.get(key);
         if (!model || model.userData.templateKey !== templateKey) {
           if (model) { this.scene.remove(model); s3dDisposeObject(model); }
@@ -1386,14 +1434,14 @@ function s3dCreateArrowLayer() {
         const scaleFactor = metersPerPixel * markerPx / model.userData.modelSize;
         const course = Number(item.popupData?.course);
         const rot = Number.isFinite(course) ? -course * Math.PI / 180 : 0;
-        const m = new THREE.Matrix4()
+        const m = this._scratchMatrix
           .makeTranslation(mc.x, mc.y, mc.z)
-          .scale(new THREE.Vector3(unit * scaleFactor, -unit * scaleFactor, unit * scaleFactor))
-          .multiply(new THREE.Matrix4().makeRotationZ(rot));
+          .scale(this._scratchScale.set(unit * scaleFactor, -unit * scaleFactor, unit * scaleFactor))
+          .multiply(this._scratchRotation.makeRotationZ(rot));
         model.matrixAutoUpdate = false;
         model.matrix.copy(m);
       }
-      for (const [key, model] of [...this.models.entries()]) {
+      for (const [key, model] of this.models) {
         if (seen.has(key)) continue;
         this.scene.remove(model);
         s3dDisposeObject(model);
@@ -1511,6 +1559,8 @@ function s3dReplaceThreeLines(group, segments) {
     tube.frustumCulled = false;
     group.add(tube);
   }
+  const zoomNow = map3d?.getZoom?.();
+  if (s3dArrowLayer && Number.isFinite(zoomNow)) s3dArrowLayer.lastLineZoom = zoomNow;
 }
 
 function s3dSyncThreeLines() {
@@ -1971,6 +2021,15 @@ function s3dMarkerColor(item) {
   return s3dResolveColor(typeColor, s3dResolveColor(inline, THEME.accent));
 }
 
+function s3dRefreshMarkerStyle(item) {
+  if (!item) return;
+  const type = getResolvedType(item.popupData || {});
+  const color = s3dResolveColor(s3dMarkerColor(item), THEME.accent);
+  item.s3dType = type;
+  item.s3dColor = color;
+  item.s3dTemplateKey = s3dTemplateKey(type, color);
+}
+
 function s3dMarkerGeometry() {
   const features = [];
   if (!map3d || !map3dActive) return s3dFeatureCollection(features);
@@ -2046,6 +2105,7 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
   item.lat = lat;
   item.lon = lon;
   item.alt = alt;
+  s3dRefreshMarkerStyle(item);
   s3dUpdateDomMarkerPosition(item);
   const st = map3dDomPopupState.get(key);
   if (st && st.popup && st.popup.isOpen() && popupData) {
