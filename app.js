@@ -4899,6 +4899,7 @@ async function downloadIgc(address) {
 }
 
 const ALERT_FOCUS_ZOOM = 12;
+const SELECT_FOCUS_ZOOM = 12;
 
 // Jumping from an alert opens a centered popup, not a single-aircraft focus
 // mode. Reuse an already selected track, zoom to the alerted aircraft, then
@@ -5060,6 +5061,18 @@ function openAircraftOnMap(address, fallbackAircraft = null) {
   return true;
 }
 
+// Selecting an aircraft from the list should bring its marker into view and
+// show the popup. Track/HUD state stays in selectedTracks, so other selected
+// aircraft keep their tracks and HUDs; this is not a single focus mode.
+function focusSelectedAircraftOnMap(address) {
+  if (!address || replayActive || measureMode) return false;
+  const a = findAircraftByAddress(address);
+  if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return false;
+  map.setView([a.lat, a.lon], Math.max(map.getZoom(), SELECT_FOCUS_ZOOM), { animate: false });
+  openAircraftOnMap(address, a);
+  return true;
+}
+
 function toggleSelection(address, openOnMap = false) {
   const target = findAircraftByAddress(address);
   // A searched aircraft gets one render free of the type preference filters.
@@ -5074,7 +5087,10 @@ function toggleSelection(address, openOnMap = false) {
     updateUrlHash();
     syncClearTracksButton();
     loadTrack(address);
-    if (openOnMap && window.innerWidth <= 800) revealMapForListAction();
+    if (openOnMap) {
+      if (window.innerWidth <= 800) revealMapForListAction();
+      requestAnimationFrame(() => focusSelectedAircraftOnMap(address));
+    }
   }
   updateListHint();
   render();
