@@ -7841,16 +7841,25 @@ $('trackWindow').addEventListener('change', () => {
   for (const addr of selectedTracks.keys()) loadTrack(addr);
 });
 
-function smoothScrollToTarget(target) {
+/**
+ * Open the mobile aircraft list as a full-height panel. A short list cannot
+ * scroll the document far enough to reach the sidebar top, so entering list
+ * mode directly is required to keep any part of the map from showing.
+ */
+function revealAircraftList(target) {
   Promise.resolve(exitMapFullscreen()).catch(() => {}).finally(() => {
     requestAnimationFrame(() => {
+      if (compactMenuQuery.matches) {
+        enterListMode();
+        return;
+      }
       target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   });
 }
 
 $('scrollToListBtn')?.addEventListener('click', () => {
-  smoothScrollToTarget($('aircraftSidebar'));
+  revealAircraftList($('aircraftSidebar'));
 });
 
 const appRoot = document.querySelector('.app');
@@ -7951,9 +7960,8 @@ function syncScrollListTopBtn() {
 function scrollAircraftListToTop() {
   if (!listForTopBtn) return;
   if (compactMenuQuery.matches && !listMode) {
-    // Mirror the map's down arrow: same fullscreen exit and smooth scrollIntoView,
-    // landing with the Aircrafts/Stations sidebar at the top of the screen.
-    smoothScrollToTarget($('aircraftSidebar'));
+    // Mirror the map's down arrow: open the pinned full-viewport list directly.
+    revealAircraftList($('aircraftSidebar'));
   } else {
     // In list mode the sidebar is pinned and only this element scrolls.
     listForTopBtn.scrollTo({ top: 0, behavior: 'smooth' });
@@ -8036,9 +8044,9 @@ window.addEventListener('resize', syncListMode);
 syncListMode();
 
 // Mobile-only: ANY upward swipe starting outside the map (Leaflet #map or the
-// MapLibre #map3d overlay) triggers the same smooth scroll as the map's down
-// arrow, but only while the map is still on screen. Once it has scrolled away,
-// normal (desktop-like) scrolling resumes.
+// MapLibre #map3d overlay) opens the same full-height list panel as the map's
+// down arrow, but only while the map is still on screen. Once it has scrolled
+// away, normal (desktop-like) scrolling resumes.
 let outsideSwipe = null;
 let suppressOutsideClick = false;
 const OUTSIDE_SWIPE_PX = 40;
@@ -8046,7 +8054,7 @@ const OUTSIDE_SWIPE_PX = 40;
 function triggerOutsideSwipe() {
   suppressOutsideClick = true;
   setTimeout(() => { suppressOutsideClick = false; }, 400);
-  smoothScrollToTarget($('aircraftSidebar'));
+  revealAircraftList($('aircraftSidebar'));
 }
 
 document.addEventListener('touchstart', (e) => {
