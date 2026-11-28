@@ -3284,8 +3284,10 @@ function toggleFollow(address) {
 }
 
 // --- Shared follow-centering control (live and replay) ---
-// Leaflet zoom (MapLibre is +1). Follow auto-centering applies at zoom 13+.
-const FOLLOW_CENTER_MIN_ZOOM = 13;
+// Leaflet zoom (MapLibre is +1). Starting follow zooms in once, but automatic
+// centering has no zoom floor; it uses the screen-space edge rule below.
+const FOLLOW_START_ZOOM = 13;
+const FOLLOW_EDGE_MARGIN = 0.2;
 let followCenteringPaused = false;
 
 function activeFollowAddress() {
@@ -3317,42 +3319,61 @@ function focusLatLng() {
   return null;
 }
 
-// Offer Recenter only once the focused aircraft reaches the outer 20% of the
-// visible map (or leaves it). Small pans and ordinary map interaction do not
-// nag with an offer while the aircraft is still comfortably in view.
-function focusNearMapEdge() {
-  const addr = activeFollowAddress();
-  if (!addr) return false;
+function focusAltitude() {
+  if (replayActive) {
+    const p = replayPoints.find(x => x.id === replayFollowAddress);
+    return Number.isFinite(p?.alt) ? p.alt : null;
+  }
+  const a = aircraft.find(x => x.address === followedAddress);
+  return Number.isFinite(a?.altitude) ? a.altitude : null;
+}
+
+/**
+ * True when a point sits in the outer FOLLOW_EDGE_MARGIN band of the viewport.
+ * The check is screen-space so it behaves identically at every zoom level; in
+ * 3D it follows the aircraft's rendered position on the terrain rather than
+ * its ground shadow.
+ */
+function pointOutsideFollowBand(lat, lon, alt = null) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
   if (map3dReady && map3dActive) {
-    const key = replayActive ? 'rfocus:active' : `live:${addr}`;
-    const item = map3dDomMarkers.get(key);
     const canvas = map3d.getCanvas?.();
     const width = map3d.transform?.width || canvas?.clientWidth || 0;
     const height = map3d.transform?.height || canvas?.clientHeight || 0;
-    if (item && Number.isFinite(item.lon) && Number.isFinite(item.lat) && width && height) {
-      // Use the projected point rather than the DOM box: the marker element is
-      // hidden once it leaves the viewport, but Recenter must still appear.
-      const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
+    if (width && height) {
+      // Projected coordinates keep working after the marker element is hidden
+      // off-screen, so Recenter and auto-recenter still see the edge crossing.
+      const pt = s3dProject3DPoint(lon, lat, alt);
       if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) {
-        return pt.x < width * 0.2 || pt.x > width * 0.8 ||
-               pt.y < height * 0.2 || pt.y > height * 0.8;
+        return pt.x < width * FOLLOW_EDGE_MARGIN ||
+          pt.x > width * (1 - FOLLOW_EDGE_MARGIN) ||
+          pt.y < height * FOLLOW_EDGE_MARGIN ||
+          pt.y > height * (1 - FOLLOW_EDGE_MARGIN);
       }
     }
   }
-  const ll = focusLatLng();
   const size = map.getSize?.();
-  if (!ll || !size || !size.x || !size.y) return false;
-  const p = map.latLngToContainerPoint(ll);
-  return p.x < size.x * 0.2 || p.x > size.x * 0.8 ||
-         p.y < size.y * 0.2 || p.y > size.y * 0.8;
+  if (!size || !size.x || !size.y) return false;
+  const p = map.latLngToContainerPoint(L.latLng(lat, lon));
+  return p.x < size.x * FOLLOW_EDGE_MARGIN ||
+    p.x > size.x * (1 - FOLLOW_EDGE_MARGIN) ||
+    p.y < size.y * FOLLOW_EDGE_MARGIN ||
+    p.y > size.y * (1 - FOLLOW_EDGE_MARGIN);
 }
 
+function focusNearMapEdge() {
+  if (!activeFollowAddress()) return false;
+  const ll = focusLatLng();
+  return ll ? pointOutsideFollowBand(ll.lat, ll.lng, focusAltitude()) : false;
+}
+
+// Offer Recenter only while following is manually paused and the aircraft has
+// reached the outer 20% band. Inside that band the view is left alone.
 function syncRecenterButton() {
   const btn = $('recenterBtn');
   if (!btn) return;
   const addr = activeFollowAddress();
-  const needsRecenter = !!addr && followCenteringPaused &&
-    map.getZoom() >= FOLLOW_CENTER_MIN_ZOOM && focusNearMapEdge();
+  const needsRecenter = !!addr && followCenteringPaused && focusNearMapEdge();
   const sig = `${needsRecenter}:${addr || ''}`;
   if (sig === recenterBtnSig) return;
   recenterBtnSig = sig;
@@ -3463,7 +3484,8 @@ function focusFollowedOnMap(address) {
   const a = findAircraftByAddress(address);
   if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return false;
   // Zoom without animation so markercluster has settled before unclustering.
-  map.setView([a.lat, a.lon], FOLLOW_CENTER_MIN_ZOOM, { animate: false });
+  // This is only the one-time entry zoom; automatic centering has no zoom floor.
+  map.setView([a.lat, a.lon], FOLLOW_START_ZOOM, { animate: false });
   unclusterFollowedMarker(address);
   // In 3D this also corrects the camera for the aircraft's rendered altitude.
   centerOnFollowed(true, false, 0);
@@ -3476,11 +3498,6 @@ function centerOnFollowed(force = false, animate = true, panDuration = 0.2, alig
     stop3DFollowAlign();
     return false;
   }
-  if (!force && (followCenteringPaused || map.getZoom() < FOLLOW_CENTER_MIN_ZOOM)) {
-    stop3DFollowAlign();
-    syncRecenterButton();
-    return false;
-  }
   let lat, lon, alt = null;
   if (replayActive) {
     const p = replayPoints.find(x => x.id === addr);
@@ -3490,6 +3507,16 @@ function centerOnFollowed(force = false, animate = true, panDuration = 0.2, alig
     const a = aircraft.find(x => x.address === addr);
     if (!a) return false;
     lat = a.lat; lon = a.lon; alt = a.altitude ?? null;
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+
+  // Screen-space dead zone: inside the middle 60% of the viewport the aircraft
+  // is free to move and the camera stays still, at any zoom level. Only an edge
+  // crossing triggers a pan. A manual pan pauses following until that crossing.
+  if (!force && !pointOutsideFollowBand(lat, lon, alt)) {
+    if (followCenteringPaused) stop3DFollowAlign();
+    syncRecenterButton();
+    return false;
   }
   followCenteringPaused = false;
   syncRecenterButton();
@@ -3518,10 +3545,9 @@ function centerOnFollowed(force = false, animate = true, panDuration = 0.2, alig
     map.setView(dest, map.getZoom(), { animate: use3D ? false : animate, duration: panDuration });
   }
   if (use3D) {
-    // Deliberate jumps and replay use short eases; automatic live fixes jump
-    // straight to the target. Replay's ease finishes before the next 200 ms
-    // update so an in-flight animation cannot complete against stale terrain.
-    const ease3D = animate && (force || replayActive);
+    // Edge corrections now ease exactly like explicit recenters; replay keeps a
+    // shorter duration so the animation lands before the next 200 ms update.
+    const ease3D = animate;
     const duration3D = force ? Math.round(panDuration * 1000) : Math.round(panDuration * 600);
     if (ease3D) map3d.easeTo({ center: [dest.lng, dest.lat], duration: duration3D });
     else map3d.jumpTo({ center: [dest.lng, dest.lat] });
@@ -7350,8 +7376,8 @@ function startReplayPlayback() {
     maybeUpdateReplayTrackLine(wallNow);
     updateReplayFocusMarker();
     syncRecenterButton();
-    // Short animated pans keep high-zoom follow smooth; the 200ms throttle
-    // avoids a moveend storm on every animation frame.
+    // Short animated pans keep edge-triggered follow smooth at any zoom; the
+    // 200ms throttle avoids a moveend storm on every animation frame.
     if (wallNow - replayLastPanAtMs >= 200) {
       // Replay updates the focus marker every frame. Re-running the terrain
       // alignment loop on every throttled camera update makes the view jitter,
@@ -7582,7 +7608,7 @@ async function loadReplaySlice() {
     updateMarkerLabels();
     updateReplayFocusMarker();
     sync3DReplayPoints();
-    if (hasFocus) centerOnFollowed(false, false);
+    if (hasFocus) centerOnFollowed(false, true, 0.2, false);
   } catch (e) {}
 }
 
