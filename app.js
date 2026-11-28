@@ -6918,8 +6918,7 @@ $('aircraftList').addEventListener('click', e => {
   const followBtn = e.target.closest('.follow-btn');
   if (followBtn) {
     e.stopPropagation();
-    toggleFollow(followBtn.dataset.follow);
-    revealMapForListAction();
+    toggleFollowFromList(followBtn.dataset.follow);
     return;
   }
   const row = e.target.closest('.aircraft');
@@ -6942,8 +6941,7 @@ $('aircraftList').addEventListener('keydown', e => {
     const followBtn = e.target.closest('.follow-btn');
     if (followBtn) {
       e.preventDefault();
-      toggleFollow(followBtn.dataset.follow);
-      revealMapForListAction();
+      toggleFollowFromList(followBtn.dataset.follow);
       return;
     }
     e.preventDefault();
@@ -6959,8 +6957,7 @@ $('aircraftList').addEventListener('keydown', e => {
   } else if (row.contains(e.target) && (e.key === 'f' || e.key === 'F')) {
     e.preventDefault();
     e.stopPropagation();
-    toggleFollow(row.dataset.key);
-    revealMapForListAction();
+    toggleFollowFromList(row.dataset.key);
   } else if (row.contains(e.target) && (e.key === 'c' || e.key === 'C')) {
     e.preventDefault();
     e.stopPropagation();
@@ -8977,6 +8974,13 @@ function revealMapForListAction() {
   } else {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
+}
+
+/** Following from the list opens the map; unfollowing stays in the list. */
+function toggleFollowFromList(address) {
+  const wasFollowing = followedAddress === address;
+  toggleFollow(address);
+  if (!wasFollowing) revealMapForListAction();
 }
 
 function syncListMode() {
