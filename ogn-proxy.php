@@ -99,8 +99,11 @@ function track_point_distance_m(array $a, array $b): float {
  * Alias merging can produce two rows at the same second when OGN/FLR/FNT
  * prefixes disagree, and one relay can occasionally report an isolated bad
  * fix. Keep one point per timestamp, preferring the fix that fits the
- * surrounding track, then drop single-sample excursions whose neighbours
- * agree with each other. Without this, a one-second 1 km detour is drawn as a
+ * surrounding track, then drop short position/altitude excursions whose
+ * neighbours agree with each other. Two aliases can also alternate their
+ * altitude readings (e.g. a 150 m FLR/FNT disagreement), so the altitude
+ * guard covers runs of one or two fixes, not only a single sample. Without
+ * this, a one-second 1 km detour or a sawtooth altitude trace is drawn as a
  * long straight spike in both 2D and 3D.
  *
  * @param array<int,array{id:string,lat:float,lon:float,alt:?float,ts:int}> $rows
@@ -152,25 +155,54 @@ function clean_merged_track_rows(array $rows, string $preferredId): array {
     }
 
     $out = [];
-    foreach ($representatives as $i => $row) {
-        if ($i === 0 || $i === $count - 1) { $out[] = $row; continue; }
+    $i = 0;
+    while ($i < $count) {
+        $row = $representatives[$i];
+        if ($i === 0 || $i === $count - 1) { $out[] = $row; $i++; continue; }
         $prev = $out[count($out) - 1];
-        $next = $representatives[$i + 1];
-        $dPrev = track_point_distance_m($prev, $row);
-        $dNext = track_point_distance_m($row, $next);
-        $dAround = track_point_distance_m($prev, $next);
-        $dtPrev = (int)$row['ts'] - (int)$prev['ts'];
-        $dtNext = (int)$next['ts'] - (int)$row['ts'];
-        $spike = $dtPrev > 0 && $dtPrev <= 120 && $dtNext > 0 && $dtNext <= 120
-            && $dAround <= 250.0 && $dPrev >= 300.0 && $dNext >= 300.0
-            && $dPrev >= 4.0 * $dAround && $dNext >= 4.0 * $dAround;
-        if (!$spike && $prev['alt'] !== null && $row['alt'] !== null && $next['alt'] !== null) {
-            $altPrev = abs((float)$row['alt'] - (float)$prev['alt']);
-            $altNext = abs((float)$next['alt'] - (float)$row['alt']);
-            $altAround = abs((float)$next['alt'] - (float)$prev['alt']);
-            if ($altAround <= 100.0 && $altPrev >= 200.0 && $altNext >= 200.0) $spike = true;
+        $drop = 0;
+        for ($len = 1; $len <= 2 && $i + $len < $count; $len++) {
+            $next = $representatives[$i + $len];
+            $dtAround = (int)$next['ts'] - (int)$prev['ts'];
+            $dAround = track_point_distance_m($prev, $next);
+            if ($dtAround <= 0 || $dtAround > 240 || $dAround > 300.0) continue;
+
+            // A single isolated position excursion: the neighbours are close
+            // to each other while this fix is far from both.
+            if ($len === 1) {
+                $dPrev = track_point_distance_m($prev, $row);
+                $dNext = track_point_distance_m($row, $next);
+                if ($dPrev >= 300.0 && $dNext >= 300.0
+                    && $dPrev >= 4.0 * $dAround && $dNext >= 4.0 * $dAround) {
+                    $drop = 1;
+                    break;
+                }
+            }
+
+            // Alternating aliases can disagree by ~150 m for one or two fixes
+            // while position stays smooth. Drop the run if every point in it
+            // leaves the agreed altitude in the same direction.
+            if ($prev['alt'] === null || $next['alt'] === null) continue;
+            $run = array_slice($representatives, $i, $len);
+            $runAlts = array_column($run, 'alt');
+            if (in_array(null, $runAlts, true)) continue;
+            $baseAlt = (float)$prev['alt'];
+            $altAround = abs((float)$next['alt'] - $baseAlt);
+            if ($altAround > 100.0) continue;
+            $runSide = ((float)$runAlts[0] > $baseAlt) ? 1 : -1;
+            $sameSide = true;
+            foreach ($runAlts as $alt) {
+                if (((float)$alt > $baseAlt ? 1 : -1) !== $runSide
+                    || abs((float)$alt - $baseAlt) < 120.0) {
+                    $sameSide = false;
+                    break;
+                }
+            }
+            if ($sameSide) { $drop = $len; break; }
         }
-        if (!$spike) $out[] = $row;
+        if ($drop > 0) { $i += $drop; continue; }
+        $out[] = $row;
+        $i++;
     }
     return $out;
 }
@@ -896,14 +928,14 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
     if ($since !== false && $since !== null) {
         $cutoff     = max($now - 86400, min($now, $since));
-        $cacheKey   = 'trk3_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
+        $cacheKey   = 'trk4_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
         $metaWindow = max(0, $now - $cutoff);
     } else {
         $window = filter_input(INPUT_GET, 'window', FILTER_VALIDATE_INT);
         if ($window === false || $window === null) $window = 900;
         $window     = max(60, min(86400, $window));
         $cutoff     = $now - $window;
-        $cacheKey   = 'trk3_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
+        $cacheKey   = 'trk4_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
         $metaWindow = $window;
     }
 
