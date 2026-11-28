@@ -4736,11 +4736,21 @@ async function downloadIgc(address) {
   showToast(`${segments.length} IGC tracks downloaded`, 2400);
 }
 
+const ALERT_FOCUS_ZOOM = 12;
+
+// Jumping from an alert is a focus action, not a selection toggle. Reuse an
+// already selected track, zoom to the alerted aircraft, then open its popup.
 function jumpToAlertAddress(address) {
   const key = String(address || '').toLowerCase();
   if (!key) return;
   if (markers.has(key)) {
-    toggleSelection(key, true);
+    const liveA = findAircraftByAddress(key) || aircraft.find(x => x.address === key);
+    if (liveA && Number.isFinite(liveA.lat) && Number.isFinite(liveA.lon)) {
+      if (window.innerWidth <= 800) revealMapForListAction();
+      map.setView([liveA.lat, liveA.lon], Math.max(map.getZoom(), ALERT_FOCUS_ZOOM), { animate: false });
+    }
+    if (!selectedTracks.has(key)) toggleSelection(key, false);
+    focusAircraftOnMap(key, liveA);
     return;
   }
   const item = alerts24hHistory.get(key);
@@ -4769,7 +4779,7 @@ function jumpToAlertAddress(address) {
     const latStr = item.lat.toFixed(6), lonStr = item.lon.toFixed(6);
     const mapsUrl = `https://www.google.com/maps?q=${encodeURIComponent(latStr + ',' + lonStr)}`;
     const posText = altM != null ? `${latStr},${lonStr},${fmtAltCompact(altM)}` : `${latStr},${lonStr}`;
-    const shareUrl = `${location.href.replace(/#.*/, '')}#${item.lat.toFixed(4)},${item.lon.toFixed(4)},${Math.max(map.getZoom(), 12)},${encodeURIComponent(item.address)}`;
+    const shareUrl = `${location.href.replace(/#.*/, '')}#${item.lat.toFixed(4)},${item.lon.toFixed(4)},${Math.max(map.getZoom(), ALERT_FOCUS_ZOOM)},${encodeURIComponent(item.address)}`;
     const sarTxt = [
       `SAR Info: ${item.name}`,
       `Status: ${item.status || 'Unknown'}`,
@@ -4779,7 +4789,7 @@ function jumpToAlertAddress(address) {
       `Map: ${mapsUrl}`,
       `Tracker: ${shareUrl}`
     ].join('\n');
-    map.setView([item.lat, item.lon], Math.max(map.getZoom(), 12));
+    map.setView([item.lat, item.lon], Math.max(map.getZoom(), ALERT_FOCUS_ZOOM));
     L.popup({ ...POPUP_OPTIONS, maxWidth: 360 })
       .setLatLng([item.lat, item.lon])
       .setContent(`
