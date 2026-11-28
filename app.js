@@ -105,6 +105,10 @@ let measurePoints = [];
 let selectedMeasureIndex = -1;
 let measureLine = null;
 let measureMarkers = [];
+let measure3dLayer = null;
+let measure3dLine = null;
+let measure3dDots = [];
+let measure3dDrag = null;
 let replayTimeMode = 'browser'; // 'browser' clock or time at the current trackpoint
 const locationTzCache = new Map();
 
@@ -753,7 +757,10 @@ function s3dScheduleTerrainRefresh() {
     s3dTerrainElevationCache.clear();
     s3dReplayCenterSig = '';
     s3dScheduleLabelUpdate();
-    if (map3dActive) sync3DTracks();
+    if (map3dActive) {
+      sync3DTracks();
+      positionMeasure3D();
+    }
   });
 }
 
@@ -1575,6 +1582,79 @@ function s3dProject3DPoint(lng, lat, altMSL) {
   return map3d.project?.([lng, lat]) || null;
 }
 
+/** Inverse of s3dProject3DPoint for one fixed rendered altitude. */
+function s3dUnprojectAtElevation(px, py, elevation) {
+  if (!map3d) return null;
+  const Mc = window.maplibregl?.MercatorCoordinate;
+  const m = map3d.transform?._pixelMatrix3D;
+  const worldSize = map3d.transform?.worldSize;
+  if (!Mc || !m || m.length < 16 || !worldSize) return null;
+  try {
+    const a11 = m[0] - px * m[3];
+    const a12 = m[4] - px * m[7];
+    const a21 = m[1] - py * m[3];
+    const a22 = m[5] - py * m[7];
+    const b1 = px * (m[11] * elevation + m[15]) - (m[8] * elevation + m[12]);
+    const b2 = py * (m[11] * elevation + m[15]) - (m[9] * elevation + m[13]);
+    const det = a11 * a22 - a12 * a21;
+    if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return null;
+    const x = (b1 * a22 - a12 * b2) / det / worldSize;
+    const y = (a11 * b2 - b1 * a21) / det / worldSize;
+    const ll = new Mc(x, y, 0).toLngLat();
+    if (ll && Number.isFinite(ll.lat) && Number.isFinite(ll.lng)) {
+      return L.latLng(ll.lat, s3dWrapLon(ll.lng));
+    }
+  } catch (err) {
+    // Fall through; the flat unprojection is still usable as a fallback.
+  }
+  return null;
+}
+
+/**
+ * Screen point to ground coordinate in the 3D view. MapLibre's plain unproject
+ * lands on the sea-level plane, so refine against the DEM elevation at that
+ * coordinate to hit the terrain the user actually clicked.
+ */
+function s3dUnproject3DPoint(px, py) {
+  if (!map3d || !Number.isFinite(px) || !Number.isFinite(py)) return null;
+  let ll = null;
+  try { ll = map3d.unproject?.([px, py]); } catch (err) {}
+  if (!ll || !Number.isFinite(ll.lat) || !Number.isFinite(ll.lng)) return null;
+  ll = L.latLng(ll.lat, s3dWrapLon(ll.lng));
+  if (!map3d.transform?._pixelMatrix3D) return ll;
+
+  for (let iteration = 0; iteration < 4; iteration++) {
+    const elevation = s3dQueryTerrainElevation(ll.lng, ll.lat) ?? 0;
+    const next = s3dUnprojectAtElevation(px, py, elevation);
+    if (!next) break;
+    let dLon = next.lng - ll.lng;
+    if (dLon > 180) dLon -= 360;
+    else if (dLon < -180) dLon += 360;
+    const metersPerLng = 111320 * Math.max(0.2, Math.cos(next.lat * Math.PI / 180));
+    const shiftM = Math.hypot((next.lat - ll.lat) * 111320, dLon * metersPerLng);
+    ll = next;
+    if (shiftM < 0.5) break;
+  }
+  return ll;
+}
+
+/** Project a ground coordinate at its exact DEM elevation for overlay lines. */
+function s3dProjectGroundPoint(lng, lat) {
+  if (!map3d || !Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+  const Mc = window.maplibregl?.MercatorCoordinate;
+  const transform = map3d.transform;
+  if (Mc && transform && typeof transform.coordinatePoint === 'function' && transform._pixelMatrix3D) {
+    const elevation = s3dQueryTerrainElevation(lng, lat) ?? 0;
+    try {
+      const pt = transform.coordinatePoint(Mc.fromLngLat([lng, lat]), elevation, transform._pixelMatrix3D);
+      if (pt && Number.isFinite(pt.x) && Number.isFinite(pt.y)) return pt;
+    } catch (err) {
+      // Fall through to the flat projection.
+    }
+  }
+  return map3d.project?.([lng, lat]) || null;
+}
+
 // MapLibre's map center is the ground point under the middle of the viewport.
 // A pitched camera puts an elevated aircraft above that point, so following the
 // ground coordinate alone leaves the marker off-centre. Return the ground
@@ -1747,13 +1827,16 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
     ($('map3d') || map3d.getContainer()).appendChild(el);
     el.addEventListener('click', ev => {
       ev.stopPropagation();
+      const currentLat = item && Number.isFinite(item.lat) ? item.lat : lat;
+      const currentLon = item && Number.isFinite(item.lon) ? item.lon : lon;
       if (measureMode) {
-        addMeasurePoint(lat, lon);
+        addMeasurePoint(currentLat, currentLon);
         return;
       }
       if (opts.onClick) opts.onClick();
-      if (popupData) {
-        s3dOpenPopupForKey(key, popupData);
+      const currentPopup = item?.popupData || popupData;
+      if (currentPopup) {
+        s3dOpenPopupForKey(key, currentPopup);
       }
     });
     item = { el, lat, lon, alt, html: iconHtml, popupData };
@@ -1991,13 +2074,23 @@ function ensure3DMap() {
     })[0];
     const key = hit?.properties?.id;
     const item = key ? map3dDomMarkers.get(key) : null;
+    if (measureMode) {
+      const ll = item && Number.isFinite(item.lat) && Number.isFinite(item.lon)
+        ? L.latLng(item.lat, item.lon)
+        : s3dUnproject3DPoint(e.point.x, e.point.y);
+      if (ll) addMeasurePoint(ll.lat, ll.lng);
+      return;
+    }
     if (!item?.popupData) return;
     if (item.popupData.address && !selectedTracks.has(item.popupData.address)) {
       toggleSelection(item.popupData.address, false);
     }
     s3dOpenPopupForKey(key, item.popupData);
   });
-  map3d.on('render', s3dScheduleLabelUpdate);
+  map3d.on('render', () => {
+    s3dScheduleLabelUpdate();
+    positionMeasure3D();
+  });
   map3d.on('dragstart', () => { pauseFollowCentering(); });
   // User input must win over follow centering. Stop the 3D alignment loop in
   // the capture phase, before MapLibre starts its own drag/zoom handlers;
@@ -2012,7 +2105,11 @@ function ensure3DMap() {
 
 function resize3D() {
   if (!map3dReady) return;
-  requestAnimationFrame(() => { map3d.resize(); s3dScheduleLabelUpdate(); });
+  requestAnimationFrame(() => {
+    map3d.resize();
+    s3dScheduleLabelUpdate();
+    positionMeasure3D();
+  });
 }
 
 function sync3DFromLeaflet() {
@@ -2340,6 +2437,8 @@ function toggle3DView() {
   el3d.hidden = !map3dActive;
   $('mapWrap').classList.toggle('view3d', map3dActive);
   syncViewModeControl();
+  syncMeasureCursor();
+  renderMeasure();
   if (map3dActive) {
     set3DBaseStyle(BASE_TO_3D[currentLayerSelection().baseLayer] || 'liberty');
     resize3D();
@@ -4032,12 +4131,164 @@ function measureIcon() {
   });
 }
 
+function ensureMeasure3DElements() {
+  if (!map3d) return false;
+  if (measure3dLayer && measure3dLayer.isConnected) return true;
+  const host = $('map3d') || map3d.getContainer?.();
+  if (!host) return false;
+  const layer = document.createElement('div');
+  layer.className = 'measure-3d-layer';
+  layer.hidden = !map3dActive;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'measure-3d-svg');
+  measure3dLine = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  measure3dLine.setAttribute('class', 'measure-3d-line');
+  svg.appendChild(measure3dLine);
+  layer.appendChild(svg);
+  host.appendChild(layer);
+  measure3dLayer = layer;
+  measure3dDots = [];
+  return true;
+}
+
+function syncMeasureCursor() {
+  map.getContainer().style.cursor = measureMode ? 'crosshair' : '';
+  const canvas = map3d?.getCanvas?.();
+  if (canvas) canvas.style.cursor = measureMode ? 'crosshair' : '';
+  const container = map3d?.getContainer?.();
+  if (container) container.style.cursor = measureMode ? 'crosshair' : '';
+}
+
+/**
+ * Leaflet binds its own click handler when a popup is attached. Detach it while
+ * measuring so an aircraft click only places the point and never opens a popup.
+ */
+function setMeasurePopupDetached(marker, detached) {
+  if (!marker || typeof marker._openPopup !== 'function') return;
+  if (!!marker._measurePopupDetached === !!detached) return;
+  if (detached) {
+    marker.off('click', marker._openPopup, marker);
+    if (typeof marker._openPopupOnKeypress === 'function') {
+      marker.off('keypress', marker._openPopupOnKeypress, marker);
+    }
+  } else {
+    marker.on('click', marker._openPopup, marker);
+    if (typeof marker._openPopupOnKeypress === 'function') {
+      marker.on('keypress', marker._openPopupOnKeypress, marker);
+    }
+  }
+  marker._measurePopupDetached = !!detached;
+}
+
+function syncMarkerPopupHandlersForMeasure() {
+  for (const marker of markers.values()) setMeasurePopupDetached(marker, measureMode);
+  for (const marker of searchResultMarkers.values()) setMeasurePopupDetached(marker, measureMode);
+}
+
+function positionMeasure3D() {
+  if (!measure3dLayer || !map3dActive || !map3d) return;
+  measure3dLayer.hidden = false;
+  const width = map3d.transform?.width || map3d.getContainer?.()?.clientWidth || 0;
+  const height = map3d.transform?.height || map3d.getContainer?.()?.clientHeight || 0;
+  const svg = measure3dLayer.querySelector('svg');
+  if (svg && width && height) svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const projected = [];
+  measurePoints.forEach(([lat, lon], index) => {
+    const point = s3dProjectGroundPoint(lon, lat);
+    projected.push(point);
+    const el = measure3dDots[index];
+    if (!el) return;
+    if (!point) {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = '';
+    el.style.transform = `translate(-50%, -50%) translate(${point.x.toFixed(1)}px, ${point.y.toFixed(1)}px)`;
+  });
+  if (measure3dLine) {
+    const ready = projected.length >= 2 && projected.every(Boolean);
+    measure3dLine.setAttribute(
+      'points',
+      ready ? projected.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ') : ''
+    );
+  }
+}
+
+function startMeasure3DDrag(event, index) {
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  selectMeasurePoint(index);
+  const el = event.currentTarget;
+  el.classList.add('dragging');
+  try { el.setPointerCapture(event.pointerId); } catch (_) {}
+  try { map3d?.dragPan?.disable(); } catch (_) {}
+  measure3dDrag = { index, pointerId: event.pointerId, el };
+
+  const move = ev => {
+    if (!measure3dDrag || ev.pointerId !== measure3dDrag.pointerId) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const host = map3d?.getContainer?.() || $('map3d');
+    const rect = host?.getBoundingClientRect();
+    if (!rect) return;
+    const ll = s3dUnproject3DPoint(ev.clientX - rect.left, ev.clientY - rect.top);
+    if (!ll) return;
+    measurePoints[index] = [ll.lat, ll.lng];
+    updateMeasureReadout();
+    positionMeasure3D();
+  };
+  const stop = ev => {
+    if (ev && ev.pointerId !== undefined && ev.pointerId !== measure3dDrag?.pointerId) return;
+    el.removeEventListener('pointermove', move);
+    el.removeEventListener('pointerup', stop);
+    el.removeEventListener('pointercancel', stop);
+    el.removeEventListener('lostpointercapture', stop);
+    el.classList.remove('dragging');
+    try { map3d?.dragPan?.enable(); } catch (_) {}
+    measure3dDrag = null;
+    syncMeasureSelection();
+  };
+  el.addEventListener('pointermove', move);
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointercancel', stop);
+  el.addEventListener('lostpointercapture', stop);
+}
+
+function syncMeasure3DDots() {
+  if (!map3d) return;
+  if (!ensureMeasure3DElements()) return;
+  measure3dLayer.hidden = !map3dActive;
+  while (measure3dDots.length > measurePoints.length) measure3dDots.pop().remove();
+  while (measure3dDots.length < measurePoints.length) {
+    const index = measure3dDots.length;
+    const el = document.createElement('div');
+    el.className = 'measure-dot measure-3d-dot';
+    el.innerHTML = '<span></span>';
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.title = `Measurement point ${index + 1}`;
+    el.addEventListener('click', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      selectMeasurePoint(index);
+    });
+    el.addEventListener('pointerdown', ev => startMeasure3DDrag(ev, index));
+    el.addEventListener('keydown', ev => nudgeMeasurePoint(index, ev, null));
+    measure3dLayer.appendChild(el);
+    measure3dDots.push(el);
+  }
+  measure3dDots.forEach((el, index) => el.classList.toggle('selected', index === selectedMeasureIndex));
+  positionMeasure3D();
+}
+
 function clearMeasure() {
   measurePoints = [];
   selectedMeasureIndex = -1;
   measureLine = null;
   measureMarkers = [];
   measureLayer.clearLayers();
+  syncMeasure3DDots();
   const readout = $('measureReadout');
   if (readout) readout.hidden = true;
 }
@@ -4051,6 +4302,7 @@ function syncMeasureSelection() {
     if (el) el.classList.toggle('selected', index === selectedMeasureIndex);
     marker.setZIndexOffset(index === selectedMeasureIndex ? 1100 : 1000);
   });
+  measure3dDots.forEach((el, index) => el.classList.toggle('selected', index === selectedMeasureIndex));
 }
 
 function selectMeasurePoint(index) {
@@ -4099,7 +4351,8 @@ function nudgeMeasurePoint(index, event, marker) {
   if (lon > 180) lon -= 360;
   else if (lon < -180) lon += 360;
   measurePoints[index] = [lat, lon];
-  marker.setLatLng([lat, lon]);
+  if (marker) marker.setLatLng([lat, lon]);
+  else positionMeasure3D();
   if (measureLine) measureLine.setLatLngs(measurePoints);
   updateMeasureReadout();
 }
@@ -4150,6 +4403,7 @@ function renderMeasure() {
     measureMarkers.push(marker);
   });
   syncMeasureSelection();
+  syncMeasure3DDots();
   updateMeasureReadout();
 }
 
@@ -4168,7 +4422,8 @@ function setMeasureMode(on) {
     btn.classList.toggle('active', measureMode);
     btn.setAttribute('aria-pressed', String(measureMode));
   }
-  map.getContainer().style.cursor = measureMode ? 'crosshair' : '';
+  syncMeasureCursor();
+  syncMarkerPopupHandlersForMeasure();
   // The measurement stays visible after exiting so it can still be inspected
   // and edited; the readout's × button is the explicit clear action.
 }
@@ -5369,7 +5624,17 @@ function ensureSearchResultMarker(a) {
     m._data = a;
     m._detailsOpen = false;
     m._popupSig = '';
-    m.on('click', () => toggleSelection(a.address, false));
+    m.on('click', e => {
+      if (measureMode) {
+        if (e && typeof e.originalEvent !== 'undefined') L.DomEvent.stopPropagation(e.originalEvent);
+        const data = m._data || a;
+        const lat = Number.isFinite(data.lat) ? data.lat : m.getLatLng().lat;
+        const lon = Number.isFinite(data.lon) ? data.lon : m.getLatLng().lng;
+        addMeasurePoint(lat, lon);
+        return;
+      }
+      toggleSelection(a.address, false);
+    });
     m.on('popupopen', () => {
       const html = popup(m._data);
       if (m._popupSig !== html) {
@@ -5390,6 +5655,7 @@ function ensureSearchResultMarker(a) {
     });
     recenterFocusedMarkerOnClose(m);
     m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
+    setMeasurePopupDetached(m, measureMode);
     searchResultGroup.addLayer(m);
     searchResultMarkers.set(a.address, m);
   } else {
@@ -5569,8 +5835,9 @@ function render() {
       m.on('click', e => {
         if (measureMode) {
           if (e && typeof e.originalEvent !== 'undefined') L.DomEvent.stopPropagation(e.originalEvent);
-          const lat = Number.isFinite(a.lat) ? a.lat : m.getLatLng().lat;
-          const lon = Number.isFinite(a.lon) ? a.lon : m.getLatLng().lng;
+          const data = m._data || a;
+          const lat = Number.isFinite(data.lat) ? data.lat : m.getLatLng().lat;
+          const lon = Number.isFinite(data.lon) ? data.lon : m.getLatLng().lng;
           addMeasurePoint(lat, lon);
           return;
         }
@@ -5598,6 +5865,7 @@ function render() {
       });
       recenterFocusedMarkerOnClose(m);
       m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
+      setMeasurePopupDetached(m, measureMode);
       markers.set(key, m);
       if (emerg) emergencyGroup.addLayer(m);
       else clusterGroup.addLayer(m);
