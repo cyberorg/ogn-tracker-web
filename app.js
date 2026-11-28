@@ -3767,6 +3767,34 @@ function trackPaneName() {
   return name;
 }
 
+function varioSegmentColor(p0, p1) {
+  const dt = p1[3] - p0[3];
+  const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
+  return varioColor(climb);
+}
+
+// Consecutive segments with the same Vario color become a single polyline.
+// Runs share their boundary point, so the drawn path is unchanged while the
+// number of Leaflet SVG paths drops substantially on long tracks.
+function varioPolylineRuns(points, style) {
+  const layers = [];
+  if (!points || points.length < 2) return layers;
+  let runColor = null;
+  let runCoords = null;
+  for (let i = 1; i < points.length; i++) {
+    const color = varioSegmentColor(points[i - 1], points[i]);
+    if (runCoords && color === runColor) {
+      runCoords.push([points[i][0], points[i][1]]);
+      continue;
+    }
+    if (runCoords) layers.push(L.polyline(runCoords, { ...style, color: runColor }));
+    runColor = color;
+    runCoords = [[points[i - 1][0], points[i - 1][1]], [points[i][0], points[i][1]]];
+  }
+  if (runCoords) layers.push(L.polyline(runCoords, { ...style, color: runColor }));
+  return layers;
+}
+
 function buildTrackLayer(points, flatColor) {
   if (!points || points.length < 2) return null;
   const pane = trackPaneName();
@@ -3774,12 +3802,7 @@ function buildTrackLayer(points, flatColor) {
     return L.polyline(points.map(p => [p[0], p[1]]), { pane, color: flatColor, weight: 3, opacity: 0.9 });
   }
   const grp = L.layerGroup();
-  for (let i = 1; i < points.length; i++) {
-    const p0 = points[i - 1], p1 = points[i];
-    const dt = p1[3] - p0[3];
-    const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
-    L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], { pane, color: varioColor(climb), weight: 3.5, opacity: 0.92 }).addTo(grp);
-  }
+  for (const layer of varioPolylineRuns(points, { pane, weight: 3.5, opacity: 0.92 })) layer.addTo(grp);
   return grp;
 }
 
@@ -6442,6 +6465,7 @@ function render() {
   const listVisible = useSearch24h ? search24h.slice() : viewportList;
   const keep = new Set(visible.map(a => a.address));
   const now = serverNow();
+  let tracksChanged = false;
 
   render24hAlertsSummary(now);
   updateListHint(visible, bounds);
@@ -6541,8 +6565,7 @@ function render() {
           if (trackEntry.layer) map.removeLayer(trackEntry.layer);
           trackEntry.layer = buildTrackLayer(trackEntry.points, trackEntry.color);
           if (trackEntry.layer) trackEntry.layer.addTo(map);
-          sync3DTracks();
-          syncVarioLegend();
+          tracksChanged = true;
         }
       }
       if (!isSpiderfied && m._isEmergency !== emerg) {
@@ -6558,6 +6581,13 @@ function render() {
 
     if (followedAddress === key) centerOnFollowed();
   });
+
+  // Several tracked aircraft can move on one live tick; sync the 3D tubes and
+  // Vario legend once instead of once per appended track point.
+  if (tracksChanged) {
+    sync3DTracks();
+    syncVarioLegend();
+  }
 
   updateCoverageLayer();
   sync3DLive(visible);
@@ -8093,16 +8123,9 @@ function replayTrackLayers(points, weight, opacity, dashed = false) {
     const color = selectedTracks.get(replayFollowAddress)?.color || THEME.accent;
     return [L.polyline(points.map(p => [p[0], p[1]]), { pane, color, weight, opacity, dashArray: dashed ? '3 6' : null })];
   }
-  const layers = [];
-  for (let i = 1; i < points.length; i++) {
-    const p0 = points[i - 1], p1 = points[i];
-    const dt = p1[3] - p0[3];
-    const climb = (p0[2] != null && p1[2] != null && dt > 0 && dt < 300) ? (p1[2] - p0[2]) / dt : null;
-    layers.push(L.polyline([[p0[0], p0[1]], [p1[0], p1[1]]], {
-      pane, color: varioColor(climb), weight, opacity, dashArray: dashed ? '3 6' : null
-    }));
-  }
-  return layers;
+  return varioPolylineRuns(points, {
+    pane, weight, opacity, dashArray: dashed ? '3 6' : null
+  });
 }
 
 // Full-resolution fixes drive interpolation; drawing stays capped so vario
