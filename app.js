@@ -776,6 +776,9 @@ let s3dReplayCenterRatio = null;
 let s3dReplaySmoothSig = '';
 let s3dReplaySmoothAlt = null;
 let s3dDomMarkerSyncRaf = null;
+let s3dDeferredSyncTimer = null;
+let s3dProjectionFrame = 0;
+const S3D_LABEL_DEFER_MS = 120;
 let s3dTerrainRefreshRaf = null;
 let s3dMarkerGeoJsonSig = '';
 let s3dArrowLayer = null;
@@ -1401,9 +1404,26 @@ function s3dCreateArrowLayer() {
       s3dResizeThreeLines(this.map.getZoom());
       const seen = this._seenKeys;
       seen.clear();
+      // One frame token for every marker projected by this WebGL render, so the
+      // DOM marker pass can reuse the exact same screen points.
+      const projectionFrame = ++s3dProjectionFrame;
+      const transform = this.map.transform;
+      const pixelMatrix = transform?._pixelMatrix3D;
+      const Mc = window.maplibregl?.MercatorCoordinate;
       for (const [key, item] of map3dDomMarkers.entries()) {
         if (!Number.isFinite(item.lon) || !Number.isFinite(item.lat)) continue;
         seen.add(key);
+        const elevation = s3dRenderAltitude(item.lon, item.lat, item.alt);
+        if (Mc && transform && typeof transform.coordinatePoint === 'function' && pixelMatrix) {
+          try {
+            const pt = transform.coordinatePoint(
+              Mc.fromLngLat([item.lon, item.lat]), elevation, pixelMatrix);
+            s3dSetCachedScreenProjection(item, pt, pixelMatrix, projectionFrame);
+          } catch (err) {}
+        }
+        // Reuses the cached point above; falls back to its own projection if
+        // MapLibre's internal matrix is unavailable on this frame.
+        s3dUpdateDomMarkerPosition(item);
         if (item.onScreen === false) {
           const hiddenModel = this.models.get(key);
           if (hiddenModel) hiddenModel.visible = false;
@@ -1422,7 +1442,6 @@ function s3dCreateArrowLayer() {
           this.scene.add(model);
         }
         model.visible = true;
-        const elevation = s3dRenderAltitude(item.lon, item.lat, item.alt);
         const mc = maplibregl.MercatorCoordinate.fromLngLat([item.lon, item.lat], elevation);
         // Convert the model to a fixed on-screen size at every zoom. The
         // template's bounding size and per-model pixel size keep each marker
@@ -1823,6 +1842,17 @@ function s3dProject3DPoint(lng, lat, altMSL) {
   return map3d.project?.([lng, lat]) || null;
 }
 
+// The custom 3D layer already projects every marker for its WebGL transform.
+// Store that screen point so the DOM marker pass can reuse it instead of
+// running coordinatePoint() and s3dRenderAltitude() a second time per frame.
+function s3dSetCachedScreenProjection(item, pt, matrix, frame) {
+  if (!item || !pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+  item.s3dProjX = pt.x;
+  item.s3dProjY = pt.y;
+  item.s3dProjFrame = frame;
+  item.s3dProjMatrix = matrix;
+}
+
 /** Inverse of s3dProject3DPoint for one fixed rendered altitude. */
 function s3dUnprojectAtElevation(px, py, elevation) {
   if (!map3d) return null;
@@ -1985,11 +2015,25 @@ function s3dReplayCameraCenter(lng, lat, altMSL) {
 
 function s3dUpdateDomMarkerPosition(item) {
   if (!item || !item.el || !map3d) return;
-  const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
-  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
-    item.onScreen = false;
-    item.el.style.display = 'none';
-    return;
+  let px, py;
+  const matrix = map3d.transform?._pixelMatrix3D;
+  if (item.s3dProjFrame === s3dProjectionFrame && item.s3dProjMatrix === matrix &&
+      Number.isFinite(item.s3dProjX) && Number.isFinite(item.s3dProjY)) {
+    // Same render frame and same 3D matrix: the WebGL layer already projected it.
+    px = item.s3dProjX;
+    py = item.s3dProjY;
+  } else {
+    const pt = s3dProject3DPoint(item.lon, item.lat, item.alt);
+    if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+      item.onScreen = false;
+      if (item.s3dLastDisplay !== 'none') {
+        item.el.style.display = 'none';
+        item.s3dLastDisplay = 'none';
+      }
+      return;
+    }
+    px = pt.x;
+    py = pt.y;
   }
   // Leaflet culls outside markers in 2D. The 3D custom layer positions DOM and
   // WebGL markers itself, so cull them by projected screen position here too.
@@ -1999,13 +2043,20 @@ function s3dUpdateDomMarkerPosition(item) {
   const height = map3d.transform?.height || canvas?.clientHeight || 0;
   const margin = S3D_MARKER_CULL_MARGIN_PX;
   item.onScreen = !width || !height ||
-    (pt.x >= -margin && pt.x <= width + margin && pt.y >= -margin && pt.y <= height + margin);
-  item.el.style.display = item.onScreen ? '' : 'none';
+    (px >= -margin && px <= width + margin && py >= -margin && py <= height + margin);
+  const display = item.onScreen ? '' : 'none';
+  if (item.s3dLastDisplay !== display) {
+    item.el.style.display = display;
+    item.s3dLastDisplay = display;
+  }
   // The arrowhead itself is rotated in WebGL. Keep the DOM hit target and its
   // name screen-aligned so the label always reads below the marker, whatever
   // the map bearing or pitch.
-  item.el.style.transform =
-    `translate(-50%, -50%) translate(${pt.x.toFixed(1)}px, ${pt.y.toFixed(1)}px)`;
+  const css = `translate(-50%, -50%) translate(${px.toFixed(1)}px, ${py.toFixed(1)}px)`;
+  if (item.s3dLastTransform !== css) {
+    item.el.style.transform = css;
+    item.s3dLastTransform = css;
+  }
 }
 
 function s3dUpdateDomMarkerPositions() {
@@ -2089,7 +2140,7 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
         s3dOpenPopupForKey(key, currentPopup);
       }
     });
-    item = { el, lat, lon, alt, html: iconHtml, popupData, onClick: opts.onClick };
+    item = { el, lat, lon, alt, html: iconHtml, popupData, onClick: opts.onClick, s3dShowName: false };
     map3dDomMarkers.set(key, item);
   } else {
     item.popupData = popupData;
@@ -2133,15 +2184,51 @@ function clear3DReplayFollowMarkers() {
   s3dClearDomMarkers('rfocus:');
 }
 
+const S3D_LABEL_GRID_PX = 120;
+let s3dCollisionStamp = 0;
+
+function s3dLabelGridCells(rect, pad) {
+  const cells = [];
+  const x0 = Math.floor((rect.left - pad) / S3D_LABEL_GRID_PX);
+  const x1 = Math.floor((rect.right + pad) / S3D_LABEL_GRID_PX);
+  const y0 = Math.floor((rect.top - pad) / S3D_LABEL_GRID_PX);
+  const y1 = Math.floor((rect.bottom + pad) / S3D_LABEL_GRID_PX);
+  for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1; y++) cells.push(`${x},${y}`);
+  }
+  return cells;
+}
+
+function s3dGridAdd(grid, rect, value, pad) {
+  for (const cell of s3dLabelGridCells(rect, pad)) {
+    if (!grid.has(cell)) grid.set(cell, []);
+    grid.get(cell).push({ rect, value, stamp: 0 });
+  }
+}
+
+function s3dGridQuery(grid, rect, pad, stamp) {
+  const found = [];
+  for (const cell of s3dLabelGridCells(rect, pad)) {
+    for (const entry of grid.get(cell) || []) {
+      if (entry.stamp === stamp) continue;
+      entry.stamp = stamp;
+      found.push(entry.value);
+    }
+  }
+  return found;
+}
+
 function s3dUpdateDomLabelsCollision() {
   if (!map3dActive || !map3dDomMarkers.size) return;
   const mapRect = $('map3d')?.getBoundingClientRect();
   if (!mapRect) return;
   const candidates = [];
+  // Read all rects before writing any show-name class. Visibility/opacity do
+  // not affect layout, so the old clear-everything pass was only forcing style
+  // recalculation; here classes change only when the desired state changes.
   for (const [key, item] of map3dDomMarkers.entries()) {
     const el = item.el;
     if (!el) continue;
-    el.classList.remove('show-name');
     const iconRect = el.getBoundingClientRect();
     if (iconRect.width <= 0 || iconRect.height <= 0) continue;
     const label = el.querySelector('.glider-label');
@@ -2157,12 +2244,39 @@ function s3dUpdateDomLabelsCollision() {
   }
   candidates.sort((a, b) => b.priority - a.priority ||
     a.labelRect.left - b.labelRect.left || a.labelRect.top - b.labelRect.top);
-  const shown = [];
+
+  const iconGrid = new Map();
+  const shownGrid = new Map();
+  for (const c of candidates) s3dGridAdd(iconGrid, c.iconRect, c, 2);
+  const showEls = new Set();
   for (const c of candidates) {
-    if (candidates.some(o => o !== c && markerRectsOverlap(c.labelRect, o.iconRect, 2))) continue;
-    if (shown.some(rect => markerRectsOverlap(c.labelRect, rect, 3))) continue;
-    c.el.classList.add('show-name');
-    shown.push(c.labelRect);
+    const stamp = ++s3dCollisionStamp;
+    let blocked = false;
+    for (const other of s3dGridQuery(iconGrid, c.labelRect, 2, stamp)) {
+      if (other !== c && markerRectsOverlap(c.labelRect, other.iconRect, 2)) {
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked) continue;
+    for (const rect of s3dGridQuery(shownGrid, c.labelRect, 3, stamp)) {
+      if (markerRectsOverlap(c.labelRect, rect, 3)) {
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked) continue;
+    showEls.add(c.el);
+    s3dGridAdd(shownGrid, c.labelRect, c.labelRect, 3);
+  }
+  for (const item of map3dDomMarkers.values()) {
+    const el = item.el;
+    if (!el) continue;
+    const desired = showEls.has(el);
+    if (!!item.s3dShowName !== desired) {
+      el.classList.toggle('show-name', desired);
+      item.s3dShowName = desired;
+    }
   }
 }
 
@@ -2178,15 +2292,38 @@ function s3dCloseOffscreenPopups() {
   }
 }
 
-function s3dScheduleLabelUpdate() {
+// Motion frames only move markers. Collision detection, popup checks and GeoJSON
+// signature work are layout-heavy, so they run on a trailing timer / moveend.
+function s3dScheduleMarkerMotion() {
   if (map3dPaused || s3dDomMarkerSyncRaf !== null) return;
   s3dDomMarkerSyncRaf = requestAnimationFrame(() => {
     s3dDomMarkerSyncRaf = null;
     s3dUpdateDomMarkerPositions();
-    s3dCloseOffscreenPopups();
-    s3dSyncMarkerGeometry();
-    s3dUpdateDomLabelsCollision();
   });
+}
+
+function s3dRunDeferredLabelSync() {
+  if (s3dDeferredSyncTimer !== null) {
+    clearTimeout(s3dDeferredSyncTimer);
+    s3dDeferredSyncTimer = null;
+  }
+  if (map3dPaused || !map3dActive) return;
+  s3dCloseOffscreenPopups();
+  s3dSyncMarkerGeometry();
+  s3dUpdateDomLabelsCollision();
+}
+
+function s3dScheduleDeferredLabelSync() {
+  if (map3dPaused || !map3dActive || s3dDeferredSyncTimer !== null) return;
+  s3dDeferredSyncTimer = setTimeout(() => {
+    s3dDeferredSyncTimer = null;
+    s3dRunDeferredLabelSync();
+  }, S3D_LABEL_DEFER_MS);
+}
+
+function s3dScheduleLabelUpdate() {
+  s3dScheduleMarkerMotion();
+  s3dScheduleDeferredLabelSync();
 }
 
 function setup3DLayers() {
@@ -2331,6 +2468,9 @@ function ensure3DMap() {
     if (map3dPaused || !map3dActive) return;
     syncLeafletFrom3D();
   });
+  // Always flush label/collision work at the end of a camera move, including
+  // expected sync moves that the handler above deliberately ignores.
+  map3d.on('moveend', s3dRunDeferredLabelSync);
   map3d.on('move', s3dScheduleLabelUpdate);
   map3d.on('sourcedata', e => {
     if (e.sourceId !== S3D_DEM) return;
@@ -2400,6 +2540,10 @@ function set3DMapPaused(paused) {
   map3dPaused = paused;
   if (paused) {
     stop3DFollowAlign();
+    if (s3dDeferredSyncTimer !== null) {
+      clearTimeout(s3dDeferredSyncTimer);
+      s3dDeferredSyncTimer = null;
+    }
     // Stop eases and any queued repaint before hiding the canvas.
     try { map3d.stop(); } catch (err) {}
     return;
