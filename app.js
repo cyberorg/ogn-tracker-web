@@ -414,7 +414,10 @@ const map = L.map('map', { zoomControl: false, closePopupOnClick: false, minZoom
 
 // Dense marker fields are part of the map, so two fingers there must zoom the
 // map rather than the page. CSS touch-action handles modern browsers; the
-// legacy gesture/touch guards cover WebKit and targets such as DOM markers.
+// gesture guard covers WebKit, including gesture events whose target is the
+// document instead of the touched marker.
+let mapMultiTouchActive = false;
+
 function isMapTouchNode(node) {
   if (!node || node.nodeType !== 1) return false;
   if (node.id === 'map' || node.id === 'map3d') return true;
@@ -437,18 +440,33 @@ function mapTouchTarget(event) {
   }
   return false;
 }
+function syncMapMultiTouch(event) {
+  const touchCount = event && event.touches ? event.touches.length : 0;
+  if (touchCount < 2) {
+    mapMultiTouchActive = false;
+    return false;
+  }
+  if (mapTouchTarget(event)) mapMultiTouchActive = true;
+  return mapMultiTouchActive;
+}
 function preventMapPageZoomTouch(event) {
-  if (!mapTouchTarget(event) || event.touches.length < 2) return;
-  if (event.cancelable) event.preventDefault();
+  if (!syncMapMultiTouch(event)) return;
+  // Let Leaflet/MapLibre see the initial touchstart. Cancelling touchmove is
+  // enough to stop page scroll/zoom, and cancelling touchstart can starve the
+  // map libraries' own pinch handlers over marker children.
+  if (event.type !== 'touchstart' && event.cancelable) event.preventDefault();
 }
 document.addEventListener('touchstart', preventMapPageZoomTouch, { passive: false, capture: true });
 document.addEventListener('touchmove', preventMapPageZoomTouch, { passive: false, capture: true });
+document.addEventListener('touchend', syncMapMultiTouch, { passive: true, capture: true });
+document.addEventListener('touchcancel', syncMapMultiTouch, { passive: true, capture: true });
 for (const gestureType of ['gesturestart', 'gesturechange', 'gestureend']) {
   document.addEventListener(gestureType, event => {
-    if (!mapTouchTarget(event)) return;
+    if (!mapMultiTouchActive && !mapTouchTarget(event)) return;
     if (event.cancelable) event.preventDefault();
   }, { passive: false, capture: true });
 }
+map.touchZoom?.enable();
 
 // Locate lives on the map, stacked above the zoom control at bottom-left.
 const LocateControl = L.Control.extend({
@@ -2367,8 +2385,11 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
     el.innerHTML = iconHtml;
     // Positioned directly from MapLibre's 3D projection each render. Using a
     // normal MapLibre Marker would clamp the icon to the terrain surface, not
-    // to the aircraft's MSL altitude in the pitched 3D view.
-    ($('map3d') || map3d.getContainer()).appendChild(el);
+    // to the aircraft's MSL altitude in the pitched 3D view. The element must
+    // live inside MapLibre's canvas container: its gesture manager ignores
+    // touches whose target is outside that container, which made two-finger
+    // zoom fail when fingers landed on the dense marker layer.
+    (map3d.getCanvasContainer?.() || $('map3d') || map3d.getContainer()).appendChild(el);
     el.addEventListener('click', ev => {
       ev.stopPropagation();
       const currentLat = item && Number.isFinite(item.lat) ? item.lat : lat;
