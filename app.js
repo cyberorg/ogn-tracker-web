@@ -617,6 +617,9 @@ const S3D_ARROWHEADS = 'ogn-3d-arrowheads';
 const S3D_MARKER_CLEARANCE_M = 12;
 const S3D_TERRAIN_SAMPLE_MIN_M = 20;
 const S3D_TERRAIN_SAMPLE_MAX_M = 120;
+// Wide views show many small markers, so a single center sample is enough
+// there; closer views keep the five-point ridge/valley footprint.
+const S3D_TERRAIN_SINGLE_SAMPLE_MAX_ZOOM = 11;
 const S3D_EMPTY_FC = Object.freeze({ type: 'FeatureCollection', features: [] });
 const s3dFeatureCollection = features => ({ type: 'FeatureCollection', features });
 
@@ -801,9 +804,10 @@ let s3dTerrainErrorNotifiedAtMs = 0;
 let s3dTerrainRetryTimer = null;
 // key -> { value, at }. A null value is a retryable miss, not a permanent result.
 const s3dTerrainElevationCache = new Map();
-// key -> { value, at } for the five-sample ground footprint under a marker.
-// Keyed by terrain version and zoom bucket so DEM arrivals and zoom changes
-// invalidate it without clearing unrelated sample results.
+// key -> { value, at } for the ground footprint under a marker.
+// Keyed by terrain version, zoom bucket and sample count so DEM arrivals,
+// zoom changes and the low-zoom gate invalidate it without clearing unrelated
+// sample results.
 const s3dGroundElevationCache = new Map();
 
 function s3dInvalidateTerrainCaches() {
@@ -892,6 +896,11 @@ function s3dTerrainZoomBucket() {
   return Math.round(zoom * 2) / 2;
 }
 
+function s3dTerrainSingleSample() {
+  const zoom = Number.isFinite(map3d?.getZoom?.()) ? map3d.getZoom() : 14;
+  return zoom < S3D_TERRAIN_SINGLE_SAMPLE_MAX_ZOOM;
+}
+
 // The aircraft model is a fixed screen-space size, so its ground footprint grows as
 // the map zooms out. Cap the sample radius to keep low-zoom markers reasonable.
 function s3dTerrainSampleRadiusM(lat) {
@@ -902,26 +911,31 @@ function s3dTerrainSampleRadiusM(lat) {
 }
 
 // Highest DEM sample under the marker footprint, including nearby slope.
-// The five samples are expensive, so cache the result per coordinate, zoom
-// bucket and terrain version; null stays retryable for the null TTL window.
+// Low zoom uses only the center sample; closer views keep the full footprint.
+// Cache by coordinate, zoom bucket, sample count and terrain version; null
+// stays retryable for the null TTL window.
 function s3dTerrainMaxM(lng, lat) {
-  const key = `${lat.toFixed(5)},${lng.toFixed(5)}|${s3dTerrainZoomBucket()}|${s3dTerrainVersion}`;
+  const singleSample = s3dTerrainSingleSample();
+  const key = `${lat.toFixed(5)},${lng.toFixed(5)}|${s3dTerrainZoomBucket()}|${singleSample ? 1 : 5}|${s3dTerrainVersion}`;
   const now = Date.now();
   const cached = s3dGroundElevationCache.get(key);
   if (cached && (cached.value != null || now - cached.at < S3D_TERRAIN_NULL_TTL_MS)) {
     return cached.value;
   }
-  const radius = s3dTerrainSampleRadiusM(lat);
-  const dLat = radius / 111320;
-  const dLon = radius / (111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
-  const clampLat = x => Math.max(-89.9, Math.min(89.9, x));
-  const samples = [
-    [lng, lat],
-    [lng, clampLat(lat + dLat)],
-    [lng, clampLat(lat - dLat)],
-    [s3dWrapLon(lng + dLon), lat],
-    [s3dWrapLon(lng - dLon), lat]
-  ];
+  let samples = [[lng, lat]];
+  if (!singleSample) {
+    const radius = s3dTerrainSampleRadiusM(lat);
+    const dLat = radius / 111320;
+    const dLon = radius / (111320 * Math.max(0.2, Math.cos(lat * Math.PI / 180)));
+    const clampLat = x => Math.max(-89.9, Math.min(89.9, x));
+    samples = [
+      [lng, lat],
+      [lng, clampLat(lat + dLat)],
+      [lng, clampLat(lat - dLat)],
+      [s3dWrapLon(lng + dLon), lat],
+      [s3dWrapLon(lng - dLon), lat]
+    ];
+  }
   let max = null;
   for (const [x, y] of samples) {
     const value = s3dQueryTerrainElevation(x, y);
