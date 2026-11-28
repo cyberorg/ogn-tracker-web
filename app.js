@@ -9331,6 +9331,9 @@ function revealMapForListAction() {
 /** Following from the list opens the map; unfollowing stays in the list. */
 function toggleFollowFromList(address) {
   const wasFollowing = followedAddress === address;
+  // The list's Unfollow button is also its unselect action: drop the track it
+  // added when follow started. Other manually selected tracks stay untouched.
+  if (wasFollowing && selectedTracks.has(address)) removeTrack(address);
   toggleFollow(address);
   if (!wasFollowing) revealMapForListAction();
 }
