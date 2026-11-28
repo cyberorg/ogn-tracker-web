@@ -360,8 +360,15 @@ if (location.hash.length > 1) {
     initialCenter = [lat, lon];
     initialZoom = Math.max(1, Math.min(16, z));
     if (parts[3]) {
-      pendingHashSelect = decodeURIComponent(parts[3]).toLowerCase();
-      hashSelectAddress = pendingHashSelect;
+      try {
+        const decoded = decodeURIComponent(parts[3]).toLowerCase();
+        if (decoded) {
+          pendingHashSelect = decoded;
+          hashSelectAddress = decoded;
+        }
+      } catch (err) {
+        // Ignore malformed percent-encoding in a shared/bookmarked URL.
+      }
     }
   }
 }
