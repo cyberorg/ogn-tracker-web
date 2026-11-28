@@ -60,6 +60,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 #map3d[hidden]{display:none!important}
 .map-wrap.has-bottom-bar #map3d{height:calc(100% - var(--bottom-bar-space,0px))}
 .map-wrap.view3d #map .leaflet-map-pane{visibility:hidden}
+.map-wrap.view3d #map .popup-pane-raised{visibility:hidden}
 .map-wrap .leaflet-control-attribution{display:none!important}
 .emerg-banner{position:absolute;top:var(--edge-gutter);left:50%;transform:translateX(-50%);z-index:var(--emergency-z);background:#3d1118f2;border:1px solid var(--red);color:var(--danger-text);padding:7px 24px 7px 12px;border-radius:9px;display:none;align-items:center;gap:10px;box-shadow:0 4px 16px #000a;font-size:12px;max-width:calc(100% - 16px)}
 .emerg-banner.show{display:flex}

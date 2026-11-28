@@ -1436,6 +1436,7 @@ function s3dBind2DPopupHandlers(popupEl, key, address) {
       if (act === 'replay') {
         if (!addr) return;
         replayFollowAddress = addr;
+        clear3DReplayFollowMarkers();
         replayOnlyFocus = true;
         replayDirection = 1;
         followCenteringPaused = false;
@@ -1840,16 +1841,19 @@ function s3dUpsertDomMarker(key, lat, lon, alt, iconHtml, popupData, opts = {}) 
         addMeasurePoint(currentLat, currentLon);
         return;
       }
-      if (opts.onClick) opts.onClick();
+      if (item?.onClick) item.onClick();
       const currentPopup = item?.popupData || popupData;
       if (currentPopup) {
         s3dOpenPopupForKey(key, currentPopup);
       }
     });
-    item = { el, lat, lon, alt, html: iconHtml, popupData };
+    item = { el, lat, lon, alt, html: iconHtml, popupData, onClick: opts.onClick };
     map3dDomMarkers.set(key, item);
   } else {
     item.popupData = popupData;
+    // The callback captures the address/payload from the upsert that created the
+    // marker. Refresh it on every update so a reused key cannot act on stale data.
+    item.onClick = opts.onClick;
     if (item.html !== iconHtml) {
       item.html = iconHtml;
       item.el.innerHTML = iconHtml;
@@ -1877,6 +1881,13 @@ function s3dClearDomMarkers(prefix = '') {
       map3dDomMarkers.delete(key);
     }
   }
+}
+
+function clear3DReplayFollowMarkers() {
+  // Replay point/focus markers are keyed independently of the followed address,
+  // so switching follow target must drop both sets.
+  s3dClearDomMarkers('rpts:');
+  s3dClearDomMarkers('rfocus:');
 }
 
 function s3dUpdateDomLabelsCollision() {
@@ -2079,8 +2090,27 @@ function ensure3DMap() {
     const hit = map3d.queryRenderedFeatures(e.point, {
       layers: ['ogn-3d-marker-ground']
     })[0];
-    const key = hit?.properties?.id;
-    const item = key ? map3dDomMarkers.get(key) : null;
+    let key = hit?.properties?.id;
+    let item = key ? map3dDomMarkers.get(key) : null;
+    if (!measureMode && !item) {
+      // The ground circle is small and sits below elevated 3D models. Fall back
+      // to the nearest projected marker in screen space so clicks on the model
+      // still select/open it. Measure mode keeps using the unprojected ground
+      // point under the cursor.
+      let bestDist2 = 18 * 18;
+      for (const [markerKey, candidate] of map3dDomMarkers) {
+        if (!Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lon)) continue;
+        const pt = s3dProject3DPoint(candidate.lon, candidate.lat, candidate.alt);
+        if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+        const dx = pt.x - e.point.x, dy = pt.y - e.point.y;
+        const dist2 = dx * dx + dy * dy;
+        if (dist2 <= bestDist2) {
+          bestDist2 = dist2;
+          key = markerKey;
+          item = candidate;
+        }
+      }
+    }
     if (measureMode) {
       const ll = item && Number.isFinite(item.lat) && Number.isFinite(item.lon)
         ? L.latLng(item.lat, item.lon)
@@ -2515,6 +2545,13 @@ function toggle3DView() {
   syncMeasureCursor();
   renderMeasure();
   if (map3dActive) {
+    // Leaflet's popup pane is reparented above the map, so hiding the map pane
+    // alone would leave 2D popups floating over the 3D canvas.
+    for (const popup of [...openPopups]) {
+      try { map.closePopup(popup); } catch (err) {}
+    }
+    openPopups.clear();
+    popupMoveSnapshot = null;
     set3DBaseStyle(BASE_TO_3D[currentLayerSelection().baseLayer] || 'liberty');
     resize3D();
     sync3DFromLeaflet();
@@ -6249,6 +6286,7 @@ document.addEventListener('click', e => {
   if (act === 'replay') {
     if (!addr) return;
     replayFollowAddress = addr.toLowerCase();
+    clear3DReplayFollowMarkers();
     replayOnlyFocus = true;
     replayDirection = 1;
     followCenteringPaused = false;
@@ -7744,6 +7782,7 @@ function setReplayMode(on, opts = {}) {
     replayWindowStartMs = null;
     lastReplaySliceMinute = null;
     replayFollowAddress = null;
+    clear3DReplayFollowMarkers();
     replayPoints = [];
     replayOnlyFocus = false;
     replayDirection = 1;
