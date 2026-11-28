@@ -195,7 +195,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .replay-dot.focused{width:16px;height:16px;margin:0;background:#ec4899;border-color:#f472b6;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa,0 1px 5px #0009}
 .replay-icon .glider-label{top:calc(100% + 3px)}
 .replay-hud{left:50%;top:calc(100% + 24px);transform:translateX(-50%);z-index:2}
-/* Focused/followed aircraft: pink halo + always-on name and metric HUD. */
+/* Selected/followed aircraft: pink halo + always-on name and metric HUD. */
 .glider-wrap.focused{--marker-color:#f472b6;border-color:#f472b6;background:#2a1530e8;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa,0 2px 8px #0008}
 .glider-wrap.focused svg{fill:#f472b6}
 .leaflet-marker-icon.glider-icon.focused,.leaflet-marker-icon.replay-icon.focused{z-index:9999!important}

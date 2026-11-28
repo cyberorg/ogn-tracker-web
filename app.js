@@ -2892,7 +2892,7 @@ function sync3DLive(aircraftList) {
     if (!Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
     const key = `live:${a.address}`;
     seen.add(key);
-    const focused = !replayActive && activeMapFocusAddress() === a.address;
+    const focused = isLiveHudActive(a.address);
     const iconSig = liveMarkerIconSig(a, focused);
     const existing = map3dDomMarkers.get(key);
     // markerIcon() serializes SVG + label + HUD. Only rebuild it when the
@@ -3605,9 +3605,9 @@ let lastMetaBounds = null;
 const knownIds = new Map(); // address -> last seen ms
 
 let followedAddress = null;
-// Aircraft selected by a list click. It gets the same focused marker/HUD as a
-// followed aircraft, but it is a one-shot selection rather than a live follow.
-let mapFocusAddress = null;
+// Every selected aircraft is a first-class selection: track, HUD, and row dot.
+// Follow is only a camera/centering mode; it no longer creates a separate
+// single-aircraft focus state.
 let varioTrackMode = savedVarioTrackMode;
 let activeTrackAddress = null;
 const lastPinnedStatus = new Map();
@@ -3716,6 +3716,13 @@ function togglePin(address) {
 const selectedTracks = new Map();
 syncClearTracksButton();
 let trackReqSeq = 0, colorSeq = 0;
+
+// Selection, not a single focus address, drives the marker HUD. Follow keeps
+// its aircraft highlighted even if its track was cleared, but there is no
+// longer a separate focus mode that suppresses other selected aircraft.
+function isLiveHudActive(address) {
+  return !!address && !replayActive && (selectedTracks.has(address) || followedAddress === address);
+}
 
 const ddbCache = new Map();
 const aprsCache = new Map();
@@ -3887,7 +3894,9 @@ async function loadHashAircraft(id) {
     if (markers.has(id)) {
       if (pendingHashSelect === id) {
         pendingHashSelect = null;
-        toggleSelection(id, true);
+        if (!selectedTracks.has(id)) toggleSelection(id, false);
+        revealMapForListAction();
+        openAircraftOnMap(id);
       }
       return;
     }
@@ -3923,7 +3932,9 @@ async function loadHashAircraft(id) {
     render();
     if (markers.has(id) && pendingHashSelect === id) {
       pendingHashSelect = null;
-      toggleSelection(id, true);
+      if (!selectedTracks.has(id)) toggleSelection(id, false);
+      revealMapForListAction();
+      openAircraftOnMap(id);
     }
   } catch (err) {
     console.warn('ogn-tracker hash aircraft lookup failed', err);
@@ -4129,8 +4140,7 @@ function toggleFollow(address) {
   if (!address) return;
   stop3DFollowAlign();
   followedAddress = (followedAddress === address) ? null : address;
-  // Follow and list-click selection share one focused marker/HUD.
-  mapFocusAddress = followedAddress;
+  // Follow owns centering; HUD styling comes from the shared selection state.
   document.querySelectorAll('.follow-btn[data-follow]').forEach(btn => {
     const active = btn.dataset.follow === followedAddress;
     btn.classList.toggle('active', active);
@@ -4160,14 +4170,6 @@ let followCenteringPaused = false;
 
 function activeFollowAddress() {
   return replayActive ? replayFollowAddress : followedAddress;
-}
-
-// The aircraft that should carry the pink halo + metric HUD. A list-click
-// selection takes precedence over a stale follow address; replay has its own
-// focused marker, so live focus never leaks into replay.
-function activeMapFocusAddress() {
-  if (replayActive) return replayFollowAddress;
-  return mapFocusAddress || followedAddress;
 }
 
 let recenterBtnSig = '';
@@ -4797,8 +4799,9 @@ async function downloadIgc(address) {
 
 const ALERT_FOCUS_ZOOM = 12;
 
-// Jumping from an alert is a focus action, not a selection toggle. Reuse an
-// already selected track, zoom to the alerted aircraft, then open its popup.
+// Jumping from an alert opens a centered popup, not a single-aircraft focus
+// mode. Reuse an already selected track, zoom to the alerted aircraft, then
+// open its popup.
 function jumpToAlertAddress(address) {
   const key = String(address || '').toLowerCase();
   if (!key) return;
@@ -4809,7 +4812,7 @@ function jumpToAlertAddress(address) {
       map.setView([liveA.lat, liveA.lon], Math.max(map.getZoom(), ALERT_FOCUS_ZOOM), { animate: false });
     }
     if (!selectedTracks.has(key)) toggleSelection(key, false);
-    focusAircraftOnMap(key, liveA);
+    openAircraftOnMap(key, liveA);
     return;
   }
   const item = alerts24hHistory.get(key);
@@ -4875,77 +4878,22 @@ function focusListRow(address) {
   if (row) row.focus({ preventScroll: true });
 }
 
-function showSearchResultPopup(a, recenterOnClose = false, center = null, zoom = null) {
+function showSearchResultPopup(a, center = null, zoom = null) {
   if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
   map.setView(center || [a.lat, a.lon], zoom ?? Math.max(map.getZoom(), 12));
   const m = ensureSearchResultMarker(a);
-  if (m) {
-    if (recenterOnClose) m._recenterOnClose = true;
-    requestAnimationFrame(() => m.openPopup());
-  }
+  if (m) requestAnimationFrame(() => m.openPopup());
 }
 
-// A popup opened by a list click is centered in the map. When it is dismissed,
-// put the focused aircraft back at the center so it stays easy to find.
-function recenterFocusedMarkerOnClose(m) {
-  if (!m) return;
-  m.on('popupclose', e => {
-    if (!m._recenterOnClose) return;
-    m._recenterOnClose = false;
-    if (replayActive) return;
-    const closingPopupEl = e.popup?.getElement?.();
-    if (closingPopupEl) closingPopupEl.style.translate = '';
-    const recenter = () => {
-      // Ignore the popup that is closing itself, but do not fight a newer popup.
-      const otherPopupOpen = [...document.querySelectorAll('.leaflet-popup')]
-        .some(el => el !== closingPopupEl && el.isConnected);
-      if (otherPopupOpen) return;
-      const a = m._data;
-      if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return;
-      const ground = L.latLng(a.lat, a.lon);
-      const dest = (map3dReady && map3dActive)
-        ? (s3dCameraCenterForPoint(a.lon, a.lat, a.altitude) || ground)
-        : ground;
-      if (map3dReady && map3dActive) {
-        arm3DCameraStop(dest.lng, dest.lat, map3d.getZoom());
-        map3d.jumpTo({ center: [dest.lng, dest.lat] });
-      }
-      map.setView(dest, map.getZoom(), { animate: false });
-    };
-    if (mapMoving) map.once('moveend', recenter);
-    else requestAnimationFrame(recenter);
-  });
-}
-
-// Clear the one-shot list focus. When the same aircraft was also followed,
-// use toggleFollow() so the follow buttons and live centering state stay in sync.
-function clearMapFocus(address = null) {
-  const st3D = address ? map3dDomPopupState.get(`live:${address}`) : null;
-  if (st3D?.popup?.isOpen()) st3D.popup.remove();
-  const m = address ? (markers.get(address) || searchResultMarkers.get(address)) : null;
-  if (m) {
-    // Do not let the popup-close handler recenter an aircraft we just unfocused.
-    m._recenterOnClose = false;
-    if (m.isPopupOpen?.()) map.closePopup(m.getPopup());
-  }
-  if (followedAddress && (!address || followedAddress === address)) {
-    toggleFollow(followedAddress);
-    return;
-  }
-  mapFocusAddress = null;
-  followCenteringPaused = false;
-  syncRecenterButton();
-}
-
-// A list click is a one-shot focus: open its popup centered, then leave the
-// aircraft highlighted with the shared HUD and centered after the popup closes.
-function focusAircraftOnMap(address, fallbackAircraft = null) {
+// Open a centered popup for a one-off map action (alert jump, hash link). It
+// does not create a selected-aircraft focus mode; track and HUD state stay in
+// selectedTracks so several aircraft can have them at once.
+function openAircraftOnMap(address, fallbackAircraft = null) {
   if (!address) return false;
   if (followedAddress && followedAddress !== address) {
-    // Clearing follow prevents the live follow loop from fighting this selection.
+    // Stop live follow so it cannot fight this popup's camera move.
     toggleFollow(followedAddress);
   }
-  mapFocusAddress = address;
   const a = findAircraftByAddress(address) || fallbackAircraft;
   if (!a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) return false;
   const m = markers.get(address);
@@ -4977,27 +4925,21 @@ function focusAircraftOnMap(address, fallbackAircraft = null) {
       // directly instead of waiting for Leaflet's clustered 2D marker to
       // uncluster and then nudging its popup into place.
       const leafletMarker = m || searchResultMarkers.get(address);
-      if (leafletMarker) {
-        leafletMarker._recenterOnClose = false;
-        if (leafletMarker.isPopupOpen?.()) map.closePopup(leafletMarker.getPopup());
-      }
+      if (leafletMarker?.isPopupOpen?.()) map.closePopup(leafletMarker.getPopup());
       s3dOpenPopupForKey(key3D, a);
       return;
     }
     if (m) {
-      m._recenterOnClose = true;
       m.openPopup();
     } else {
-      showSearchResultPopup(a, true, use3D ? dest : null, use3D ? map.getZoom() : null);
+      showSearchResultPopup(a, use3D ? dest : null, use3D ? map.getZoom() : null);
     }
     if (use3D) {
       // Search-only aircraft have no 3D marker; keep their 2D popup centered
       // through the camera and cluster changes.
-      const focusMarker = markers.get(address) || searchResultMarkers.get(address);
+      const popupMarker = markers.get(address) || searchResultMarkers.get(address);
       const centerPopup = () => requestAnimationFrame(() => {
-        if (focusMarker?.isPopupOpen?.() && isFocusedMapMarker(focusMarker)) {
-          centerFocusedPopupInView(focusMarker);
-        }
+        if (popupMarker?.isPopupOpen?.()) centerPopupInView(popupMarker);
       });
       let frames = 12;
       const settlePopup = () => {
@@ -5019,27 +4961,19 @@ function focusAircraftOnMap(address, fallbackAircraft = null) {
 
 function toggleSelection(address, openOnMap = false) {
   const target = findAircraftByAddress(address);
-  const hadTrack = selectedTracks.has(address);
-  const wasFocused = openOnMap && !replayActive && activeMapFocusAddress() === address;
-  // Track and list focus are one toggle: an active row turns both off, an
-  // inactive row selects its track and focuses it. This avoids cycling between
-  // focus-without-track and unfocused-with-track on repeated list taps.
-  const isActive = hadTrack || wasFocused;
   // A searched aircraft gets one render free of the type preference filters.
   if (target?.search24h) oneTimeSearchBypass.add(address);
-  if (isActive) {
-    if (hadTrack) removeTrack(address);
-    if (wasFocused) clearMapFocus(address);
+  // Selection is a pure track toggle. Every selected aircraft gets a track
+  // and HUD; there is no single focus mode to switch on or off.
+  if (selectedTracks.has(address)) {
+    removeTrack(address);
   } else {
     selectedTracks.set(address, { color: pickTrackColor(), layer: null, points: [], reqId: 0 });
     activeTrackAddress = address;
     updateUrlHash();
     syncClearTracksButton();
     loadTrack(address);
-    if (openOnMap) {
-      if (window.innerWidth <= 800) revealMapForListAction();
-      focusAircraftOnMap(address, target);
-    }
+    if (openOnMap && window.innerWidth <= 800) revealMapForListAction();
   }
   updateListHint();
   render();
@@ -6155,10 +6089,12 @@ function centerPopupInView(marker) {
   panPopupInView(marker.getPopup()?.getElement(), true);
 }
 
-function isFocusedMapMarker(marker) {
+// Only the followed aircraft is kept centered on popup refresh. Selection no
+// longer creates a single pop-up focus; every selected aircraft has a HUD.
+function isFollowedMapMarker(marker) {
   if (!marker || replayActive) return false;
   const addr = marker._data?.address;
-  return !!addr && activeMapFocusAddress() === addr;
+  return !!addr && followedAddress === addr;
 }
 
 // A focused aircraft stays at the map center. Shift only the popup element so
@@ -6196,7 +6132,7 @@ function keepOpenPopupAboveBar(marker) {
   if (!marker?.isPopupOpen()) return;
   requestAnimationFrame(() => {
     if (!marker.isPopupOpen()) return;
-    if (isFocusedMapMarker(marker)) centerFocusedPopupInView(marker);
+    if (isFollowedMapMarker(marker)) centerFocusedPopupInView(marker);
     else keepPopupAboveBottomBar(marker.getPopup()?.getElement());
   });
 }
@@ -6225,7 +6161,7 @@ function markerIcon(a) {
   const type = getResolvedType(a);
   const angle = (a.course == null || type === 15) ? 0 : a.course;
   const emergClass = isEmergency(a) ? ' emergency' : '';
-  const focused = !replayActive && activeMapFocusAddress() === a.address;
+  const focused = isLiveHudActive(a.address);
   const trackColor = selectedTracks.get(a.address)?.color || THEME.accent;
   const name = esc(displayName(a));
   let svgPath = ICONS.default;
@@ -6299,7 +6235,7 @@ function markerLabelKey() {
   const size = map.getSize ? map.getSize() : { x: 0, y: 0 };
   const parts = [
     map.getZoom(), size.x, size.y, bbox,
-    markers.size, replayActive ? 1 : 0, activeMapFocusAddress() || ''
+    markers.size, replayActive ? 1 : 0, followedAddress || ''
   ];
   let selected = '';
   for (const key of selectedTracks.keys()) selected += `${key},`;
@@ -6372,12 +6308,11 @@ function updateMarkerLabels() {
     });
     if (replayFocusMarker) collect(replayFocusMarker, 5);
   } else {
-    const focusAddr = activeMapFocusAddress();
     for (const m of markers.values()) {
       const a = m._data;
       if (!a) continue;
       const priority = (isEmergency(a) ? 4 : 0) + (selectedTracks.has(a.address) ? 2 : 0) +
-        (pinnedAircraft.has(a.address) ? 1 : 0) + (focusAddr === a.address ? 8 : 0);
+        (pinnedAircraft.has(a.address) ? 1 : 0) + (followedAddress === a.address ? 8 : 0);
       collect(m, priority);
     }
   }
@@ -6536,7 +6471,7 @@ function refreshOpenPopupForAddress(address) {
   m._popupSig = html;
   m.setPopupContent(html);
   if (m._trackerMarker) keepOpenPopupAboveBar(m);
-  else if (isFocusedMapMarker(m)) requestAnimationFrame(() => centerFocusedPopupInView(m));
+  else if (isFollowedMapMarker(m)) requestAnimationFrame(() => centerFocusedPopupInView(m));
   else requestAnimationFrame(() => centerPopupInView(m));
 }
 
@@ -6781,11 +6716,10 @@ function ensureSearchResultMarker(a) {
         d.addEventListener('toggle', d.onTogglePopupDetails);
       }
       requestAnimationFrame(() => {
-        if (isFocusedMapMarker(m)) centerFocusedPopupInView(m);
+        if (isFollowedMapMarker(m)) centerFocusedPopupInView(m);
         else centerPopupInView(m);
       });
     });
-    recenterFocusedMarkerOnClose(m);
     m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
     setMeasurePopupDetached(m, measureMode);
     searchResultGroup.addLayer(m);
@@ -6812,7 +6746,7 @@ function rowSignature(a) {
     statusText, statusColor(a, statusText),
     track ? track.color : '', pinnedAircraft.has(a.address) ? 1 : 0,
     followedAddress === a.address ? 1 : 0,
-    !replayActive && activeMapFocusAddress() === a.address ? 1 : 0,
+    isLiveHudActive(a.address) ? 1 : 0,
     rxStats ? rxStats.count : '',
     a.weather ? JSON.stringify(a.weather) : '',
     a.receivedAtMs,
@@ -6823,8 +6757,7 @@ function buildRowHtml(a, now) {
   const ageSec = Math.max(0, Math.floor((now - a.receivedAtMs) / 1000));
   const trackEntry = selectedTracks.get(a.address);
   const isSelected = trackEntry ? ' selected' : '';
-  const isFocused = !replayActive && activeMapFocusAddress() === a.address;
-  const focusedClass = isFocused ? ' focused' : '';
+  const focusedClass = isLiveHudActive(a.address) ? ' focused' : '';
   const isPinned = pinnedAircraft.has(a.address);
   const pinnedClass = isPinned ? ' pinned' : '';
   const emergClass = isEmergency(a) ? ' emergency' : '';
@@ -6978,7 +6911,7 @@ function syncLiveMarkers(visible, keep, now) {
     const key = a.address;
     const emerg = isEmergency(a);
     const trackColor = selectedTracks.get(key)?.color || '';
-    const focusedLive = !replayActive && activeMapFocusAddress() === key;
+    const focusedLive = isLiveHudActive(key);
     const iconSig = liveMarkerIconSig(a, focusedLive);
     let m = markers.get(key);
 
@@ -7013,11 +6946,10 @@ function syncLiveMarkers(visible, keep, now) {
           d.addEventListener('toggle', d.onTogglePopupDetails);
         }
         requestAnimationFrame(() => {
-        if (isFocusedMapMarker(m)) centerFocusedPopupInView(m);
+        if (isFollowedMapMarker(m)) centerFocusedPopupInView(m);
         else centerPopupInView(m);
       });
       });
-      recenterFocusedMarkerOnClose(m);
       m.bindPopup(() => popup(m._data), { ...POPUP_OPTIONS, maxWidth: 360, autoPan: false, keepInView: false });
       setMeasurePopupDetached(m, measureMode);
       markers.set(key, m);
@@ -7078,13 +7010,12 @@ function renderAircraftList(listVisible, now) {
   const byName = (a, b) =>
     displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base', numeric: true });
   const sorted = listVisible.slice().sort((a, b) => {
-    // Emergency rows stay first. The focused/followed aircraft comes next,
-    // followed by aircraft with an active track; pinned rows and the selected
-    // sort only order the remaining rows (and rows within each group).
+    // Emergency rows stay first. The followed aircraft comes next, followed by
+    // every aircraft with an active track; pinned rows and the selected sort
+    // only order the remaining rows (and rows within each group).
     const ea = isEmergency(a) ? 1 : 0, eb = isEmergency(b) ? 1 : 0;
     if (ea !== eb) return eb - ea;
-    const focusAddr = activeMapFocusAddress();
-    const fa = focusAddr === a.address ? 1 : 0, fb = focusAddr === b.address ? 1 : 0;
+    const fa = followedAddress === a.address ? 1 : 0, fb = followedAddress === b.address ? 1 : 0;
     if (fa !== fb) return fb - fa;
     const ta = selectedTracks.has(a.address) ? 1 : 0, tb = selectedTracks.has(b.address) ? 1 : 0;
     if (ta !== tb) return tb - ta;
@@ -7202,7 +7133,9 @@ function finishMarkerBookkeeping(consumedSearchBypass) {
   if (pendingHashSelect && markers.has(pendingHashSelect)) {
     const target = pendingHashSelect;
     pendingHashSelect = null;
-    toggleSelection(target, true);
+    if (!selectedTracks.has(target)) toggleSelection(target, false);
+    revealMapForListAction();
+    openAircraftOnMap(target);
   }
   for (const addr of consumedSearchBypass) oneTimeSearchBypass.delete(addr);
 }
@@ -8861,8 +8794,7 @@ async function loadReplaySlice() {
 
 function setReplayMode(on, opts = {}) {
   replayActive = on;
-  // Replay owns its own focused marker; do not restore a stale list selection.
-  mapFocusAddress = null;
+  // Replay owns its own focused marker; live selection/HUD is gated by replayActive.
   renderFeedStatusBanner();
   $('btnReplay').classList.toggle('active', on);
   $('btnReplay').setAttribute('aria-pressed', String(on));
