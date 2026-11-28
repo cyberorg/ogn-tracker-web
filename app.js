@@ -4377,10 +4377,12 @@ function roundedTrackPoints(points, trimPx = S3D_TRACK_CORNER_TRIM_PX) {
       if (s === 0) { out.push(p0.slice()); continue; }
       const t = s / steps, u = 1 - t;
       const p = mix(p0, p2, t);
-      p[0] = (u * u * p0xy[0] + 2 * u * t * cur[0] +
-        t * t * (cur[0] + outDir[0] * trim)) / mPerLat;
-      p[1] = (u * u * p0xy[1] + 2 * u * t * cur[1] +
-        t * t * (cur[1] + outDir[1] * trim)) / mPerLon;
+      // xy is [easting, northing] in metres; Leaflet points are [lat, lon],
+      // so northing maps back to index 0 and easting to index 1.
+      p[0] = (u * u * p0xy[1] + 2 * u * t * cur[1] +
+        t * t * (cur[1] + outDir[1] * trim)) / mPerLat;
+      p[1] = (u * u * p0xy[0] + 2 * u * t * cur[0] +
+        t * t * (cur[0] + outDir[0] * trim)) / mPerLon;
       out.push(p);
     }
     roundedCorners++;
