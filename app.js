@@ -4697,7 +4697,7 @@ function parseAprsLine(line, timestampMs) {
 
   return {
     lat, lon, id: liveLabel, liveLabel, registration: '', callsign: '', model: '', ddbAircraftType: '',
-    altitude, speed, course, climb: climb ? Number(climb.toFixed(1)) : null,
+    altitude, speed, course, climb: climb != null ? Number(climb.toFixed(1)) : null,
     snr, weather, type, receiver, address: liveLabel.toLowerCase(), ognId, ddbId, receivedAtMs: timestampMs
   };
 }
@@ -5631,11 +5631,21 @@ function matchesAircraftSearch(a, q) {
   return tokens.every(token => text.includes(token));
 }
 
+function clearHashSelectionBypass() {
+  // A shared/bookmarked aircraft is honored only until the user changes the
+  // search or type filters. After that it must obey the same rules as everything
+  // else, including last-known cache entries.
+  pendingHashSelect = null;
+  hashSelectAddress = null;
+}
+
 function filtered() {
   const q = $('search').value.trim().toLowerCase();
   const selectedTypes = getSelectedTypes();
+  const hashBypass = pendingHashSelect && !q ? pendingHashSelect : null;
+  const searchBypass = q ? null : oneTimeSearchBypass;
   return aircraft.filter(a => {
-    if (a.address === pendingHashSelect || lastKnownCache.has(a.address) || oneTimeSearchBypass.has(a.address)) return true;
+    if (a.address === hashBypass || searchBypass?.has(a.address)) return true;
     if (!matchesAircraftSearch(a, q)) return false;
     // An explicit search should find the aircraft even when its type is
     // unchecked in the preference filter; emergencies always stay visible.
@@ -6516,6 +6526,8 @@ async function fetchSounding(force = false) {
   if (!soundingIsOpen()) return;
   const params = soundingParamsForBounds(map.getBounds());
   const key = params.toString();
+  // Do not show the previous valley's profile while a new viewport loads.
+  if (lastSoundingData && lastSoundingData._key !== key) lastSoundingData = null;
   if (!force && key === lastSoundingBoundsKey) return;
   lastSoundingBoundsKey = key;
 
@@ -7815,6 +7827,7 @@ $('search').addEventListener('input', () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     const q = $('search').value.trim();
+    clearHashSelectionBypass();
     render();
     if (!q) {
       clearSearch24h();
@@ -7830,6 +7843,7 @@ $('search').addEventListener('input', () => {
 });
 $('btnClearSearch').addEventListener('click', () => {
   $('search').value = '';
+  clearHashSelectionBypass();
   updateSearchUi();
   clearSearch24h();
   $('listHint').textContent = '';
@@ -7845,6 +7859,7 @@ $('listSort').addEventListener('change', () => {
 $('type').addEventListener('change', e => {
   const cb = e.target.closest('input[type="checkbox"]');
   if (!cb) return;
+  clearHashSelectionBypass();
   const boxes = [...$('type').querySelectorAll('input[type="checkbox"]')];
   const allBox = boxes.find(b => b.value === 'all');
   if (cb.value === 'all') {
@@ -7861,7 +7876,7 @@ $('type').addEventListener('change', e => {
   // Keep tracks for aircraft still visible under the new type selection.
   const visible = new Set(filtered().map(a => a.address));
   for (const addr of [...selectedTracks.keys()]) {
-    if (!visible.has(addr) && addr !== pendingHashSelect && !oneTimeSearchBypass.has(addr) && !lastKnownCache.has(addr)) {
+    if (!visible.has(addr) && !oneTimeSearchBypass.has(addr)) {
       removeTrack(addr);
     }
   }
