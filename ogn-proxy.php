@@ -91,6 +91,90 @@ function device_group_key(string $ddbId, string $raw, string $fallbackId): strin
     return $hex !== '' ? 'hex:' . $hex : 'id:' . strtolower($fallbackId);
 }
 
+function track_point_distance_m(array $a, array $b): float {
+    return sounding_haversine_km((float)$a['lat'], (float)$a['lon'], (float)$b['lat'], (float)$b['lon']) * 1000.0;
+}
+
+/**
+ * Alias merging can produce two rows at the same second when OGN/FLR/FNT
+ * prefixes disagree, and one relay can occasionally report an isolated bad
+ * fix. Keep one point per timestamp, preferring the fix that fits the
+ * surrounding track, then drop single-sample excursions whose neighbours
+ * agree with each other. Without this, a one-second 1 km detour is drawn as a
+ * long straight spike in both 2D and 3D.
+ *
+ * @param array<int,array{id:string,lat:float,lon:float,alt:?float,ts:int}> $rows
+ * @return array<int,array{id:string,lat:float,lon:float,alt:?float,ts:int}>
+ */
+function clean_merged_track_rows(array $rows, string $preferredId): array {
+    if (count($rows) < 2) return $rows;
+    usort($rows, static function (array $a, array $b) use ($preferredId): int {
+        if ($a['ts'] !== $b['ts']) return $a['ts'] <=> $b['ts'];
+        $aPref = $a['id'] === $preferredId ? 0 : 1;
+        $bPref = $b['id'] === $preferredId ? 0 : 1;
+        return $aPref <=> $bPref ?: strcmp($a['id'], $b['id']);
+    });
+
+    $groups = [];
+    foreach ($rows as $row) $groups[(int)$row['ts']][] = $row;
+    ksort($groups);
+    $timestamps = array_keys($groups);
+    $count = count($timestamps);
+
+    $representatives = [];
+    foreach ($timestamps as $i => $ts) {
+        $group = $groups[$ts];
+        if (count($group) === 1) {
+            $representatives[] = $group[0];
+            continue;
+        }
+        $ref = $i > 0 ? $representatives[$i - 1] : null;
+        if ($i < $count - 1) {
+            $next = $groups[$timestamps[$i + 1]];
+            $nlat = 0.0;
+            $nlon = 0.0;
+            foreach ($next as $row) { $nlat += (float)$row['lat']; $nlon += (float)$row['lon']; }
+            $nlat /= count($next);
+            $nlon /= count($next);
+            if ($ref !== null) {
+                $ref = ['lat' => ((float)$ref['lat'] + $nlat) / 2.0, 'lon' => ((float)$ref['lon'] + $nlon) / 2.0];
+            } else {
+                $ref = ['lat' => $nlat, 'lon' => $nlon];
+            }
+        }
+        $best = $group[0];
+        $bestDist = $ref === null ? INF : track_point_distance_m($best, $ref);
+        foreach ($group as $row) {
+            $d = $ref === null ? 0.0 : track_point_distance_m($row, $ref);
+            if ($d + 1e-9 < $bestDist) { $best = $row; $bestDist = $d; }
+        }
+        $representatives[] = $best;
+    }
+
+    $out = [];
+    foreach ($representatives as $i => $row) {
+        if ($i === 0 || $i === $count - 1) { $out[] = $row; continue; }
+        $prev = $out[count($out) - 1];
+        $next = $representatives[$i + 1];
+        $dPrev = track_point_distance_m($prev, $row);
+        $dNext = track_point_distance_m($row, $next);
+        $dAround = track_point_distance_m($prev, $next);
+        $dtPrev = (int)$row['ts'] - (int)$prev['ts'];
+        $dtNext = (int)$next['ts'] - (int)$row['ts'];
+        $spike = $dtPrev > 0 && $dtPrev <= 120 && $dtNext > 0 && $dtNext <= 120
+            && $dAround <= 250.0 && $dPrev >= 300.0 && $dNext >= 300.0
+            && $dPrev >= 4.0 * $dAround && $dNext >= 4.0 * $dAround;
+        if (!$spike && $prev['alt'] !== null && $row['alt'] !== null && $next['alt'] !== null) {
+            $altPrev = abs((float)$row['alt'] - (float)$prev['alt']);
+            $altNext = abs((float)$next['alt'] - (float)$row['alt']);
+            $altAround = abs((float)$next['alt'] - (float)$prev['alt']);
+            if ($altAround <= 100.0 && $altPrev >= 200.0 && $altNext >= 200.0) $spike = true;
+        }
+        if (!$spike) $out[] = $row;
+    }
+    return $out;
+}
+
 /**
  * All stored aircraft IDs belonging to the same device as $id. Used by replay
  * follow filtering so a followed OGN alias also sees FLR/FNT history.
@@ -812,14 +896,14 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
     if ($since !== false && $since !== null) {
         $cutoff     = max($now - 86400, min($now, $since));
-        $cacheKey   = 'trk2_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
+        $cacheKey   = 'trk3_' . md5($id . '_since_' . $cutoff . ($full ? '_full' : ''));
         $metaWindow = max(0, $now - $cutoff);
     } else {
         $window = filter_input(INPUT_GET, 'window', FILTER_VALIDATE_INT);
         if ($window === false || $window === null) $window = 900;
         $window     = max(60, min(86400, $window));
         $cutoff     = $now - $window;
-        $cacheKey   = 'trk2_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
+        $cacheKey   = 'trk3_' . md5($id . '_win_' . $window . ($full ? '_full' : ''));
         $metaWindow = $window;
     }
 
@@ -843,7 +927,7 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
 
         $placeholders = implode(',', array_fill(0, count($trackIds), '?'));
         $stmt = $pdo->prepare('
-            SELECT lat, lon, alt, ts
+            SELECT id, lat, lon, alt, ts
             FROM tracks
             WHERE id IN (' . $placeholders . ') AND ts >= ?
             ORDER BY ts ASC
@@ -853,14 +937,20 @@ if (isset($_GET['track']) && $_GET['track'] === '1') {
         $execParams[] = $cutoff;
         $stmt->execute($execParams);
 
-        $points = [];
+        $rows = [];
         while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            $points[] = [
-                (float)$row['lat'],
-                (float)$row['lon'],
-                $row['alt'] !== null ? (float)$row['alt'] : null,
-                (int)$row['ts'],
+            $rows[] = [
+                'id' => (string)$row['id'],
+                'lat' => (float)$row['lat'],
+                'lon' => (float)$row['lon'],
+                'alt' => $row['alt'] !== null ? (float)$row['alt'] : null,
+                'ts' => (int)$row['ts'],
             ];
+        }
+        $rows = clean_merged_track_rows($rows, $id);
+        $points = [];
+        foreach ($rows as $row) {
+            $points[] = [$row['lat'], $row['lon'], $row['alt'], $row['ts']];
         }
 
         $total = count($points);
