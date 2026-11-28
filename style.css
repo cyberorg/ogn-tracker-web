@@ -55,7 +55,7 @@ button{cursor:pointer;font-size:13px}button:hover{border-color:var(--accent)}but
 main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .map-wrap{position:relative;height:100%;width:100%;min-height:0}
 #map{height:100%;width:100%;background:#dce5e8;touch-action:none}
-#map .leaflet-marker-icon,#map .leaflet-marker-shadow,#map .marker-cluster{touch-action:none}
+#map .leaflet-marker-icon,#map .leaflet-marker-shadow,#map .marker-cluster,#map .ogn-cluster,#map .leaflet-marker-icon *,#map .ogn-cluster *{touch-action:none}
 .map-wrap.has-bottom-bar #map{height:calc(100% - var(--bottom-bar-space,0px))}
 #map3d{position:absolute;inset:0;width:100%;height:100%;z-index:400;background:var(--bg);touch-action:none}
 #map3d[hidden]{display:none!important}
@@ -230,6 +230,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .map-wrap .map-attribution[open]{touch-action:none}
 .map-wrap.has-bottom-bar .map-attribution{bottom:calc(var(--edge-gutter) + var(--bottom-bar-space,0px))}
 .ogn-3d-dom-marker{position:absolute;left:0;top:0;z-index:5;cursor:pointer;overflow:visible;user-select:none;touch-action:none}
+.ogn-3d-dom-marker *{touch-action:none}
 .ogn-3d-camera-moving .ogn-3d-dom-marker{will-change:transform}
 .ogn-3d-dom-marker.focused{z-index:20!important}
 .ogn-3d-dom-marker .glider-wrap{background:transparent!important;border:0!important;box-shadow:none!important}

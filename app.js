@@ -415,9 +415,27 @@ const map = L.map('map', { zoomControl: false, closePopupOnClick: false, minZoom
 // Dense marker fields are part of the map, so two fingers there must zoom the
 // map rather than the page. CSS touch-action handles modern browsers; the
 // legacy gesture/touch guards cover WebKit and targets such as DOM markers.
+function isMapTouchNode(node) {
+  if (!node || node.nodeType !== 1) return false;
+  if (node.id === 'map' || node.id === 'map3d') return true;
+  return !!node.classList && node.classList.contains('ogn-3d-dom-marker');
+}
 function mapTouchTarget(event) {
-  const el = event.target && typeof event.target.closest === 'function' ? event.target : null;
-  return !!el && !!el.closest('#map, #map3d');
+  if (!event) return false;
+  // Marker touches often land on an inner SVG/path. Element.closest() is not
+  // reliable for SVG targets on every mobile browser, so check the composed
+  // path first and fall back to a manual ancestor walk.
+  if (typeof event.composedPath === 'function') {
+    for (const node of event.composedPath()) {
+      if (isMapTouchNode(node)) return true;
+    }
+  }
+  let node = event.target;
+  while (node) {
+    if (isMapTouchNode(node)) return true;
+    node = node.parentNode || node.host;
+  }
+  return false;
 }
 function preventMapPageZoomTouch(event) {
   if (!mapTouchTarget(event) || event.touches.length < 2) return;
