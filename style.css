@@ -111,7 +111,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .list-filter-pill[aria-expanded="true"]::after{content:' ▴'}
 .list-filter-pill:hover{background:var(--hover);color:var(--accent)}
 .section-head-toggle{padding:0}
-.section-toggle-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px 7px;background:var(--control-bg);border:0;color:var(--text);cursor:pointer;font:inherit;text-align:left;caret-color:transparent;user-select:none}
+.section-toggle-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px 7px;background:var(--panel);border:0;color:var(--text);cursor:pointer;font:inherit;text-align:left;caret-color:transparent;user-select:none}
 .section-toggle-btn:hover{background:#1b2835}
 .section-meta{display:inline-flex;align-items:center;gap:8px}
 .section-caret{color:var(--muted);font-size:11px;transition:transform .15s ease;line-height:1}
