@@ -2963,7 +2963,7 @@ function sync3DReplayPoints() {
     const key = `rpts:${p.id}`;
     seen.add(key);
     const name = esc(p.label);
-    const iconHtml = `<div class="glider-wrap" style="--marker-color:${THEME.yellow}"><div class="replay-dot"></div><div class="glider-label" title="${name}">${name}</div></div>`;
+    const iconHtml = `<div class="glider-wrap" style="${markerColorStyle(THEME.yellow)}"><div class="replay-dot"></div><div class="glider-label" title="${name}">${name}</div></div>`;
     const popupObj = {
       lat: p.lat,
       lon: p.lon,
@@ -3007,7 +3007,7 @@ function sync3DReplayFocus(pos) {
   }
   const label = esc(replayFocusLabel());
   const metricsText = replayFocusHudText(pos);
-  const iconHtml = `<div class="glider-wrap focused" style="--marker-color:#ec4899"><div class="replay-dot focused"></div><div class="glider-label" title="${label}">${label}</div>${focusHudHtml(metricsText)}</div>`;
+  const iconHtml = `<div class="glider-wrap focused" style="${markerColorStyle('#ec4899')}"><div class="replay-dot focused"></div><div class="glider-label" title="${label}">${label}</div>${focusHudHtml(metricsText)}</div>`;
   const baseAc = findAircraftByAddress(replayFollowAddress);
   const popupObj = {
     ...(baseAc || {}),
@@ -6148,6 +6148,13 @@ function signalBarsHtml(snr) {
   return `<span class="sig-bars ${cls}" title="Signal: ${snr.toFixed(1)} dB" aria-label="Signal ${snr.toFixed(1)} dB">${items}</span>`;
 }
 
+// Keep the focus halo derived from the marker/track colour so the ring around
+// a selected aircraft matches its list dot and track line.
+function markerColorStyle(color) {
+  const hex = /^#[0-9a-f]{6}$/i.test(String(color)) ? String(color) : THEME.accent;
+  return `--marker-color:${hex};--halo-ring:${hex}55;--halo-glow:${hex}aa`;
+}
+
 // Shared signature for 2D icons, 3D DOM icons, and label scheduling. Keeping
 // this in one place lets both renderers skip HTML rebuilds when nothing that
 // affects the marker image changed.
@@ -6176,7 +6183,7 @@ function markerIcon(a) {
   }
   return L.divIcon({
     className: `glider-icon${focused ? ' focused' : ''}`, iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -24],
-    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}" style="--marker-color:${trackColor}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div>${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
+    html: `<div class="glider-wrap${emergClass}${focused ? ' focused' : ''}" style="${markerColorStyle(trackColor)}"><svg viewBox="0 0 24 24" style="transform:rotate(${angle}deg)" aria-hidden="true"><path d="${svgPath}"/></svg><div class="glider-label" title="${name}">${name}</div>${focused ? focusHudHtml(liveFocusHudText(a)) : ''}</div>`
   });
 }
 

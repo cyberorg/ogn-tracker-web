@@ -186,21 +186,21 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 350px;min-height:0}
 .popup-details[open] summary{margin-bottom:4px}
 .snr-badge{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10px;font-weight:700;margin-left:4px;vertical-align:middle}
 .snr-strong{background:#1b4d3e;color:var(--accent);border:1px solid #2d7a63}.snr-good{background:#4a3d1a;color:var(--yellow);border:1px solid #7d672a}.snr-weak{background:#4d2024;color:var(--red);border:1px solid #80333a}
-.glider-icon{background:transparent;border:0;overflow:visible}.glider-wrap{--marker-color:var(--accent);position:relative;width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid var(--marker-color);display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000);fill:var(--marker-color);stroke:#d9fff4;stroke-width:0.7}
+.glider-icon{background:transparent;border:0;overflow:visible}.glider-wrap{--marker-color:var(--accent);--halo-ring:#57d3b055;--halo-glow:#57d3b0aa;position:relative;width:30px;height:30px;border-radius:50%;background:#10212ddd;border:1px solid var(--marker-color);display:grid;place-items:center;box-shadow:0 2px 8px #0008}.glider-wrap svg{width:21px;height:21px;filter:drop-shadow(0 1px 1px #000);fill:var(--marker-color);stroke:#d9fff4;stroke-width:0.7}
 .glider-label,.replay-hud{position:absolute;padding:1px 5px;border:1px solid var(--line);border-radius:5px;background:#0c1620e6;color:var(--text);font:600 10px/1.2 system-ui,sans-serif;box-shadow:0 1px 5px #0009;white-space:nowrap;pointer-events:none}
 .glider-label{top:calc(100% + 5px);left:50%;transform:translateX(-50%);max-width:150px;overflow:hidden;text-overflow:ellipsis;opacity:0;visibility:hidden}
 .glider-icon.show-name .glider-label{opacity:1;visibility:visible}
 .replay-icon{background:transparent;border:0;overflow:visible;width:16px;height:16px}
 .replay-dot{width:12px;height:12px;margin:2px;border-radius:50%;background:var(--accent);border:2px solid var(--focus);box-shadow:0 1px 5px #0009}
-.replay-dot.focused{width:16px;height:16px;margin:0;background:#ec4899;border-color:#f472b6;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa,0 1px 5px #0009}
+.replay-dot.focused{width:16px;height:16px;margin:0;background:var(--marker-color);border-color:var(--marker-color);box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow),0 1px 5px #0009}
 .replay-icon .glider-label{top:calc(100% + 3px)}
 .replay-hud{left:50%;top:calc(100% + 24px);transform:translateX(-50%);z-index:2}
-/* Selected/followed aircraft: pink halo + always-on name and metric HUD. */
-.glider-wrap.focused{--marker-color:#f472b6;border-color:#f472b6;background:#2a1530e8;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa,0 2px 8px #0008}
-.glider-wrap.focused svg{fill:#f472b6}
+/* Selected/followed aircraft: halo in the marker/track colour + always-on name and metric HUD. */
+.glider-wrap.focused{border-color:var(--marker-color);background:#2a1530e8;box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow),0 2px 8px #0008}
+.glider-wrap.focused svg{fill:var(--marker-color)}
 .leaflet-marker-icon.glider-icon.focused,.leaflet-marker-icon.replay-icon.focused{z-index:9999!important}
 .glider-icon.focused .glider-label,.ogn-3d-dom-marker.focused .glider-label{opacity:1;visibility:visible}
-.ogn-3d-dom-marker.focused .glider-wrap{border:1px solid #f472b6!important;box-shadow:0 0 0 3px #ec489955,0 0 14px #ec4899aa!important}
+.ogn-3d-dom-marker.focused .glider-wrap{border:1px solid var(--marker-color)!important;box-shadow:0 0 0 3px var(--halo-ring),0 0 14px var(--halo-glow)!important}
 .focus-hud .hud-line{font-variant-numeric:tabular-nums}
 .glider-wrap.emergency{background:#3d1118ee;border:2px solid var(--red);animation:emergency-pulse 1.4s ease-out infinite}
 .glider-wrap.emergency svg{fill:#ff6b6b;stroke:#ffe0e0}
