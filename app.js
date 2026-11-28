@@ -175,14 +175,10 @@ function getCurrentTypesArray() {
   return chosen.length > 0 ? chosen : ['all'];
 }
 
-function isDefaultFilterState() {
-  const activeTypes = getCurrentTypesArray();
-  const searchQ = $('search') ? $('search').value.trim() : '';
-  const defaultTypes = ['para', 'wx'];
-  const typesMatch = activeTypes.length === defaultTypes.length && defaultTypes.every(t => activeTypes.includes(t));
-  return typesMatch &&
-    !searchQ &&
-    $('markerWindow').value === '900' &&
+function isDefaultPrefsState() {
+  // Type filters and search live outside the Preferences menu now, so they
+  // must not light the gear badge. Only in-menu preferences count.
+  return $('markerWindow').value === '900' &&
     $('trackWindow').value === '900' &&
     !varioTrackMode &&
     !baroEnabled &&
@@ -190,7 +186,7 @@ function isDefaultFilterState() {
 }
 
 function updateFilterBadge() {
-  $('mapFilterToggle').classList.toggle('has-badge', !isDefaultFilterState());
+  $('mapFilterToggle').classList.toggle('has-badge', !isDefaultPrefsState());
 }
 
 function updateSearchUi() {
@@ -8915,16 +8911,19 @@ function enterListMode() {
   // Leave the document where it is: the fixed sheet slides over the map that
   // is already on screen, instead of jumping down to the list's flow position.
   rootEl.classList.remove('list-exit', 'list-snap');
-  rootEl.classList.add('list-mode', 'list-enter');
+  rootEl.classList.add('list-mode', 'list-enter', 'list-snap');
   sync3DMapVisibility();
   if (listForTopBtn) listForTopBtn.scrollTop = 0;
   syncStickyTop();
   syncScrollListTopBtn();
-  // Register the offscreen translateY(100%) start state in this task, then
-  // remove list-enter immediately. Entry and exit then begin in the same JS
-  // task, with the same 240 ms transition and easing — no extra frame on entry.
+  // Commit the offscreen translateY(100%) start state with transitions
+  // disabled. Adding list-enter with the transition active itself starts a
+  // none -> 100% transition; removing it immediately reverses a just-started
+  // transition, so entry felt different from exit. With list-snap suppressing
+  // the transition during setup, both directions now animate from a committed
+  // 100% to 0 with the same 240 ms duration and easing in the same JS task.
   void sidebar.offsetWidth;
-  rootEl.classList.remove('list-enter');
+  rootEl.classList.remove('list-enter', 'list-snap');
 }
 
 function exitListMode(returnToMap) {

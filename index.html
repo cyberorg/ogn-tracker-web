@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="style.css?v=20261128zzux11">
+<link rel="stylesheet" href="style.css?v=20261128zzux12">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -182,6 +182,7 @@
         <button type="button" id="feedStatusRetry" class="feed-status-retry">Retry</button>
       </div>
       <div class="status" aria-live="polite" aria-atomic="true"><i id="statusDot" class="dot" aria-hidden="true"></i><span id="statusText">Connecting…</span><span id="statusUpdated" class="status-updated"></span></div>
+      <div class="list-back-to-map-row"><button type="button" id="listBackToMap" class="list-back-to-map" aria-label="Return to map" title="Return to map">↑</button></div>
       <div class="filters">
         <input id="search" class="search" type="search" placeholder="Find callsign / registration…" aria-label="Search aircraft">
         <button type="button" id="btnClearSearch" class="clear-search-btn" aria-label="Clear search" hidden>Clear</button>
@@ -219,11 +220,10 @@
           <label class="type-option"><input type="checkbox" value="fanet"><span>FANET</span></label>
           <label class="type-option"><input type="checkbox" value="other"><span>Other</span></label>
           <label class="type-option"><input type="checkbox" value="station"><span>Stations</span></label>
-          <label class="type-option type-all"><input type="checkbox" value="all"><span>All aircraft</span></label>
+          <label class="type-option type-all"><input type="checkbox" value="all"><span>All</span></label>
         </div>
       </div>
     </div>
-    <div class="list-back-to-map-row"><button type="button" id="listBackToMap" class="list-back-to-map" aria-label="Return to map" title="Return to map">↑</button></div>
     <div class="aircraft-list" id="aircraftList" role="listbox" aria-label="Aircraft and stations"><div class="empty">Waiting for live data...</div></div>
     <button id="scrollListTopBtn" class="scroll-list-top-btn" type="button" aria-label="Scroll aircraft list to top" title="Scroll aircraft list to top" hidden>↑</button>
     <div class="footer">Data is collected from OGN APRS-IS. Updates every 5 seconds. Not for collision avoidance or in-flight separation. · <a href="https://paratracker.in" target="_blank" rel="noopener noreferrer" class="footer-link">paratracker.in</a> · <a href="https://github.com/cyberorg/ogn-tracker" target="_blank" rel="noopener noreferrer" class="footer-link">GitHub</a></div>
@@ -236,7 +236,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="tz-lookup.js?v=20261128zzux11"></script>
-<script src="app.js?v=20261128zzux11"></script>
+<script src="tz-lookup.js?v=20261128zzux12"></script>
+<script src="app.js?v=20261128zzux12"></script>
 </body>
 </html>
