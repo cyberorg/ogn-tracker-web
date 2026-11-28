@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css">
-<link rel="stylesheet" href="style.css?v=20261128zzperf5">
+<link rel="stylesheet" href="style.css?v=20261128zzux1">
 </head>
 <body>
 <div class="app header-collapsed">
@@ -172,6 +172,7 @@
       <button id="replayRange" type="button" aria-label="Replay window: 15m" title="Replay window: 15 minutes from slider (click to cycle)">15m</button>
       <button id="replaySpeedValue" class="replay-speed-readout" type="button" aria-label="Replay speed: 1×, tap to cycle speeds" title="Replay speed: 1× — tap to cycle 1× / 10× / 20× / 30× / 50×">1×</button>
       <button id="replayPrevTrack" type="button" title="Previous track" aria-label="Previous track" hidden>⏮ 1/1</button>
+      <span id="replayTrackBadge" class="replay-track-badge" aria-hidden="true" hidden>1/1</span>
       <button id="replayNextTrack" type="button" title="Next track" aria-label="Next track" hidden>⏭ 1/1</button>
       <label class="sr-only" for="replaySlider">Replay position within the selected window</label>
       <div id="replayTimeline" class="replay-timeline">
@@ -190,6 +191,7 @@
   </div>
   <aside class="sidebar" id="aircraftSidebar">
     <div class="sidebar-chrome">
+      <button type="button" id="listBackToMap" class="list-back-to-map" aria-label="Return to map" title="Return to map">↑ Map</button>
       <div id="feedStatusBanner" class="feed-status-banner" aria-live="off" hidden>
         <span id="feedStatusIcon" class="feed-status-icon" aria-hidden="true">⏱</span>
         <span class="feed-status-copy"><b id="feedStatusTitle"></b><span id="feedStatusDetail" class="feed-status-detail"></span></span>
@@ -235,7 +237,7 @@
 <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
 <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-<script src="tz-lookup.js?v=20261128zzperf5"></script>
-<script src="app.js?v=20261128zzperf5"></script>
+<script src="tz-lookup.js?v=20261128zzux1"></script>
+<script src="app.js?v=20261128zzux1"></script>
 </body>
 </html>

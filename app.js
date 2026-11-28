@@ -7692,6 +7692,18 @@ function replayWindow() {
   return { start, end: start + span };
 }
 
+// Re-anchor a replay window so the current playhead stays in view when the
+// range changes. The window is centred on the playhead, then clamped inside
+// the server's 24-hour history so it cannot extend into the future.
+const REPLAY_MAX_HISTORY_MS = 24 * 3600 * 1000;
+function replayWindowStartForAnchor(anchorMs, spanMs, nowMs) {
+  const span = Math.min(Math.max(spanMs, 1), REPLAY_MAX_HISTORY_MS);
+  const minStart = nowMs - REPLAY_MAX_HISTORY_MS;
+  const maxStart = nowMs - span;
+  const center = (Number.isFinite(anchorMs) ? anchorMs : nowMs) - span / 2;
+  return Math.max(minStart, Math.min(maxStart, center));
+}
+
 function currentReplayTrackIndex() {
   if (!replayTrackSegments.length) return -1;
   let idx = 0;
@@ -7745,6 +7757,11 @@ function syncReplayTrackUi() {
       btn.title = `${word} track (${label})`;
       btn.setAttribute('aria-label', btn.title);
     }
+  }
+  const badge = $('replayTrackBadge');
+  if (badge) {
+    badge.hidden = !hasTracks || count < 2;
+    if (!badge.hidden) badge.textContent = label;
   }
   syncReplayTrackMarks();
   if (replayActive) {
@@ -8652,6 +8669,7 @@ $('scrollToListBtn')?.addEventListener('click', () => {
 
 const appRoot = document.querySelector('.app');
 const siteHeader = $('siteHeader');
+const HEADER_AUTO_CLOSE_MS = 5000;
 let headerAutoCloseTimer = null;
 function syncHeaderUi() {
   if (!siteHeader) return;
@@ -8668,19 +8686,25 @@ function syncStickyTop() {
     `${siteHeader.getBoundingClientRect().height}px`
   );
 }
-function setHeaderCollapsed(collapsed) {
-  if (!appRoot) return;
-  appRoot.classList.toggle('header-collapsed', collapsed);
+function cancelHeaderAutoClose() {
   if (headerAutoCloseTimer !== null) {
     clearTimeout(headerAutoCloseTimer);
     headerAutoCloseTimer = null;
   }
-  if (!collapsed) {
-    headerAutoCloseTimer = setTimeout(() => {
-      headerAutoCloseTimer = null;
-      setHeaderCollapsed(true);
-    }, 5000);
-  }
+}
+function scheduleHeaderAutoClose() {
+  cancelHeaderAutoClose();
+  headerAutoCloseTimer = setTimeout(() => {
+    headerAutoCloseTimer = null;
+    setHeaderCollapsed(true);
+  }, HEADER_AUTO_CLOSE_MS);
+}
+function setHeaderCollapsed(collapsed, { persist = false } = {}) {
+  if (!appRoot) return;
+  appRoot.classList.toggle('header-collapsed', collapsed);
+  cancelHeaderAutoClose();
+  // Explicit user expansion stays open; only automatic expansions time out.
+  if (!collapsed && !persist) scheduleHeaderAutoClose();
   syncHeaderUi();
   syncStickyTop();
   requestAnimationFrame(() => {
@@ -8690,13 +8714,20 @@ function setHeaderCollapsed(collapsed) {
   });
 }
 siteHeader?.addEventListener('click', () => {
-  setHeaderCollapsed(!appRoot?.classList.contains('header-collapsed'));
+  setHeaderCollapsed(!appRoot?.classList.contains('header-collapsed'), { persist: true });
 });
 siteHeader?.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   e.preventDefault();
-  setHeaderCollapsed(!appRoot?.classList.contains('header-collapsed'));
+  setHeaderCollapsed(!appRoot?.classList.contains('header-collapsed'), { persist: true });
 });
+// Guard any future non-persistent expansion: hovering or focusing the header
+// restarts its timeout instead of letting it collapse under the pointer.
+for (const type of ['pointerenter', 'focusin']) {
+  siteHeader?.addEventListener(type, () => {
+    if (headerAutoCloseTimer !== null) scheduleHeaderAutoClose();
+  });
+}
 syncHeaderUi();
 syncStickyTop();
 window.addEventListener('resize', syncStickyTop);
@@ -8802,6 +8833,9 @@ function exitListMode(returnToMap) {
   }
 }
 
+// Explicit mobile escape hatch; swipe-down remains available as a secondary path.
+$('listBackToMap')?.addEventListener('click', () => exitListMode(true));
+
 /** Return to the visible map after a list action that targets an aircraft. */
 function revealMapForListAction() {
   if (!compactMenuQuery.matches) return;
@@ -8839,11 +8873,27 @@ syncListMode();
 // away, normal (desktop-like) scrolling resumes.
 let outsideSwipe = null;
 let suppressOutsideClick = false;
+let suppressOutsideClickTimer = null;
 const OUTSIDE_SWIPE_PX = 40;
+const SUPPRESS_OUTSIDE_CLICK_MS = 180;
+
+function clearOutsideClickSuppression() {
+  suppressOutsideClick = false;
+  if (suppressOutsideClickTimer !== null) {
+    clearTimeout(suppressOutsideClickTimer);
+    suppressOutsideClickTimer = null;
+  }
+}
+function suppressNextOutsideClick() {
+  if (suppressOutsideClickTimer !== null) clearTimeout(suppressOutsideClickTimer);
+  suppressOutsideClick = true;
+  suppressOutsideClickTimer = setTimeout(clearOutsideClickSuppression, SUPPRESS_OUTSIDE_CLICK_MS);
+}
+// A fresh deliberate touch ends the post-swipe suppression window immediately.
+document.addEventListener('touchstart', clearOutsideClickSuppression, { passive: true, capture: true });
 
 function triggerOutsideSwipe() {
-  suppressOutsideClick = true;
-  setTimeout(() => { suppressOutsideClick = false; }, 400);
+  suppressNextOutsideClick();
   revealAircraftList($('aircraftSidebar'));
 }
 
@@ -8891,7 +8941,7 @@ document.addEventListener('touchcancel', finishOutsideSwipe, { passive: true, ca
 // A swipe must not also activate the element it started on (header tap, button).
 document.addEventListener('click', (e) => {
   if (!suppressOutsideClick) return;
-  suppressOutsideClick = false;
+  clearOutsideClickSuppression();
   e.preventDefault();
   e.stopPropagation();
 }, true);
@@ -8930,8 +8980,7 @@ function finishChromeBackSwipe(e) {
   const y = changed ? changed.clientY : swipe.lastY;
   if (y - swipe.y < OUTSIDE_SWIPE_PX) return;
   swipe.fired = true;
-  suppressOutsideClick = true;
-  setTimeout(() => { suppressOutsideClick = false; }, 400);
+  suppressNextOutsideClick();
   exitListMode(true);
 }
 document.addEventListener('touchend', finishChromeBackSwipe, { passive: true, capture: true });
@@ -8966,8 +9015,7 @@ function finishListBackSwipe(e) {
   const y = changed ? changed.clientY : swipe.lastY;
   if (y - swipe.y < OUTSIDE_SWIPE_PX) return;
   swipe.fired = true;
-  suppressOutsideClick = true;
-  setTimeout(() => { suppressOutsideClick = false; }, 400);
+  suppressNextOutsideClick();
   exitListMode(true);
 }
 document.addEventListener('touchend', finishListBackSwipe, { passive: true, capture: true });
@@ -9346,11 +9394,11 @@ $('replayReverse').addEventListener('click', () => {
 $('replayRange').addEventListener('click', () => {
   const anchorMs = replayTsMs || replayTsFromSlider();
   replayRangeIndex = (replayRangeIndex + 1) % REPLAY_RANGE_LABELS.length;
-  replayWindowStartMs = anchorMs;
+  const span = replaySpanMs();
+  replayWindowStartMs = replayWindowStartForAnchor(anchorMs, span, serverNow());
   syncReplayRangeButton();
-  $('replaySlider').value = '0';
-  lastReplayScrubValue = null;
-  replayTsMs = replayWindow().start;
+  // Keep the playhead at its original time, inside the newly clamped window.
+  replayTsMs = Math.max(replayWindowStartMs, Math.min(replayWindowStartMs + span, anchorMs));
   updateReplaySliderFromTs();
   lastReplaySliceMinute = null;
   syncReplayTrackUi();
